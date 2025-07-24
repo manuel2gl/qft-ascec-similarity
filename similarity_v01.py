@@ -13,6 +13,11 @@ import pickle # Added for caching
 from scipy.spatial.transform import Rotation as R # Ensure R is imported like this!
 
 
+# Constants for Boltzmann distribution
+BOLTZMANN_CONSTANT_HARTREE_PER_K = 3.1668114e-6 # Hartree/K (k_B in atomic units)
+DEFAULT_TEMPERATURE_K = 298.15 # K (Room temperature)
+
+
 ### Embedded element masses dictionary ###
 element_masses = {
     "H": 1.008, "He": 4.0026, "Li": 6.94, "Be": 9.012, "B": 10.81,
@@ -39,10 +44,11 @@ def atomic_number_to_symbol(atomic_number):
     Converts an atomic number to its corresponding element symbol.
     This function is used consistently throughout the script for element symbol retrieval.
     """
+    # Corrected and complete periodic table symbols list
     periodic_table_symbols = [
         "X", "H", "He", "Li", "Be", "B", "C", "N", "O", "F", "Ne",
         "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
-        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Ni", "Cu", "Zn", "Ga",
+        "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn", "Ga",
         "Ge", "As", "Se", "Br", "Kr", "Rb", "Sr", "Y", "Zr", "Nb",
         "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd", "In", "Sn", "Sb",
         "Te", "I", "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm",
@@ -174,6 +180,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
                         min_dist_dh = dist_dh
                         donor_idx_for_h = i_d
             
+            # FIX: Changed 'donor_idx_for_covalently_bonded_h' to 'donor_idx_for_h'
             if donor_idx_for_h != -1 and min_dist_dh <= COVALENT_DH_SEARCH_DIST:
                 h_covalent_donors[i_h] = (donor_idx_for_h, min_dist_dh)
 
@@ -521,7 +528,7 @@ def extract_properties_from_logfile(logfile_path):
                         extracted_props['lumo_energy'] = lumo_energy
                         extracted_props['homo_lumo_gap'] = lumo_energy - homo_energy
                     else:
-                        print(f"  WARNING: HOMO/LUMO indices out of bounds or invalid moenergies conformation for {os.path.basename(logfile_path)}")
+                        print(f"  WARNING: HOMO/LUMO indices out of bounds or invalid moenergies configuration for {os.path.basename(logfile_path)}")
                 else:
                     print(f"  WARNING: 'homos' array or 'moenergies[0]' is empty/invalid for {os.path.basename(logfile_path)}")
             except Exception as e:
@@ -727,19 +734,19 @@ def calculate_rmsd(atomnos1, coords1, atomnos2, coords2):
 def post_process_clusters_with_rmsd(initial_clusters, rmsd_validation_threshold):
     """
     Refines property-based clusters by performing an RMSD validation within each.
-    Conformations failing the RMSD check are extracted into new single-conformation clusters.
+    Configurations failing the RMSD check are extracted into new single-configuration clusters.
 
     Args:
         initial_clusters (list): A list of lists/tuples, where each inner list/tuple
                                  represents a property-based cluster and contains
-                                 dictionaries of extracted data for each conformation.
+                                 dictionaries of extracted data for each configuration.
         rmsd_validation_threshold (float): The maximum allowed RMSD value (in Angstroms) for
-                                 conformations to remain in the same cluster.
+                                 configurations to remain in the same cluster.
 
     Returns:
         tuple: A tuple containing:
-               - list: A new list of validated multi-conformation clusters (members passed RMSD to rep).
-               - list: A list of individual outlier conformations (data dicts) that were split out.
+               - list: A new list of validated multi-configuration clusters (members passed RMSD to rep).
+               - list: A list of individual outlier configurations (data dicts) that were split out.
     """
     validated_main_clusters = []
     individual_outliers = []
@@ -757,9 +764,9 @@ def post_process_clusters_with_rmsd(initial_clusters, rmsd_validation_threshold)
             validated_main_clusters.append(current_property_cluster)
             continue
 
-        print(f"    Validating initial property cluster {current_property_cluster[0].get('_parent_global_cluster_id', 'N/A')} with {len(current_property_cluster)} conformations...")
+        print(f"    Validating initial property cluster {current_property_cluster[0].get('_parent_global_cluster_id', 'N/A')} with {len(current_property_cluster)} configurations...")
 
-        # Select the lowest energy conformation as the representative for this property cluster
+        # Select the lowest energy configuration as the representative for this property cluster
         # Fallback to filename for deterministic choice if Gibbs free energy is None
         representative_conf = min(current_property_cluster,
                                   key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
@@ -809,7 +816,7 @@ def post_process_clusters_with_rmsd(initial_clusters, rmsd_validation_threshold)
                 conf_member['_rmsd_pass_origin'] = 'first_pass_validated' # Mark as remaining in first pass
                 processed_members_filenames.add(conf_member['filename'])
             else:
-                # This conformation is an outlier from the first pass:
+                # This configuration is an outlier from the first pass:
                 print(f"    {conf_member['filename']} (RMSD={rmsd_val:.3f} Å) is an outlier from {representative_conf['filename']} (Threshold={rmsd_validation_threshold:.3f} Å).")
                 # Store the _parent_global_cluster_id of the representative, which is the original cluster
                 conf_member['_parent_global_cluster_id'] = representative_conf['_parent_global_cluster_id']
@@ -824,11 +831,11 @@ def post_process_clusters_with_rmsd(initial_clusters, rmsd_validation_threshold)
 
 def perform_second_rmsd_clustering(cluster_members_to_refine, rmsd_threshold):
     """
-    Performs a second RMSD-based clustering on a group of conformations (typically outliers
+    Performs a second RMSD-based clustering on a group of configurations (typically outliers
     from a previous RMSD pass, or validated clusters that need further refinement).
     
     Args:
-        cluster_members_to_refine (list): A list of conformation data dictionaries to re-cluster.
+        cluster_members_to_refine (list): A list of configuration data dictionaries to re-cluster.
         rmsd_threshold (float): The RMSD threshold for this second clustering step.
 
     Returns:
@@ -928,43 +935,84 @@ def perform_second_rmsd_clustering(cluster_members_to_refine, rmsd_threshold):
 # --- END: RMSD functions provided by user ---
 
 
-def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_dir, rmsd_threshold_value=None, hbond_count_for_original_cluster=None):
+def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_dir, rmsd_threshold_value=None, 
+                           hbond_count_for_original_cluster=None, weights=None):
     """
     Writes a combined .dat file for all members of a cluster, including comparison and RMSD context sections.
     The `dat_file_prefix` is the full desired name for the .dat file (e.g., 'cluster_12' or 'cluster_12_5').
     `hbond_count_for_original_cluster` is the number of hydrogen bonds for the initial group this cluster came from.
+    `weights` is a dictionary mapping feature names (user-friendly) to their weights, used for conditional printing.
     """
-    num_conformations = len(cluster_members_data)
+    if weights is None:
+        weights = {} # Ensure weights is a dict if not provided
+
+    num_configurations = len(cluster_members_data)
     
     dat_output_dir = os.path.join(output_base_dir, "extracted_data")
     os.makedirs(dat_output_dir, exist_ok=True)
 
     output_filename = os.path.join(dat_output_dir, f"{dat_file_prefix}.dat")
 
+    # Helper to check if a feature should be printed based on its weight
+    def should_print_feature(feature_key_in_data, user_friendly_name, weights_dict):
+        # Map internal data key to user-friendly name using FEATURE_MAPPING
+        # This is a reverse lookup, so iterate through FEATURE_MAPPING
+        mapped_user_friendly_name = None
+        for u_name, i_key in FEATURE_MAPPING.items():
+            # Special handling for rotational constants which are stored as an array
+            if user_friendly_name.startswith("rotational_constants") and i_key.startswith("rotational_constants"):
+                if user_friendly_name.endswith("_A") and i_key.endswith("_0"):
+                    mapped_user_friendly_name = u_name
+                    break
+                elif user_friendly_name.endswith("_B") and i_key.endswith("_1"):
+                    mapped_user_friendly_name = u_name
+                    break
+                elif user_friendly_name.endswith("_C") and i_key.endswith("_2"):
+                    mapped_user_friendly_name = u_name
+                    break
+            elif i_key == feature_key_in_data:
+                mapped_user_friendly_name = u_name
+                break
+        
+        # If not found in mapping, or if it's a non-clustering property (like num_hydrogen_bonds),
+        # assume it should be printed unless explicitly weighted to 0.0 by its user-friendly name.
+        if mapped_user_friendly_name is None:
+            # For properties not directly used in clustering features_for_scaling (like num_hydrogen_bonds, hbond_details)
+            # or properties that are just for display (like method, functional, etc.),
+            # they should always be printed unless explicitly zero-weighted by their display name.
+            if user_friendly_name in weights_dict and weights_dict[user_friendly_name] == 0.0:
+                return False
+            return True # Default to printing if not a mapped feature or not zero-weighted
+        
+        # For mapped features, check their weight
+        return weights_dict.get(mapped_user_friendly_name, 1.0) != 0.0
+
+
     with open(output_filename, 'w', newline='\n') as f:
-        # 1. Always write the separator at the very beginning of the file
+        # 1. Initial Header Separator
         f.write("=" * 90 + "\n\n")
 
-        # 2. Initial Clustering RMSD Context Section (if RMSD enabled and context exists)
+        rmsd_context_printed = False
+
+        # 2. Initial Clustering RMSD Context Section
         if rmsd_threshold_value is not None and cluster_members_data and '_first_rmsd_context_listing' in cluster_members_data[0] and cluster_members_data[0]['_first_rmsd_context_listing'] is not None:
             initial_rmsd_context = cluster_members_data[0]['_first_rmsd_context_listing']
             f.write("Initial Clustering RMSD Context (Before Refinement):\n")
-            f.write("Conformations from the original property cluster:\n")
+            f.write("Configurations from the original property cluster:\n")
             for item in initial_rmsd_context:
                 rmsd_val_str = f"({item['rmsd_to_rep']:.3f} Å)" if item['rmsd_to_rep'] is not None else "(N/A)"
                 f.write(f"    - {item['filename']} {rmsd_val_str}\n")
             f.write("\n")
             
-            # Clarify which initial property cluster this context refers to
             original_prop_cluster_label = cluster_members_data[0].get('_initial_cluster_label', 'N/A')
-            # Use the _parent_global_cluster_id for the user-friendly "Cluster Y" reference
             parent_global_cluster_id_for_display = cluster_members_data[0].get('_parent_global_cluster_id', 'N/A')
 
             hbond_context = f" (H-bonds {hbond_count_for_original_cluster})" if hbond_count_for_original_cluster is not None else ""
             f.write(f"RMSD values are relative to the lowest energy representative of this initial property group")
-            f.write("\n\n" + "=" * 90 + "\n\n")
+            f.write("\n\n")
+            rmsd_context_printed = True
 
-        # 3. Second RMSD Clustering Context Section (if applicable)
+        # 3. Second RMSD Clustering Context Section
         if rmsd_threshold_value is not None and cluster_members_data and \
            cluster_members_data[0].get('_rmsd_pass_origin') == 'second_pass_formed' and \
            cluster_members_data[0].get('_second_rmsd_context_listing') is not None:
@@ -974,12 +1022,11 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
             
             f.write("Second RMSD Clustering Context:\n")
             
-            # This is the 'Y' value we want in the summary line
             parent_global_cluster_id_for_display = cluster_members_data[0].get('_parent_global_cluster_id', 'N/A')
 
-            if num_conformations == 1:
-                f.write(f"This single conformation was either an outlier or remained a singleton after a second RMSD clustering step (threshold: {rmsd_threshold_value:.3f} Å).\n")
-                f.write(f"  It originated from original Cluster {parent_global_cluster_id_for_display}.\n") # Use the correct 'Y'
+            if num_configurations == 1:
+                f.write(f"This single configuration was either an outlier or remained a singleton after a second RMSD clustering step (threshold: {rmsd_threshold_value:.3f} Å).\n")
+                f.write(f"  It originated from original Cluster {parent_global_cluster_id_for_display}.\n")
                 
                 self_rmsd_info = next((item for item in second_rmsd_context if item['filename'] == cluster_members_data[0]['filename']), None)
                 if self_rmsd_info and self_rmsd_info['rmsd_to_rep'] is not None:
@@ -989,7 +1036,7 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
 
             else:
                 f.write(f"This cluster was formed by a second RMSD clustering step (threshold: {rmsd_threshold_value:.3f} Å).\n")
-                f.write(f"  It originated from original Cluster {parent_global_cluster_id_for_display}.\n") # Use the correct 'Y'
+                f.write(f"  It originated from original Cluster {parent_global_cluster_id_for_display}.\n")
                 f.write(f"Representative for this second-level cluster: {second_rmsd_rep_filename}\n")
                 f.write("RMSD values relative to this second-level cluster's representative:\n")
                 
@@ -997,80 +1044,92 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                     rmsd_val_str = f"({item['rmsd_to_rep']:.3f} Å)" if item['rmsd_to_rep'] is not None else "(N/A)"
                     f.write(f"    - {item['filename']} {rmsd_val_str}\n")
             f.write("\n")
+            rmsd_context_printed = True
+
+        # Separator after RMSD context (if any was printed)
+        if rmsd_context_printed:
             f.write("=" * 90 + "\n\n")
 
+        # 4. Cluster Summary Header (ALWAYS print this)
+        f.write(f"Cluster (represented by: {dat_file_prefix}) ({num_configurations} configurations)\n\n") 
+        for mol_data in cluster_members_data:
+            f.write(f"    - {mol_data['filename']}\n")
+        f.write("\n")
 
-        # 4. Comparison Section (ONLY for clusters with >1 conformation)
-        # This section provides an overview of property deviations WITHIN multi-conformation clusters.
-        if num_conformations > 1:
-            f.write(f"Cluster (represented by: {dat_file_prefix}) ({num_conformations} conformations)\n\n") 
+        # 5. Deviation Analysis (ONLY for clusters with >1 configuration)
+        if num_configurations > 1:
+            f.write("\nDeviation Analysis (Max-Min / |Mean|):\n")
+            if should_print_feature('final_electronic_energy', 'electronic_energy', weights) and all(d['final_electronic_energy'] is not None for d in cluster_members_data):
+                all_electronic_energies = [d['final_electronic_energy'] for d in cluster_members_data if d['final_electronic_energy'] is not None]
+                if all_electronic_energies: f.write(f"  Electronic Energy (Hartree) %Dev: {calculate_deviation_percentage(all_electronic_energies):.2f}%\n")
             
-            for mol_data in cluster_members_data:
-                f.write(f"    - {mol_data['filename']}\n")
-            f.write("\n")
-
-            # Gather all values for each descriptor to calculate deviations
-            all_electronic_energies = [d['final_electronic_energy'] for d in cluster_members_data if d['final_electronic_energy'] is not None]
-            all_gibbs_energies = [d['gibbs_free_energy'] for d in cluster_members_data if d['gibbs_free_energy'] is not None]
-            all_entropy = [d['entropy'] for d in cluster_members_data if d['entropy'] is not None]
-            all_homo_energies = [d['homo_energy'] for d in cluster_members_data if d['homo_energy'] is not None]
-            all_lumo_energies = [d['lumo_energy'] for d in cluster_members_data if d['lumo_energy'] is not None]
-            all_homo_lumo_gaps = [d['homo_lumo_gap'] for d in cluster_members_data if d['homo_lumo_gap'] is not None]
-            all_dipole_moments = [d['dipole_moment'] for d in cluster_members_data if d['dipole_moment'] is not None]
-            all_rg = [d['radius_of_gyration'] for d in cluster_members_data if d['radius_of_gyration'] is not None]
+            if should_print_feature('gibbs_free_energy', 'gibbs_free_energy', weights) and all(d['gibbs_free_energy'] is not None for d in cluster_members_data):
+                all_gibbs_energies = [d['gibbs_free_energy'] for d in cluster_members_data if d['gibbs_free_energy'] is not None]
+                if all_gibbs_energies: f.write(f"  Gibbs Free Energy (Hartree) %Dev: {calculate_deviation_percentage(all_gibbs_energies):.2f}%\n")
             
+            if should_print_feature('entropy', 'entropy', weights) and all(d['entropy'] is not None for d in cluster_members_data):
+                all_entropy = [d['entropy'] for d in cluster_members_data if d['entropy'] is not None]
+                if all_entropy: f.write(f"  Entropy (J/(mol·K) or a.u.): {calculate_deviation_percentage(all_entropy):.2f}%\n")
+            
+            if should_print_feature('homo_energy', 'homo_energy', weights) and all(d['homo_energy'] is not None for d in cluster_members_data):
+                all_homo_energies = [d['homo_energy'] for d in cluster_members_data if d['homo_energy'] is not None]
+                if all_homo_energies: f.write(f"  HOMO Energy (eV) %Dev: {calculate_deviation_percentage(all_homo_energies):.2f}%\n")
+            
+            if should_print_feature('lumo_energy', 'lumo_energy', weights) and all(d['lumo_energy'] is not None for d in cluster_members_data):
+                all_lumo_energies = [d['lumo_energy'] for d in cluster_members_data if d['lumo_energy'] is not None]
+                if all_lumo_energies: f.write(f"  LUMO Energy (eV) %Dev: {calculate_deviation_percentage(all_lumo_energies):.2f}%\n")
+            
+            if should_print_feature('homo_lumo_gap', 'homo_lumo_gap', weights) and all(d['homo_lumo_gap'] is not None for d in cluster_members_data):
+                all_homo_lumo_gaps = [d['homo_lumo_gap'] for d in cluster_members_data if d['homo_lumo_gap'] is not None]
+                if all_homo_lumo_gaps: f.write(f"  HOMO-LUMO Gap (eV) %Dev: {calculate_deviation_percentage(all_homo_lumo_gaps):.2f}%\n")
+            
+            if should_print_feature('dipole_moment', 'dipole_moment', weights) and all(d['dipole_moment'] is not None for d in cluster_members_data):
+                all_dipole_moments = [d['dipole_moment'] for d in cluster_members_data if d['dipole_moment'] is not None]
+                if all_dipole_moments: f.write(f"  Dipole Moment (Debye) %Dev: {calculate_deviation_percentage(all_dipole_moments):.2f}%\n")
+            
+            if should_print_feature('radius_of_gyration', 'radius_of_gyration', weights) and all(d['radius_of_gyration'] is not None for d in cluster_members_data):
+                all_rg = [d['radius_of_gyration'] for d in cluster_members_data if d['radius_of_gyration'] is not None]
+                if all_rg: f.write(f"  Radius of Gyration (Å) %Dev: {calculate_deviation_percentage(all_rg):.2f}%\n")
+            
+            # Rotational constants need special handling because they are an array
             all_rot_const_A = [d['rotational_constants'][0] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
             all_rot_const_B = [d['rotational_constants'][1] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
             all_rot_const_C = [d['rotational_constants'][2] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
 
-            all_first_vib_freqs = [d['first_vib_freq'] for d in cluster_members_data if d['first_vib_freq'] is not None]
-            all_last_vib_freqs = [d['last_vib_freq'] for d in cluster_members_data if d['last_vib_freq'] is not None]
-            all_num_hbonds = [d['num_hydrogen_bonds'] for d in cluster_members_data if d['num_hydrogen_bonds'] is not None]
-
-            # These deviation statistics are only meaningful for clusters with multiple members
-            f.write("\nDeviation Analysis (Max-Min / |Mean|):\n")
-            if all_electronic_energies:
-                f.write(f"  Electronic Energy (Hartree) %Dev: {calculate_deviation_percentage(all_electronic_energies):.2f}%\n")
-            if all_gibbs_energies:
-                f.write(f"  Gibbs Free Energy (Hartree) %Dev: {calculate_deviation_percentage(all_gibbs_energies):.2f}%\n")
-            if all_entropy:
-                f.write(f"  Entropy (J/(mol·K) or a.u.) %Dev: {calculate_deviation_percentage(all_entropy):.2f}%\n")
-            if all_homo_energies:
-                f.write(f"  HOMO Energy (eV) %Dev: {calculate_deviation_percentage(all_homo_energies):.2f}%\n")
-            if all_lumo_energies:
-                f.write(f"  LUMO Energy (eV) %Dev: {calculate_deviation_percentage(all_lumo_energies):.2f}%\n")
-            if all_homo_lumo_gaps:
-                f.write(f"  HOMO-LUMO Gap (eV) %Dev: {calculate_deviation_percentage(all_homo_lumo_gaps):.2f}%\n")
-            if all_dipole_moments:
-                f.write(f"  Dipole Moment (Debye) %Dev: {calculate_deviation_percentage(all_dipole_moments):.2f}%\n")
-            if all_rg:
-                f.write(f"  Radius of Gyration (Å) %Dev: {calculate_deviation_percentage(all_rg):.2f}%\n")
-            if all_rot_const_A:
+            if should_print_feature('rotational_constants_0', 'rotational_constants_A', weights) and all_rot_const_A:
                 f.write(f"  Rotational Constant A (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_A):.2f}%\n")
-            if all_rot_const_B:
+            if should_print_feature('rotational_constants_1', 'rotational_constants_B', weights) and all_rot_const_B:
                 f.write(f"  Rotational Constant B (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_B):.2f}%\n")
-            if all_rot_const_C:
+            if should_print_feature('rotational_constants_2', 'rotational_constants_C', weights) and all_rot_const_C:
                 f.write(f"  Rotational Constant C (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_C):.2f}%\n")
-            if all_first_vib_freqs:
-                f.write(f"  First Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_first_vib_freqs):.2f}%\n")
-            if all_last_vib_freqs:
-                f.write(f"  Last Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_last_vib_freqs):.2f}%\n")
-            if all_num_hbonds:
-                f.write(f"  Number of Hydrogen Bonds %Dev: {calculate_deviation_percentage(all_num_hbonds):.2f}%\n")
+            
+            if should_print_feature('first_vib_freq', 'first_vib_freq', weights) and all(d['first_vib_freq'] is not None for d in cluster_members_data):
+                all_first_vib_freqs = [d['first_vib_freq'] for d in cluster_members_data if d['first_vib_freq'] is not None]
+                if all_first_vib_freqs: f.write(f"  First Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_first_vib_freqs):.2f}%\n")
+            
+            if should_print_feature('last_vib_freq', 'last_vib_freq', weights) and all(d['last_vib_freq'] is not None for d in cluster_members_data):
+                all_last_vib_freqs = [d['last_vib_freq'] for d in cluster_members_data if d['last_vib_freq'] is not None]
+                if all_last_vib_freqs: f.write(f"  Last Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_last_vib_freqs):.2f}%\n")
+            
+            # num_hydrogen_bonds is not a clustering feature, but a property. It should appear if not zero-weighted.
+            if should_print_feature('num_hydrogen_bonds', 'num_hydrogen_bonds', weights) and all(d['num_hydrogen_bonds'] is not None for d in cluster_members_data):
+                all_num_hbonds = [d['num_hydrogen_bonds'] for d in cluster_members_data if d['num_hydrogen_bonds'] is not None]
+                if all_num_hbonds: f.write(f"  Number of Hydrogen Bonds %Dev: {calculate_deviation_percentage(all_num_hbonds):.2f}%\n")
+            
             f.write("\n")
-            f.write("=" * 90 + "\n\n")
+            
+        # Separator before the detailed descriptor comparison section
+        f.write("=" * 90 + "\n\n")
 
-        # These sections will now ALWAYS print for every cluster, regardless of size.
-        # They iterate through the members of the current cluster, printing individual details.
-        f.write("Electronic conformation descriptors:\n")
+        # 6. Detailed Descriptors Comparison for each structure
+        # This section always prints the descriptors for each member of the cluster.
+        f.write("Electronic configuration descriptors:\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
             if mol_data['final_electronic_energy'] is not None:
                 f.write(f"        Final Electronic Energy (Hartree): {mol_data['final_electronic_energy']:.6f}\n")
             if mol_data['gibbs_free_energy'] is not None:
                 f.write(f"        Gibbs Free Energy (Hartree): {mol_data['gibbs_free_energy']:.6f}\n")
-            if mol_data['entropy'] is not None:
-                f.write(f"        Entropy (J/(mol·K) or a.u.): {mol_data['entropy']:.6f}\n")
             if mol_data['homo_energy'] is not None:
                 f.write(f"        HOMO Energy (eV): {mol_data['homo_energy']:.6f}\n")
             if mol_data['lumo_energy'] is not None:
@@ -1079,7 +1138,7 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 f.write(f"        HOMO-LUMO Gap (eV): {mol_data['homo_lumo_gap']:.6f}\n")
         f.write("\n")
 
-        f.write("Molecular conformation descriptors:\n")
+        f.write("Molecular configuration descriptors:\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
             if mol_data['dipole_moment'] is not None:
@@ -1091,141 +1150,71 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 f.write(f"        Radius of Gyration (Å): {mol_data['radius_of_gyration']:.6f}\n")
         f.write("\n")
 
-        # This section prints if _has_freq_calc is True for at least one member
-        if any(d.get('_has_freq_calc', False) for d in cluster_members_data):
-            f.write("Vibrational frequency summary:\n")
-            for mol_data in cluster_members_data:
-                f.write(f"    {mol_data['filename']}:\n")
-                if mol_data.get('_has_freq_calc', False): # Only print if freq calc was done
-                    f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
-                    if mol_data['first_vib_freq'] is not None:
-                        f.write(f"        First Vibrational Frequency (cm^-1): {mol_data['first_vib_freq']:.2f}\n")
-                    if mol_data['last_vib_freq'] is not None:
-                        f.write(f"        Last Vibrational Frequency (cm^-1): {mol_data['last_vib_freq']:.2f}\n")
-                else:
-                    f.write("        (Frequency calculation not performed)\n")
-            f.write("\n")
-        
-        # This section prints if at least one molecule has H-bond details
-        # Changed: Reference HB_min_angle_actual constant for clarity
-        HB_min_angle_actual_for_display = 30.0 # Define explicitly for display
-        if any(d.get('hbond_details') for d in cluster_members_data): # Check if hbond_details exists for any member
-            f.write("Hydrogen bond analysis:\n")
-            f.write(f"Criterion: H...A distance between 1.2 Å and 2.7 Å, with H covalently bonded to a donor (O, N, F).\n")
-            f.write(f"  (For counting, D-H...A angle must be >= {HB_min_angle_actual_for_display:.1f}°)\n")
-            for mol_data in cluster_members_data:
-                f.write(f"    {mol_data['filename']}:\n")
-                num_counted_hb = mol_data.get('num_hydrogen_bonds', 0)
-                total_potential_hb = len(mol_data.get('hbond_details', []))
-                f.write(f"        Number of hydrogen bonds counted (angle >= {HB_min_angle_actual_for_display:.1f}°): {num_counted_hb} out of {total_potential_hb} potential bonds.\n")
-                if mol_data.get('hbond_details'):
-                    for hbond in mol_data['hbond_details']:
-                        angle_note = ""
-                        if hbond['D-H...A_angle'] < HB_min_angle_actual_for_display:
-                            angle_note = f" (Angle < {HB_min_angle_actual_for_display:.1f}° - Not counted as HB)"
-                        f.write(f"            HB: {hbond['donor_atom_label']}-{hbond['hydrogen_atom_label']}...{hbond['acceptor_atom_label']} (Dist: {hbond['H...A_distance']:.3f} Å, D-H: {hbond['D-H_covalent_distance']:.3f} Å, Angle: {hbond['D-H...A_angle']:.2f}°){angle_note}\n")
-                else:
-                    f.write("        No hydrogen bonds detected based on the criterion.\n")
-            f.write("\n")
-
-        # Add separator before the Per-conformation Info Section
-        f.write("=" * 90 + "\n\n")
-
-        # 5. Original Per-conformation Info Section
-        for i, mol_data in enumerate(cluster_members_data):
-            # Print separator between individual conformations (after the first one)
-            if i > 0:
-                f.write("\n" + "=" * 90 + "\n\n")
-
-            f.write(f"Processed file: {mol_data['filename']}\n")
-            f.write(f"Method: {mol_data['method']}\n")
-            f.write(f"Functional: {mol_data['functional']}\n")
-            f.write(f"Basis Set: {mol_data['basis_set']}\n")
-            f.write(f"Charge: {mol_data['charge']}\n")
-            f.write(f"Multiplicity: {mol_data['multiplicity']}\n")
-            f.write(f"Number of atoms: {mol_data['num_atoms']}\n")
-            f.write("Final Geometry:\n")
-            if mol_data['final_geometry_atomnos'] is not None and mol_data['final_geometry_coords'] is not None and len(mol_data['final_geometry_atomnos']) > 0:
-                for atom_num, coord in zip(mol_data['final_geometry_atomnos'], mol_data['final_geometry_coords']):
-                    symbol = atomic_number_to_symbol(atom_num)
-                    f.write(f"{symbol:2s}  {coord[0]:10.6f}  {coord[1]:10.6f}  {coord[2]:10.6f}\n")
-            else:
-                f.write("Geometry data not available.\n")
-
-            # --- Electronic conformation descriptors ---
-            electronic_descriptors_present = (
-                mol_data.get('final_electronic_energy') is not None or
-                mol_data.get('gibbs_free_energy') is not None or
-                mol_data.get('entropy') is not None or # Check for entropy
-                mol_data.get('homo_energy') is not None or
-                mol_data.get('lumo_energy') is not None or
-                mol_data.get('homo_lumo_gap') is not None
-            )
-
-            if electronic_descriptors_present:
-                f.write("\nElectronic conformation descriptors:\n")
-                if mol_data.get('final_electronic_energy') is not None:
-                    f.write(f"        Final Electronic Energy (Hartree): {mol_data['final_electronic_energy']:.6f}\n")
-                if mol_data.get('gibbs_free_energy') is not None:
-                    f.write(f"        Gibbs Free Energy (Hartree): {mol_data['gibbs_free_energy']:.6f}\n")
-                if mol_data.get('entropy') is not None:
-                    f.write(f"        Entropy (J/(mol·K) or a.u.): {mol_data['entropy']:.6f}\n")
-                if mol_data.get('homo_energy') is not None:
-                    f.write(f"        HOMO Energy (eV): {mol_data['homo_energy']:.6f}\n")
-                if mol_data.get('lumo_energy') is not None:
-                    f.write(f"        LUMO Energy (eV): {mol_data['lumo_energy']:.6f}\n")
-                if mol_data.get('homo_lumo_gap') is not None:
-                    f.write(f"        HOMO-LUMO Gap (eV): {mol_data['homo_lumo_gap']:.6f}\n")
-
-            # --- Molecular conformation descriptors ---
-            molecular_descriptors_present = (
-                mol_data.get('dipole_moment') is not None or
-                (mol_data.get('rotational_constants') is not None and isinstance(mol_data['rotational_constants'], np.ndarray) and len(mol_data['rotational_constants']) == 3) or
-                mol_data.get('radius_of_gyration') is not None
-            )
-
-            if molecular_descriptors_present:
-                f.write("\nMolecular conformation descriptors:\n")
-                if mol_data.get('dipole_moment') is not None:
-                    f.write(f"        Dipole Moment (Debye): {mol_data['dipole_moment']:.6f}\n")
-                
-                rc = mol_data.get('rotational_constants')
-                if rc is not None and isinstance(rc, np.ndarray) and rc.ndim == 1 and len(rc) == 3:
-                    f.write(f"        Rotational Constants (GHz): {rc[0]:.6f}, {rc[1]:.6f}, {rc[2]:.6f}\n")
-                
-                if mol_data.get('radius_of_gyration') is not None:
-                    f.write(f"        Radius of Gyration (Å): {mol_data['radius_of_gyration']:.6f}\n")
-            
-            # --- Vibrational frequency summary ---
-            # ONLY print this section if a frequency calculation was performed (_has_freq_calc is True)
-            if mol_data.get('_has_freq_calc', False): # Corrected typo: _has_has_freq_calc to _has_freq_calc
-                f.write("\nVibrational frequency summary:\n")
-                # num_imaginary_freqs will be an int (0 or more) if _has_freq_calc is True
+        f.write("Vibrational frequency summary:\n")
+        for mol_data in cluster_members_data:
+            f.write(f"    {mol_data['filename']}:\n")
+            if mol_data.get('_has_freq_calc', False):
                 f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
-                if mol_data.get('first_vib_freq') is not None:
+                if mol_data['first_vib_freq'] is not None:
                     f.write(f"        First Vibrational Frequency (cm^-1): {mol_data['first_vib_freq']:.2f}\n")
-                if mol_data.get('last_vib_freq') is not None:
+                if mol_data['last_vib_freq'] is not None:
                     f.write(f"        Last Vibrational Frequency (cm^-1): {mol_data['last_vib_freq']:.2f}\n")
+            else:
+                f.write("        Frequency calculation not performed.\n")
+        f.write("\n")
+
+        f.write("Hydrogen bond analysis:\n")
+        HB_min_angle_actual_for_display = 30.0 # Define explicitly for display
+        f.write(f"Criterion: H...A distance between 1.2 Å and 2.7 Å, with H covalently bonded to a donor (O, N, F).\n")
+        f.write(f"  (For counting, D-H...A angle must be >= {HB_min_angle_actual_for_display:.1f}°)\n")
+        for mol_data in cluster_members_data:
+            f.write(f"    {mol_data['filename']}:\n")
+            num_counted_hb = mol_data.get('num_hydrogen_bonds', 0)
+            total_potential_hb = len(mol_data.get('hbond_details', []))
+            f.write(f"        Number of hydrogen bonds counted (angle >= 30.0°): {num_counted_hb} out of {total_potential_hb} potential bonds.\n")
             
-            # --- Hydrogen bond analysis ---
-            # ONLY print this section if hydrogen bonds are present
-            # Changed: Reference HB_min_angle_actual constant for clarity
-            HB_min_angle_actual_for_display = 30.0 # Define explicitly for display
-            if mol_data.get('hbond_details'): # Check if hbond_details exists for this member
-                f.write("\nHydrogen bond analysis:\n")
-                f.write(f"Criterion: H...A distance between 1.2 Å and 2.7 Å, with H covalently bonded to a donor (O, N, F).\n")
-                f.write(f"  (For counting, D-H...A angle must be >= {HB_min_angle_actual_for_display:.1f}°)\n")
-                num_counted_hb = mol_data.get('num_hydrogen_bonds', 0)
-                total_potential_hb = len(mol_data.get('hbond_details', []))
-                f.write(f"        Number of hydrogen bonds counted (angle >= {HB_min_angle_actual_for_display:.1f}°): {num_counted_hb} out of {total_potential_hb} potential bonds.\n")
-                
+            if mol_data.get('hbond_details'):
                 for hbond in mol_data['hbond_details']:
                     angle_note = ""
                     if hbond['D-H...A_angle'] < HB_min_angle_actual_for_display:
                         angle_note = f" (Angle < {HB_min_angle_actual_for_display:.1f}° - Not counted as HB)"
-                    f.write(f"Hydrogen bond: {hbond['donor_atom_label']}-{hbond['hydrogen_atom_label']}...{hbond['acceptor_atom_label']}  Distance: {hbond['H...A_distance']:.3f} Å, D-H: {hbond['D-H_covalent_distance']:.3f} Å, Angle: {hbond['D-H...A_angle']:.2f}°{angle_note}\n")
+                    f.write(f"            Hydrogen bond: {hbond['donor_atom_label']}-{hbond['hydrogen_atom_label']}...{hbond['acceptor_atom_label']} (Dist: {hbond['H...A_distance']:.3f} Å, D-H: {hbond['D-H_covalent_distance']:.3f} Å, Angle: {hbond['D-H...A_angle']:.2f}°){angle_note}\n")
             else:
-                f.write("\nNo hydrogen bonds detected based on the criterion.\n")
+                f.write("        No hydrogen bonds detected based on the criterion.\n")
+        f.write("\n")
+
+        # Separator before the individual structure details
+        f.write("=" * 90 + "\n\n")
+
+        # 7. Individual Structure Details
+        # This section now only includes general file info and geometry,
+        # avoiding the repetition of descriptor summaries.
+        for i, mol_data in enumerate(cluster_members_data):
+            if i > 0: # Add shorter separator only before subsequent structures
+                f.write("=" * 50 + "\n\n") 
+
+            f.write(f"Processed file: {mol_data['filename']}\n")
+            f.write(f"Method: {mol_data.get('method', 'N/A')}\n")
+            f.write(f"Functional: {mol_data.get('functional', 'N/A')}\n")
+            f.write(f"Basis Set: {mol_data.get('basis_set', 'N/A')}\n")
+            f.write(f"Charge: {mol_data.get('charge', 'N/A')}\n")
+            f.write(f"Multiplicity: {mol_data.get('multiplicity', 'N/A')}\n")
+            f.write(f"Number of atoms: {mol_data.get('num_atoms', 'N/A')}\n")
+
+            # Final Geometry
+            if mol_data.get('final_geometry_atomnos') is not None and mol_data.get('final_geometry_coords') is not None:
+                f.write("Final Geometry:\n")
+                atomnos = mol_data['final_geometry_atomnos']
+                atomcoords = mol_data['final_geometry_coords']
+                for j in range(len(atomnos)):
+                    symbol = atomic_number_to_symbol(atomnos[j])
+                    f.write(f"{symbol:<2} {atomcoords[j][0]:10.6f} {atomcoords[j][1]:10.6f} {atomcoords[j][2]:10.6f}\n")
+            else:
+                f.write("Final Geometry: N/A\n")
+            f.write("\n")
+
+            # Removed the repeated descriptor blocks here (Electronic, Molecular, Vibrational, Hydrogen bond)
+            # as they are already printed in Section 6 for each member of the cluster.
 
     print(f"Wrote combined data for Cluster '{dat_file_prefix}' to '{os.path.basename(output_filename)}'")
 
@@ -1267,17 +1256,17 @@ def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, op
         return
 
     if len(cluster_members_data) == 1:
-        # For a single conformation, the XYZ file has already been written by write_xyz_file.
+        # For a single configuration, the XYZ file has already been written by write_xyz_file.
         # We just need to ensure the MOL conversion uses that file and its original name.
         single_mol_data = cluster_members_data[0]
         original_filename_base = os.path.splitext(single_mol_data['filename'])[0]
         final_xyz_source_path = os.path.join(input_dir, f"{original_filename_base}.xyz")
         # The output_base_name for MOL should be the original filename base
         final_output_mol_name_base = original_filename_base
-        print(f"  Single conformation found in cluster. Using existing '{os.path.basename(final_xyz_source_path)}' for .mol conversion.")
+        print(f"  Single configuration found in cluster. Using existing '{os.path.basename(final_xyz_source_path)}' for .mol conversion.")
         
     else:
-        # For multiple conformations, create a new combined multi-frame XYZ file.
+        # For multiple configurations, create a new combined multi-frame XYZ file.
         if output_base_name is None:
             # Fallback for combined name if not provided (shouldn't happen with current calling logic)
             output_base_name = "combined_cluster"
@@ -1344,86 +1333,169 @@ def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, op
                 print(f"  An unexpected error occurred during Open Babel conversion for '{final_xyz_source_path}': {e}")
 
 
+# New: Feature mapping and weight parsing
+FEATURE_MAPPING = {
+    "electronic_energy": "final_electronic_energy",
+    "gibbs_free_energy": "gibbs_free_energy",
+    "entropy": "entropy",
+    "homo_energy": "homo_energy",
+    "lumo_energy": "lumo_energy",
+    "homo_lumo_gap": "homo_lumo_gap",
+    "dipole_moment": "dipole_moment",
+    "radius_of_gyration": "radius_of_gyration",
+    "rotational_constants_A": "rotational_constants_0", # Special handling for array elements
+    "rotational_constants_B": "rotational_constants_1",
+    "rotational_constants_C": "rotational_constants_2",
+    "first_vib_freq": "first_vib_freq",
+    "last_vib_freq": "last_vib_freq",
+    "average_hbond_distance": "average_hbond_distance",
+    "average_hbond_angle": "average_hbond_angle",
+    "num_hydrogen_bonds": "num_hydrogen_bonds" # Although not a numerical feature for clustering, good to map
+}
+
+def parse_weights_argument(weight_str):
+    """
+    Parses the --weights argument string into a dictionary of feature_name: weight.
+    Example: "(electronic_energy=0.1)(homo_lumo_gap=0.2)"
+    """
+    weights = {}
+    if not weight_str:
+        return weights
+
+    # Regex to find (key=value) pairs
+    matches = re.findall(r'\(([^=]+)=([\d.]+)\)', weight_str)
+    for key, value in matches:
+        try:
+            weights[key.strip()] = float(value.strip())
+        except ValueError:
+            print(f"WARNING: Could not parse weight for '{key}={value}'. Skipping this weight.")
+    return weights
+
+def parse_abs_tolerance_argument(tolerance_str):
+    """
+    Parses the --abs-tolerance argument string into a dictionary of feature_name: tolerance.
+    Example: "(electronic_energy=1e-5)(dipole_moment=1e-3)"
+    """
+    tolerances = {}
+    if not tolerance_str:
+        return tolerances
+    
+    matches = re.findall(r'\(([^=]+)=([\d\.eE-]+)\)', tolerance_str)
+    for key, value in matches:
+        try:
+            tolerances[key.strip()] = float(value.strip())
+        except ValueError:
+            print(f"WARNING: Could not parse absolute tolerance for '{key}={value}'. Skipping this tolerance.")
+    return tolerances
+
+
 # Modified to accept rmsd_threshold and output_base_dir
-def perform_clustering_and_analysis(input_folder, threshold=1.0, file_extension_pattern="*.log", rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False):
+def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None): # Added abs_tolerances
     """
     Performs hierarchical clustering and analysis on the extracted molecular properties,
     and saves .dat and .xyz files for each cluster.
     Includes an optional RMSD post-processing step and caching of extracted data.
     Output files will be saved relative to output_base_dir.
+    `input_source` can be a folder path (normal mode) or a list of file paths (compare mode).
+    `weights` is a dictionary mapping feature names (user-friendly) to their weights.
+    `min_std_threshold` (float): Minimum standard deviation for a feature to be scaled.
+                                 Features with std dev below this are treated as constant (0.0).
+    `abs_tolerances` (dict): Dictionary of feature_name: absolute_tolerance. If the max difference
+                             for a feature within a group is less than its tolerance, it's zeroed out.
     """
+    if weights is None:
+        weights = {} # Ensure weights is a dict even if not provided
+    if abs_tolerances is None:
+        abs_tolerances = {} # Ensure abs_tolerances is a dict if not provided
+
     # Ensure output_base_dir is set, default to current working directory if None
     if output_base_dir is None:
         output_base_dir = os.getcwd()
+
+    # NEW: Adjust output_base_dir for comparison mode and handle unique naming
+    if is_compare_mode:
+        base_comparison_dir_name = "comparison"
+        final_comparison_dir = base_comparison_dir_name
+        counter = 0
+        while os.path.exists(os.path.join(output_base_dir, final_comparison_dir)):
+            counter += 1
+            final_comparison_dir = f"{base_comparison_dir_name}_{counter}"
+        output_base_dir = os.path.join(output_base_dir, final_comparison_dir)
+        os.makedirs(output_base_dir, exist_ok=True) # Ensure this new base directory exists
+        print(f"  Comparison mode: All outputs will be placed in '{output_base_dir}'")
 
     # Define a generic cache file path
     cache_file_name = "data_cache.pkl" # Shortened cache file name
     cache_file_path = os.path.join(output_base_dir, cache_file_name)
 
     all_extracted_data = []
-    # Check if a cached file exists and if we're not forcing re-extraction
-    if os.path.exists(cache_file_path) and not force_reprocess_cache:
-        print(f"Attempting to load data from cache: '{os.path.basename(cache_file_path)}'")
-        try:
-            with open(cache_file_path, 'rb') as f:
-                cached_data = pickle.load(f)
-            
-            # Verify if cached data matches current files to avoid stale data
-            current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(input_folder, file_extension_pattern))}
-            
-            # Filter cached_data to only include files still present in the folder
-            retained_cached_data = [d for d in cached_data if d['filename'] in current_files_in_folder]
-            
-            # Check if all current files are in the cache and if their modification times are the same
-            # This is a robust check, but for simplicity, we'll just check existence and rely on --reprocess-files for explicit refresh.
-            # A more advanced check would involve comparing file hashes or mtimes.
-
-            if len(retained_cached_data) == len(current_files_in_folder):
-                all_extracted_data = retained_cached_data
-                print(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
-            else:
-                print("Cache data incomplete or outdated. Re-extracting all files.")
-                # Clear all_extracted_data to force re-extraction below
-                all_extracted_data = []
-                if os.path.exists(cache_file_path): # Remove invalid cache
-                    os.remove(cache_file_path)
-
-        except Exception as e:
-            print(f"Error loading data from cache: {e}. Re-extracting all files.")
-            all_extracted_data = [] # Clear any partial data
-            if os.path.exists(cache_file_path): # Remove corrupted cache
-                os.remove(cache_file_path)
-
-    files_to_process = glob.glob(os.path.join(input_folder, file_extension_pattern))
-    if not files_to_process:
-        print(f"No files matching '{file_extension_pattern}' found in '{input_folder}'. Skipping this folder.")
-        return
-
-    if not all_extracted_data: # If cache failed or didn't exist or was incomplete
-        print(f"Starting data extraction from {len(files_to_process)} files matching '{file_extension_pattern}' in '{input_folder}'...")
+    
+    files_to_process = []
+    if is_compare_mode:
+        files_to_process = input_source # input_source is already the list of files
+        # For compare mode, we should probably bypass cache loading/saving, or make it specific to the comparison.
+        # For now, let's assume compare mode always re-processes the two files.
+        print(f"Starting data extraction for comparison mode from {len(files_to_process)} files...")
         for file_path in sorted(files_to_process):
             print(f"  Extracting from: {os.path.basename(file_path)}...")
             extracted_props = extract_properties_from_logfile(file_path)
             if extracted_props:
                 all_extracted_data.append(extracted_props)
-        
-        if all_extracted_data: # Save to cache only if extraction was successful
-            print(f"Saving extracted data to cache: '{os.path.basename(cache_file_path)}'")
+    else:
+        # Existing cache logic for normal mode
+        if os.path.exists(cache_file_path) and not force_reprocess_cache:
+            print(f"Attempting to load data from cache: '{os.path.basename(cache_file_path)}'")
             try:
-                with open(cache_file_path, 'wb') as f:
-                    pickle.dump(all_extracted_data, f)
-                print("Data saved to cache successfully.")
+                with open(cache_file_path, 'rb') as f:
+                    cached_data = pickle.load(f)
+                
+                current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(input_source, file_extension_pattern))}
+                retained_cached_data = [d for d in cached_data if d['filename'] in current_files_in_folder]
+                
+                if len(retained_cached_data) == len(current_files_in_folder):
+                    all_extracted_data = retained_cached_data
+                    print(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
+                else:
+                    print("Cache data incomplete or outdated. Re-extracting all files.")
+                    all_extracted_data = []
+                    if os.path.exists(cache_file_path):
+                        os.remove(cache_file_path)
+
             except Exception as e:
-                print(f"  Error saving data to cache: {e}")
+                print(f"Error loading data from cache: {e}. Re-extracting all files.")
+                all_extracted_data = []
+                if os.path.exists(cache_file_path):
+                    os.remove(cache_file_path)
+
+        files_to_process = glob.glob(os.path.join(input_source, file_extension_pattern))
+        if not files_to_process:
+            print(f"No files matching '{file_extension_pattern}' found in '{input_source}'. Skipping this folder.")
+            return
+
+        if not all_extracted_data:
+            print(f"Starting data extraction from {len(files_to_process)} files matching '{file_extension_pattern}' in '{input_source}'...")
+            for file_path in sorted(files_to_process):
+                print(f"  Extracting from: {os.path.basename(file_path)}...")
+                extracted_props = extract_properties_from_logfile(file_path)
+                if extracted_props:
+                    all_extracted_data.append(extracted_props)
+            
+            if all_extracted_data and not is_compare_mode: # Only save to cache in normal mode
+                print(f"Saving extracted data to cache: '{os.path.basename(cache_file_path)}'")
+                try:
+                    with open(cache_file_path, 'wb') as f:
+                        pickle.dump(all_extracted_data, f)
+                    print("Data saved to cache successfully.")
+                except Exception as e:
+                    print(f"  Error saving data to cache: {e}")
 
     if not all_extracted_data:
-        print(f"No data was successfully extracted from files matching '{file_extension_pattern}' in '{input_folder}'. Skipping clustering for this folder.")
+        print(f"No data was successfully extracted from files. Skipping clustering.")
         return
 
     print("\nData extraction complete. Proceeding to clustering.")
     
     clean_data_for_clustering = []
-    # Essential features for basic processing and grouping. If these are missing, the file is skipped.
     essential_base_features = ['final_geometry_atomnos', 'final_geometry_coords', 'num_hydrogen_bonds']
     
     for mol_data in all_extracted_data:
@@ -1441,12 +1513,25 @@ def perform_clustering_and_analysis(input_folder, threshold=1.0, file_extension_
 
 
     if not clean_data_for_clustering:
-        print(f"No complete data entries to cluster after filtering in '{input_folder}'. Exiting clustering step for this folder.")
+        print(f"No complete data entries to cluster after filtering. Exiting clustering step.")
         return
 
     hbond_groups = {}
-    for item in clean_data_for_clustering:
-        hbond_groups.setdefault(item['num_hydrogen_bonds'], []).append(item)
+    
+    # NEW: Handle comparison mode's clustering logic
+    if is_compare_mode and len(clean_data_for_clustering) == 2:
+        print("  Comparison mode: Running clustering to generate dendrogram, then forcing a single output cluster.")
+        # For comparison, we will treat them as a single group for dendrogram generation
+        # and then force them into one output cluster.
+        group_data_for_clustering = sorted(clean_data_for_clustering,
+                                           key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+        
+        # This will be the only "hbond group" processed in comparison mode, effectively.
+        hbond_groups = {0: group_data_for_clustering} # Use 0 as a dummy hbond count
+    else:
+        # Original logic for non-comparison mode
+        for item in clean_data_for_clustering:
+            hbond_groups.setdefault(item['num_hydrogen_bonds'], []).append(item)
 
     # Output directory paths
     dendrogram_images_folder = os.path.join(output_base_dir, "dendrogram_images")
@@ -1461,252 +1546,543 @@ def perform_clustering_and_analysis(input_folder, threshold=1.0, file_extension_
     print(f"Extracted data files will be saved to '{extracted_data_folder}'")
     print(f"Extracted cluster XYZ/MOL files will be saved to '{extracted_clusters_folder}'")
 
-    # This will store the full summary content for the clustering_summary.txt file
     summary_file_content_lines = []
+    comparison_specific_summary_lines = [] # New list for comparison-specific details
 
-    # Initialize overall counters for the final summary
     total_clusters_outputted = 0
-    total_rmsd_outliers_first_pass = 0 
+    total_rmsd_outliers_first_pass = 0
 
-    # Add overall header information first (these are placeholders for now, counts filled at the end)
     summary_file_content_lines.append("=" * 75 + "\n")
-    summary_file_content_lines.append(f"Clustering Results for: {os.path.basename(input_folder)}")
-    summary_file_content_lines.append(f"Similarity threshold (distance): {threshold}")
+    if is_compare_mode:
+        summary_file_content_lines.append(f"Comparison Results for: {', '.join([os.path.basename(f) for f in input_source])}")
+    else:
+        summary_file_content_lines.append(f"Clustering Results for: {os.path.basename(input_source)}")
+    
+    # Conditional similarity threshold display
+    if is_compare_mode:
+        summary_file_content_lines.append(f"Similarity threshold (distance): N/A")
+    else:
+        summary_file_content_lines.append(f"Similarity threshold (distance): {threshold}")
+    
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"RMSD validation threshold: {rmsd_threshold:.3f} Å")
-    # These will be updated later using string formatting
-    summary_file_content_lines.append(f"Total conformations processed: {len(clean_data_for_clustering)}")
+    
+    # Moved these to comparison_specific_summary_lines for conditional output
+    # if weights:
+    #     summary_file_content_lines.append(f"Applied Feature Weights: {weights}")
+    # if abs_tolerances:
+    #     summary_file_content_lines.append(f"Applied Absolute Tolerances: {abs_tolerances}")
+
+    summary_file_content_lines.append(f"Total configurations processed: {len(clean_data_for_clustering)}")
     summary_file_content_lines.append(f"Total number of final clusters: <TOTAL_CLUSTERS_PLACEHOLDER>")
     if rmsd_threshold is not None:
-        summary_file_content_lines.append(f"Total RMSD moved conformations: <TOTAL_RMSD_OUTLIERS_PLACEHOLDER>")
+        summary_file_content_lines.append(f"Total RMSD moved configurations: <TOTAL_RMSD_OUTLIERS_PLACEHOLDER>")
     summary_file_content_lines.append("\n" + "=" * 75 + "\n")
 
 
-    previous_hbond_group_processed = False # Flag to manage separator correctly
+    previous_hbond_group_processed = False 
 
-    # Global counter for unique cluster IDs (used for folder/dat naming across all HB groups)
-    cluster_global_id_counter = 1
-    pseudo_global_cluster_id_counter = 1 # NEW: Global counter for parent cluster IDs (the "Y" in "Cluster Y")
+    # --- Boltzmann Population Calculation (based on initial property clusters) ---
+    all_initial_property_clusters = []
+    pseudo_global_cluster_id_counter = 1 # This counter is for assigning unique IDs to initial clusters for Boltzmann calc
+
+    for hbond_count, group_data in sorted(hbond_groups.items()):
+        if len(group_data) < 2 or not any(d.get(f) is not None for d in group_data for f in ['radius_of_gyration', 'dipole_moment', 'homo_lumo_gap', 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle', 'rotational_constants']):
+            # For singletons or groups without enough numerical features, treat each as a separate initial cluster
+            for single_mol_data in group_data:
+                single_mol_data['_initial_cluster_label'] = hbond_count # This is a dummy label for singletons
+                single_mol_data['_parent_global_cluster_id'] = pseudo_global_cluster_id_counter # Assign unique ID
+                all_initial_property_clusters.append([single_mol_data])
+                pseudo_global_cluster_id_counter += 1
+        else:
+            filenames_base = [os.path.splitext(item['filename'])[0] for item in group_data]
+            
+            all_potential_numerical_features = [
+                'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
+                'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
+                'average_hbond_angle'
+            ]
+            rotational_constant_subfeatures = [
+                'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
+            ]
+
+            globally_missing_for_group = []
+            for feature in all_potential_numerical_features:
+                if all(d.get(feature) is None for d in group_data):
+                    globally_missing_for_group.append(feature)
+            
+            is_rot_const_globally_missing_for_group = True
+            for d in group_data:
+                rot_consts = d.get('rotational_constants')
+                if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
+                    is_rot_const_globally_missing_for_group = False
+                    break
+            
+            if is_rot_const_globally_missing_for_group:
+                globally_missing_for_group.extend(rotational_constant_subfeatures)
+
+            active_numerical_features_for_group = [f for f in all_potential_numerical_features if f not in globally_missing_for_group]
+            
+            features_for_scaling_raw = []
+            ordered_feature_names_for_scaling = []
+
+            for d in group_data:
+                mol_feature_vector = []
+                current_mol_ordered_feature_names = []
+                for feature_name_user_friendly in active_numerical_features_for_group:
+                    internal_key = FEATURE_MAPPING.get(feature_name_user_friendly, feature_name_user_friendly)
+                    if weights.get(feature_name_user_friendly, 1.0) != 0.0:
+                        value = d.get(internal_key)
+                        if value is None: value = 0.0
+                        mol_feature_vector.append(value)
+                        current_mol_ordered_feature_names.append(feature_name_user_friendly)
+                
+                if not is_rot_const_globally_missing_for_group:
+                    rc_temp = d.get('rotational_constants')
+                    if rc_temp is not None and isinstance(rc_temp, np.ndarray) and len(rc_temp) == 3:
+                        if weights.get('rotational_constants_A', 1.0) != 0.0:
+                            mol_feature_vector.append(rc_temp[0])
+                            current_mol_ordered_feature_names.append('rotational_constants_A')
+                        if weights.get('rotational_constants_B', 1.0) != 0.0:
+                            mol_feature_vector.append(rc_temp[1])
+                            current_mol_ordered_feature_names.append('rotational_constants_B')
+                        if weights.get('rotational_constants_C', 1.0) != 0.0:
+                            mol_feature_vector.append(rc_temp[2])
+                            current_mol_ordered_feature_names.append('rotational_constants_C')
+                    else:
+                        if weights.get('rotational_constants_A', 1.0) != 0.0:
+                            mol_feature_vector.append(0.0)
+                            current_mol_ordered_feature_names.append('rotational_constants_A')
+                        if weights.get('rotational_constants_B', 1.0) != 0.0:
+                            mol_feature_vector.append(0.0)
+                            current_mol_ordered_feature_names.append('rotational_constants_B')
+                        if weights.get('rotational_constants_C', 1.0) != 0.0:
+                            mol_feature_vector.append(0.0)
+                            current_mol_ordered_feature_names.append('rotational_constants_C')
+
+                features_for_scaling_raw.append(mol_feature_vector)
+                if not ordered_feature_names_for_scaling:
+                    ordered_feature_names_for_scaling = current_mol_ordered_feature_names
+            
+            if not features_for_scaling_raw or all(len(f) == 0 for f in features_for_scaling_raw):
+                for single_mol_data in group_data:
+                    single_mol_data['_initial_cluster_label'] = hbond_count
+                    single_mol_data['_parent_global_cluster_id'] = pseudo_global_cluster_id_counter
+                    all_initial_property_clusters.append([single_mol_data])
+                    pseudo_global_cluster_id_counter += 1
+                continue
+
+            features_for_scaling_raw_np = np.array(features_for_scaling_raw, dtype=float)
+            features_scaled = np.zeros_like(features_for_scaling_raw_np)
+            for col_idx in range(features_for_scaling_raw_np.shape[1]):
+                col_data = features_for_scaling_raw_np[:, col_idx]
+                feature_name = ordered_feature_names_for_scaling[col_idx]
+                max_abs_diff = np.max(col_data) - np.min(col_data)
+                
+                if feature_name in abs_tolerances and max_abs_diff < abs_tolerances[feature_name]:
+                    features_scaled[:, col_idx] = 0.0
+                else:
+                    std_dev = np.std(col_data)
+                    if std_dev < min_std_threshold:
+                        features_scaled[:, col_idx] = 0.0
+                    else:
+                        scaler = StandardScaler()
+                        features_scaled[:, col_idx] = scaler.fit_transform(col_data.reshape(-1, 1)).flatten()
+
+            linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
+            initial_cluster_labels = fcluster(linkage_matrix, t=threshold, criterion='distance')
+
+            initial_clusters_data = {}
+            for i, label in enumerate(initial_cluster_labels):
+                group_data[i]['_initial_cluster_label'] = label 
+                initial_clusters_data.setdefault(label, []).append(group_data[i])
+            
+            initial_clusters_list_unsorted = list(initial_clusters_data.values())
+            
+            # Sort these initial clusters by their lowest energy representative
+            initial_clusters_list_sorted_by_energy = sorted(
+                initial_clusters_list_unsorted,
+                key=lambda cluster: (min(m.get('gibbs_free_energy') if m.get('gibbs_free_energy') is not None else float('inf') for m in cluster), 
+                                     min(m['filename'] for m in cluster)) 
+            )
+
+            for initial_prop_cluster in initial_clusters_list_sorted_by_energy:
+                parent_id = pseudo_global_cluster_id_counter 
+                for member_conf in initial_prop_cluster:
+                    member_conf['_parent_global_cluster_id'] = parent_id 
+                all_initial_property_clusters.append(initial_prop_cluster) # Add to the list for Boltzmann calculation
+                pseudo_global_cluster_id_counter += 1 
+
+    boltzmann_g1_data = {}
+    boltzmann_g_deg_data = {}
+    global_min_gibbs_energy = None
+    global_min_rep_filename = "N/A"
+    global_min_cluster_id = "N/A"
+
+    if all_initial_property_clusters:
+        # Find the global minimum Gibbs energy among all representatives
+        # Also store the filename and cluster ID of this global minimum representative
+        valid_reps_for_emin = []
+        for initial_prop_cluster in all_initial_property_clusters:
+            # Select the lowest energy member as the representative for this initial property cluster
+            rep_conf = min(initial_prop_cluster,
+                           key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+            
+            if rep_conf.get('gibbs_free_energy') is not None:
+                valid_reps_for_emin.append({
+                    'energy': rep_conf['gibbs_free_energy'],
+                    'filename': rep_conf['filename'],
+                    'cluster_id': rep_conf['_parent_global_cluster_id']
+                })
+
+        if valid_reps_for_emin:
+            global_min_info = min(valid_reps_for_emin, key=lambda x: x['energy'])
+            global_min_gibbs_energy = global_min_info['energy']
+            global_min_rep_filename = global_min_info['filename']
+            global_min_cluster_id = global_min_info['cluster_id']
+
+            sum_factors_g1 = 0.0
+            sum_factors_g_deg = 0.0
+
+            # Calculate Boltzmann factors for each initial property cluster
+            for initial_prop_cluster in all_initial_property_clusters:
+                # Use the representative's energy for the Boltzmann calculation
+                rep_conf = min(initial_prop_cluster,
+                               key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+                
+                if rep_conf.get('gibbs_free_energy') is None:
+                    continue # Skip if no valid representative energy
+
+                rep_gibbs_energy = rep_conf['gibbs_free_energy']
+                cluster_id = rep_conf['_parent_global_cluster_id']
+                cluster_size = len(initial_prop_cluster) # Size of the initial property cluster
+
+                delta_e = rep_gibbs_energy - global_min_gibbs_energy
+                
+                if BOLTZMANN_CONSTANT_HARTREE_PER_K * DEFAULT_TEMPERATURE_K == 0:
+                    factor_g1 = 1.0 if delta_e == 0 else 0.0
+                else:
+                    factor_g1 = np.exp(-delta_e / (BOLTZMANN_CONSTANT_HARTREE_PER_K * DEFAULT_TEMPERATURE_K))
+                
+                factor_g_deg = cluster_size * factor_g1
+                
+                boltzmann_g1_data[cluster_id] = {
+                    'energy': rep_gibbs_energy,
+                    'filename': rep_conf['filename'],
+                    'population': factor_g1,
+                    'cluster_size': cluster_size
+                }
+                boltzmann_g_deg_data[cluster_id] = {
+                    'energy': rep_gibbs_energy,
+                    'filename': rep_conf['filename'],
+                    'population': factor_g_deg,
+                    'cluster_size': cluster_size
+                }
+                
+                sum_factors_g1 += factor_g1
+                sum_factors_g_deg += factor_g_deg
+            
+            # Normalize to percentages
+            if sum_factors_g1 > 0:
+                for cluster_id, data in boltzmann_g1_data.items():
+                    data['population'] = (data['population'] / sum_factors_g1) * 100.0
+            else:
+                for cluster_id in boltzmann_g1_data:
+                    boltzmann_g1_data[cluster_id]['population'] = 0.0
+
+            if sum_factors_g_deg > 0:
+                for cluster_id, data in boltzmann_g_deg_data.items():
+                    data['population'] = (data['population'] / sum_factors_g_deg) * 100.0
+            else:
+                for cluster_id in boltzmann_g_deg_data:
+                    boltzmann_g_deg_data[cluster_id]['population'] = 0.0
+    # --- End Boltzmann Population Calculation ---
 
 
+    # Now iterate through the hbond_groups again to perform the clustering and write files
+    # This loop is responsible for generating the actual clusters and writing their files.
+    # The Boltzmann data calculated above will be passed to write_cluster_dat_file.
+    cluster_global_id_counter = 1 # Reset for final cluster numbering in summary
     for hbond_count, group_data in sorted(hbond_groups.items()):
         
         if previous_hbond_group_processed:
-            summary_file_content_lines.append("\n" + "-" * 75 + "\n") # Add separator between HB groups
+            summary_file_content_lines.append("\n" + "-" * 75 + "\n") 
         
-        # Start of H-bond group summary header
         summary_file_content_lines.append(f"Hydrogen bonds: {hbond_count}\n")
-        summary_file_content_lines.append(f"Conformations: {len(group_data)}")
+        summary_file_content_lines.append(f"Configurations: {len(group_data)}")
 
-        # Define all potential numerical features to consider for dynamic selection
-        all_potential_numerical_features = [
-            'radius_of_gyration',
-            'dipole_moment',
-            'homo_lumo_gap',
-            'first_vib_freq',
-            'last_vib_freq',
-            'average_hbond_distance', 
-            'average_hbond_angle'
-        ]
-        # Rotational constants are treated separately due to their conformation
-        rotational_constant_subfeatures = [
-            'rotational_constants_0', 'rotational_constants_1', 'rotational_constants_2'
-        ]
+        current_hbond_group_clusters_for_final_output = [] 
 
-        # Determine which features are globally missing (missing for ALL members in this group)
-        globally_missing_for_group = []
-        for feature in all_potential_numerical_features:
-            if all(d.get(feature) is None for d in group_data):
-                globally_missing_for_group.append(feature)
-        
-        is_rot_const_globally_missing_for_group = True
-        for d in group_data:
-            rot_consts = d.get('rotational_constants')
-            if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
-                is_rot_const_globally_missing_for_group = False
-                break
-        
-        if is_rot_const_globally_missing_for_group:
-            globally_missing_for_group.extend(rotational_constant_subfeatures)
-            print(f"  Note: Rotational constants are globally missing or invalid for H-bond group {hbond_count}. Excluding them from clustering features.")
-
-        active_numerical_features_for_group = [f for f in all_potential_numerical_features if f not in globally_missing_for_group]
-        
-        features_for_scaling = []
-        for d in group_data:
-            mol_feature_vector = []
-            for feature_name in active_numerical_features_for_group:
-                mol_feature_vector.append(d.get(feature_name) if d.get(feature_name) is not None else 0.0)
+        if len(group_data) < 2 or not any(d.get(f) is not None for d in group_data for f in ['radius_of_gyration', 'dipole_moment', 'homo_lumo_gap', 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle', 'rotational_constants']):
+            print(f"\nSkipping detailed clustering for H-bond group {hbond_count}: Less than 2 configurations or no valid numerical features left after filtering. Treating each as a single-configuration cluster.")
             
-            if not is_rot_const_globally_missing_for_group:
-                rot_consts = d.get('rotational_constants')
-                if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
-                    mol_feature_vector.extend(rot_consts.tolist())
-                else:
-                    mol_feature_vector.extend([0.0, 0.0, 0.0])
-            
-            features_for_scaling.append(mol_feature_vector)
-        
-        current_hbond_group_clusters_for_final_output = [] # List to hold clusters for this specific HB group
-
-        if len(group_data) < 2 or not features_for_scaling or len(features_for_scaling[0]) == 0:
-            print(f"\nSkipping detailed clustering for H-bond group {hbond_count}: Less than 2 conformations or no valid numerical features left after filtering. Treating each as a single-conformation cluster.")
-            
-            # For singletons that skip clustering, directly add them as individual clusters
             for single_mol_data in group_data:
-                # Still set initial cluster label and context for consistency in .dat files
-                single_mol_data['_initial_cluster_label'] = hbond_count # Use hbond_count as a pseudo-initial label for singletons
-                # Set _parent_global_cluster_id for singletons based on the global counter for *initial* clusters
-                single_mol_data['_parent_global_cluster_id'] = pseudo_global_cluster_id_counter # NEW
-                single_mol_data['_first_rmsd_context_listing'] = [{'filename': single_mol_data['filename'], 'rmsd_to_rep': 0.0}]
-                single_mol_data['_second_rmsd_sub_cluster_id'] = None
-                single_mol_data['_second_rmsd_context_listing'] = None
-                single_mol_data['_second_rmsd_rep_filename'] = None
-                single_mol_data['_rmsd_pass_origin'] = 'first_pass_validated' # Mark as validated, even if trivial
-                current_hbond_group_clusters_for_final_output.append([single_mol_data]) # Wrap in a list to be a cluster
-                pseudo_global_cluster_id_counter += 1 # Increment for each new "initial" cluster
+                single_mol_data['_rmsd_pass_origin'] = 'first_pass_validated' 
+                current_hbond_group_clusters_for_final_output.append([single_mol_data]) 
 
-        else: # Proceed with actual clustering
+        else: # Proceed with actual clustering for normal mode or if more than 2 files in a group
             filenames_base = [os.path.splitext(item['filename'])[0] for item in group_data]
             
-            scaler = StandardScaler()
-            features_scaled = scaler.fit_transform(features_for_scaling)
+            all_potential_numerical_features = [
+                'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
+                'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
+                'average_hbond_angle'
+            ]
+            rotational_constant_subfeatures = [
+                'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
+            ]
+
+            globally_missing_for_group = []
+            for feature in all_potential_numerical_features:
+                if all(d.get(feature) is None for d in group_data):
+                    globally_missing_for_group.append(feature)
+            
+            is_rot_const_globally_missing_for_group = True
+            for d in group_data:
+                rot_consts = d.get('rotational_constants')
+                if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
+                    is_rot_const_globally_missing_for_group = False
+                    break
+            
+            if is_rot_const_globally_missing_for_group:
+                globally_missing_for_group.extend(rotational_constant_subfeatures)
+                print(f"  Note: Rotational constants are globally missing or invalid for H-bond group {hbond_count}. Excluding them from clustering features.")
+
+            active_numerical_features_for_group = [f for f in all_potential_numerical_features if f not in globally_missing_for_group]
+            
+            features_for_scaling_raw = [] # Store raw values before conditional scaling
+            ordered_feature_names_for_scaling = [] # To keep track of the order for weights
+
+            for d in group_data:
+                mol_feature_vector = []
+                current_mol_ordered_feature_names = []
+                for feature_name_user_friendly in active_numerical_features_for_group:
+                    internal_key = FEATURE_MAPPING.get(feature_name_user_friendly, feature_name_user_friendly)
+                    # Only add to feature vector if the weight is not 0.0
+                    if weights.get(feature_name_user_friendly, 1.0) != 0.0:
+                        value = d.get(internal_key)
+                        if value is None:
+                            value = 0.0 # Default missing numerical values to 0.0 for scaling
+                        mol_feature_vector.append(value)
+                        current_mol_ordered_feature_names.append(feature_name_user_friendly)
+                
+                if not is_rot_const_globally_missing_for_group:
+                    # Only add rotational constants if their weights are not 0.0
+                    rc_temp = d.get('rotational_constants')
+                    if rc_temp is not None and isinstance(rc_temp, np.ndarray) and len(rc_temp) == 3:
+                        if weights.get('rotational_constants_A', 1.0) != 0.0:
+                            val = rc_temp[0]
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_A')
+                        if weights.get('rotational_constants_B', 1.0) != 0.0:
+                            val = rc_temp[1]
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_B')
+                        if weights.get('rotational_constants_C', 1.0) != 0.0:
+                            val = rc_temp[2]
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_C')
+                    else: # If rotational constants are missing, add zeros if their weights are not 0.0
+                        # Ensure we add placeholders if the feature is not zero-weighted, even if data is missing
+                        if weights.get('rotational_constants_A', 1.0) != 0.0:
+                            val = 0.0
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_A')
+                        if weights.get('rotational_constants_B', 1.0) != 0.0:
+                            val = 0.0
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_B')
+                        if weights.get('rotational_constants_C', 1.0) != 0.0:
+                            val = 0.0
+                            mol_feature_vector.append(val)
+                            current_mol_ordered_feature_names.append('rotational_constants_C')
+
+                features_for_scaling_raw.append(mol_feature_vector)
+                if not ordered_feature_names_for_scaling:
+                    ordered_feature_names_for_scaling = current_mol_ordered_feature_names
+            
+            # Check if there are any features left to scale after applying weights
+            if not features_for_scaling_raw or all(len(f) == 0 for f in features_for_scaling_raw):
+                print(f"  WARNING: No numerical features left for clustering after applying weights. Treating each as a single-configuration cluster.")
+                for single_mol_data in group_data:
+                    single_mol_data['_rmsd_pass_origin'] = 'first_pass_validated' 
+                    current_hbond_group_clusters_for_final_output.append([single_mol_data]) 
+                continue # Skip to next hbond group
+
+            # Convert to numpy array for easier column-wise operations
+            features_for_scaling_raw_np = np.array(features_for_scaling_raw, dtype=float)
+            
+            # Apply conditional scaling with absolute tolerance
+            features_scaled = np.zeros_like(features_for_scaling_raw_np)
+            for col_idx in range(features_for_scaling_raw_np.shape[1]):
+                col_data = features_for_scaling_raw_np[:, col_idx]
+                feature_name = ordered_feature_names_for_scaling[col_idx]
+                
+                # Check for absolute tolerance first
+                max_abs_diff = np.max(col_data) - np.min(col_data)
+                
+                if feature_name in abs_tolerances and max_abs_diff < abs_tolerances[feature_name]:
+                    # If max difference is below absolute tolerance, treat as constant (0.0)
+                    features_scaled[:, col_idx] = 0.0
+                    print(f"  NOTE: Feature '{feature_name}' (column {col_idx}) has max abs diff {max_abs_diff:.2e} < abs tolerance {abs_tolerances[feature_name]:.2e}. Treating as constant (0.0).")
+                else:
+                    # Fallback to min_std_threshold if no specific abs_tolerance or abs_tolerance not met
+                    std_dev = np.std(col_data)
+                    if std_dev < min_std_threshold:
+                        features_scaled[:, col_idx] = 0.0
+                        print(f"  NOTE: Feature '{feature_name}' (column {col_idx}) has std dev {std_dev:.2e} < min std threshold {min_std_threshold:.2e}. Treating as constant (0.0).")
+                    else:
+                        scaler = StandardScaler()
+                        features_scaled[:, col_idx] = scaler.fit_transform(col_data.reshape(-1, 1)).flatten()
+                        print(f"  NOTE: Feature '{feature_name}' (column {col_idx}) scaled normally.")
 
             linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
 
+            # Dendrogram generation - now always runs if there's data to cluster
             plt.figure(figsize=(12, 8))
+            
+            # Check if all distances are effectively zero and add a small offset for visualization
+            if np.all(linkage_matrix[:, 2] == 0.0):
+                linkage_matrix[:, 2] += 1e-12 # Add a tiny offset for visualization
+
             dendrogram(linkage_matrix, labels=filenames_base, leaf_rotation=90, leaf_font_size=8)
-            plt.title(f"Hierarchical Clustering Dendrogram (H-bonds = {hbond_count}) - {os.path.basename(input_folder)}")
+            
+            dendrogram_title_suffix = "Comparison" if is_compare_mode else f"H-bonds = {hbond_count}"
+            plt.title(f"Hierarchical Clustering Dendrogram ({dendrogram_title_suffix})")
+            
             plt.ylabel("Euclidean Distance")
-            dendrogram_filename = os.path.join(dendrogram_images_folder, f"dendrogram_H{hbond_count}.png")
+            plt.ylim(bottom=0) # Ensure y-axis starts at 0 or above
+            
+            # --- MODIFIED DENDROGRAM FILENAME LOGIC ---
+            if is_compare_mode:
+                dendrogram_filename = os.path.join(dendrogram_images_folder, f"dendrogram.png")
+            else:
+                dendrogram_filename = os.path.join(dendrogram_images_folder, f"dendrogram_H{hbond_count}.png")
+            # --- END MODIFIED DENDROGRAM FILENAME LOGIC ---
+
             plt.tight_layout()
             plt.savefig(dendrogram_filename)
             plt.close()
             print(f"Dendrogram saved as '{os.path.basename(dendrogram_filename)}'")
 
-            # Initial clustering based on property similarity
-            initial_cluster_labels = fcluster(linkage_matrix, t=threshold, criterion='distance')
+            if is_compare_mode and len(group_data) == 2:
+                # For comparison mode, after generating the dendrogram,
+                # we force the two files into a single output cluster.
+                # The 'threshold' and 'fcluster' are not used to determine the output clusters here.
+                print("  Comparison mode: Overriding clustering to output a single combined cluster.")
+                
+                # Manually set cluster properties for the forced cluster
+                for i, member in enumerate(group_data): # group_data is already sorted by energy
+                    member['_initial_cluster_label'] = 1 # Always label as 1 for comparison
+                    member['_parent_global_cluster_id'] = 1 # Always label as 1 for comparison
+                    member['_rmsd_pass_origin'] = 'first_pass_validated' # Mark as validated
+                    member['_second_rmsd_sub_cluster_id'] = None
+                    member['_second_rmsd_context_listing'] = None
+                    member['_second_rmsd_rep_filename'] = None
 
-            initial_clusters_data = {}
-            for i, label in enumerate(initial_cluster_labels):
-                group_data[i]['_initial_cluster_label'] = label # Assign original property cluster label
-                initial_clusters_data.setdefault(label, []).append(group_data[i])
-            
-            initial_clusters_list_unsorted = list(initial_clusters_data.values())
-
-            # Sort these initial property clusters by lowest energy of their representative
-            # Fallback to filename for deterministic choice if Gibbs free energy is None
-            initial_clusters_list_sorted_by_energy = sorted(
-                initial_clusters_list_unsorted,
-                key=lambda cluster: (min(m.get('gibbs_free_energy') if m.get('gibbs_free_energy') is not None else float('inf') for m in cluster), 
-                                     min(m['filename'] for m in cluster)) # Secondary sort by filename for tie-breaking
-            )
-
-            # Assign "parent global IDs" based on this sorted order
-            for initial_prop_cluster in initial_clusters_list_sorted_by_energy:
-                parent_id = pseudo_global_cluster_id_counter # Get current global ID
-                for member_conf in initial_prop_cluster:
-                    member_conf['_parent_global_cluster_id'] = parent_id # Set the 'Y' ID here
-                pseudo_global_cluster_id_counter += 1 # Increment for each new "initial" cluster
-
-
-            # Populate _first_rmsd_context_listing for all members of initial property clusters
-            if rmsd_threshold is not None:
-                for initial_prop_cluster in initial_clusters_list_sorted_by_energy:
-                    if len(initial_prop_cluster) > 0:
-                        prop_rep_conf = min(initial_prop_cluster,
-                                            key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename'])) # Fallback for representative
+                # Populate _first_rmsd_context_listing for the forced cluster
+                prop_rep_conf = group_data[0] # Lowest energy is the representative
+                first_rmsd_listing = []
+                for member_conf in group_data:
+                    if member_conf == prop_rep_conf:
+                        rmsd_val = 0.0
+                    elif prop_rep_conf.get('final_geometry_coords') is not None and prop_rep_conf.get('final_geometry_atomnos') is not None and \
+                         member_conf.get('final_geometry_coords') is not None and \
+                         member_conf.get('final_geometry_atomnos') is not None:
                         
-                        first_rmsd_listing = []
-                        for member_conf in initial_prop_cluster:
-                            if member_conf == prop_rep_conf:
-                                rmsd_val = 0.0
-                            elif prop_rep_conf.get('final_geometry_coords') is not None and prop_rep_conf.get('final_geometry_atomnos') is not None and \
-                                 member_conf.get('final_geometry_coords') is not None and \
-                                 member_conf.get('final_geometry_atomnos') is not None:
-                                
-                                rmsd_val = calculate_rmsd(
-                                    prop_rep_conf['final_geometry_atomnos'], prop_rep_conf['final_geometry_coords'], # Corrected access
-                                    member_conf['final_geometry_atomnos'], member_conf['final_geometry_coords']    # Corrected access
-                                )
-                            else:
-                                rmsd_val = None
-
-                            first_rmsd_listing.append({'filename': member_conf['filename'], 'rmsd_to_rep': rmsd_val})
-                            # _rmsd_pass_origin will be set by post_process_clusters_with_rmsd or perform_second_rmsd_clustering
-
-                        for member_conf in initial_prop_cluster:
-                            member_conf['_first_rmsd_context_listing'] = first_rmsd_listing # Store this list on each member
-                            member_conf['_second_rmsd_sub_cluster_id'] = None
-                            member_conf['_second_rmsd_context_listing'] = None
-                            member_conf['_second_rmsd_rep_filename'] = None
-
-
-            # --- FIRST RMSD PASS ---
-            if rmsd_threshold is not None:
-                print(f"  Performing first RMSD validation for H-bond group {hbond_count}...")
+                        rmsd_val = calculate_rmsd(
+                            prop_rep_conf['final_geometry_atomnos'], prop_rep_conf['final_geometry_coords'], # Corrected key here
+                            member_conf['final_geometry_atomnos'], member_conf['final_geometry_coords']
+                        )
+                    else:
+                        rmsd_val = None
+                    first_rmsd_listing.append({'filename': member_conf['filename'], 'rmsd_to_rep': rmsd_val})
                 
-                # Pass the sorted list of initial property clusters
-                validated_main_clusters, individual_outliers_from_first_pass = \
-                    post_process_clusters_with_rmsd(initial_clusters_list_sorted_by_energy, rmsd_threshold)
-                
-                current_hbond_group_clusters_for_final_output.extend(validated_main_clusters)
-                total_rmsd_outliers_first_pass += len(individual_outliers_from_first_pass)
+                for member_conf in group_data:
+                    member_conf['_first_rmsd_context_listing'] = first_rmsd_listing
 
-                # --- SECOND RMSD PASS (on collected outliers from this H-bond group) ---
-                if individual_outliers_from_first_pass:
-                    print(f"    Attempting second RMSD clustering on {len(individual_outliers_from_first_pass)} outliers from first pass (H-bonds {hbond_count})...")
-                    
-                    # Group these outliers by their _parent_global_cluster_id for re-clustering
-                    outliers_grouped_by_parent_global_cluster = {}
-                    for outlier_conf in individual_outliers_from_first_pass:
-                        parent_global_id = outlier_conf.get('_parent_global_cluster_id')
-                        if parent_global_id is not None:
-                            outliers_grouped_by_parent_global_cluster.setdefault(parent_global_id, []).append(outlier_conf)
-
-                    for parent_global_id_for_outlier_group, outlier_group in outliers_grouped_by_parent_global_cluster.items():
-                        if len(outlier_group) > 1:
-                            print(f"      Re-clustering {len(outlier_group)} outliers from original Cluster {parent_global_id_for_outlier_group}...")
-                            second_level_clusters = perform_second_rmsd_clustering(outlier_group, rmsd_threshold)
-                            current_hbond_group_clusters_for_final_output.extend(second_level_clusters)
-                        else:
-                            # If a group of outliers is still a singleton after grouping, add as is
-                            single_member_processed = perform_second_rmsd_clustering(outlier_group, rmsd_threshold)
-                            current_hbond_group_clusters_for_final_output.extend(single_member_processed)
+                current_hbond_group_clusters_for_final_output.append(group_data) # Add the single combined cluster
             else:
-                # If no RMSD requested, just use the initially sorted property clusters
-                # All members in these clusters are considered 'first_pass_validated'
-                for cluster in initial_clusters_list_sorted_by_energy:
-                    for member in cluster:
-                        member['_rmsd_pass_origin'] = 'first_pass_validated'
-                current_hbond_group_clusters_for_final_output.extend(initial_clusters_list_sorted_by_energy)
+                # Normal clustering logic for non-comparison mode or >2 files in a group
+                initial_cluster_labels = fcluster(linkage_matrix, t=threshold, criterion='distance')
 
-        # After RMSD processing for this H-bond group, sort its resulting clusters by Gibbs energy
-        # Fallback to filename for deterministic choice if Gibbs free energy is None
+                initial_clusters_data = {}
+                for i, label in enumerate(initial_cluster_labels):
+                    group_data[i]['_initial_cluster_label'] = label 
+                    # The _parent_global_cluster_id should already be set for these from the Boltzmann calculation setup
+                    initial_clusters_data.setdefault(label, []).append(group_data[i])
+                
+                initial_clusters_list_unsorted = list(initial_clusters_data.values())
+
+                initial_clusters_list_sorted_by_energy = sorted(
+                    initial_clusters_list_unsorted,
+                    key=lambda cluster: (min(m.get('gibbs_free_energy') if m.get('gibbs_free_energy') is not None else float('inf') for m in cluster), 
+                                         min(m['filename'] for m in cluster)) 
+                )
+
+                # Assign _parent_global_cluster_id if not already assigned (e.g., for singletons or groups without features)
+                # This part is now handled in the Boltzmann calculation setup, ensuring IDs are unique and consistent.
+                # We just need to ensure the _parent_global_cluster_id is present for all members here.
+                for initial_prop_cluster in initial_clusters_list_sorted_by_energy:
+                    if initial_prop_cluster and initial_prop_cluster[0].get('_parent_global_cluster_id') is None:
+                        # This case should ideally not happen if the Boltzmann setup is done correctly
+                        # but as a fallback, assign a new ID.
+                        parent_id = pseudo_global_cluster_id_counter 
+                        for member_conf in initial_prop_cluster:
+                            member_conf['_parent_global_cluster_id'] = parent_id 
+                        pseudo_global_cluster_id_counter += 1 
+
+
+                if rmsd_threshold is not None:
+                    print(f"  Performing first RMSD validation for H-bond group {hbond_count}...")
+                    
+                    validated_main_clusters, individual_outliers_from_first_pass = \
+                        post_process_clusters_with_rmsd(initial_clusters_list_sorted_by_energy, rmsd_threshold)
+                    
+                    current_hbond_group_clusters_for_final_output.extend(validated_main_clusters)
+                    total_rmsd_outliers_first_pass += len(individual_outliers_from_first_pass)
+
+                    if individual_outliers_from_first_pass:
+                        print(f"    Attempting second RMSD clustering on {len(individual_outliers_from_first_pass)} outliers from first pass (H-bonds {hbond_count})...")
+                        
+                        outliers_grouped_by_parent_global_cluster = {}
+                        for outlier_conf in individual_outliers_from_first_pass:
+                            parent_global_id = outlier_conf.get('_parent_global_cluster_id')
+                            if parent_global_id is not None:
+                                outliers_grouped_by_parent_global_cluster.setdefault(parent_global_id, []).append(outlier_conf)
+
+                        for parent_global_id_for_outlier_group, outlier_group in outliers_grouped_by_parent_global_cluster.items():
+                            if len(outlier_group) > 1:
+                                print(f"      Re-clustering {len(outlier_group)} outliers from original Cluster {parent_global_id_for_outlier_group}...")
+                                second_level_clusters = perform_second_rmsd_clustering(outlier_group, rmsd_threshold)
+                                current_hbond_group_clusters_for_final_output.extend(second_level_clusters)
+                            else:
+                                single_member_processed = perform_second_rmsd_clustering(outlier_group, rmsd_threshold)
+                                current_hbond_group_clusters_for_final_output.extend(single_member_processed)
+                else:
+                    for cluster in initial_clusters_list_sorted_by_energy:
+                        for member in cluster:
+                            member['_rmsd_pass_origin'] = 'first_pass_validated'
+                    current_hbond_group_clusters_for_final_output.extend(initial_clusters_list_sorted_by_energy)
+
         current_hbond_group_clusters_for_final_output.sort(key=lambda cluster: (min(m.get('gibbs_free_energy') if m.get('gibbs_free_energy') is not None else float('inf') for m in cluster),
-                                                                                  min(m['filename'] for m in cluster))) # Secondary sort
+                                                                                  min(m['filename'] for m in cluster))) 
 
         summary_file_content_lines.append(f"Number of clusters: {len(current_hbond_group_clusters_for_final_output)}\n\n")
 
-        # Now iterate through the sorted clusters of this H-bond group to generate their individual summaries
-        # And also handle file operations (write .dat, .xyz, .mol) for these clusters
         for members_data in current_hbond_group_clusters_for_final_output:
-            current_global_cluster_id = cluster_global_id_counter # Use global counter for unique IDs
+            current_global_cluster_id = cluster_global_id_counter 
 
-            summary_line_prefix = f"Cluster {current_global_cluster_id} ({len(members_data)} conformations)"
+            summary_line_prefix = f"Cluster {current_global_cluster_id} ({len(members_data)} configurations)"
 
-            # Add RMSD validation origin to summary line if applicable
             if rmsd_threshold is not None and members_data[0].get('_rmsd_pass_origin') == 'second_pass_formed':
-                # This cluster was formed via the second RMSD pass (its members were initial outliers)
-                # The 'Y' in "Cluster Y" refers to the _parent_global_cluster_id of the initial property cluster they came from.
                 parent_global_cluster_id_for_tag = members_data[0].get('_parent_global_cluster_id')
 
                 if len(members_data) == 1:
                     summary_line_prefix += f" | RMSD Validated from Cluster {parent_global_cluster_id_for_tag}"
-                else: # len > 1
+                else: 
                     summary_line_prefix += f" | RMSD Validated from Cluster {parent_global_cluster_id_for_tag}"
 
-            # Add this individual cluster's summary to the overall summary parts
             summary_file_content_lines.append(summary_line_prefix + ":")
             summary_file_content_lines.append("Files:")
             for m_data in members_data:
@@ -1718,17 +2094,16 @@ def perform_clustering_and_analysis(input_folder, threshold=1.0, file_extension_
             for m_data in members_data:
                 print(f"  - {m_data['filename']}")
 
-            # Determine the folder name and .dat file name based on number of conformations
             cluster_name_prefix = "" 
-            num_conformations_in_cluster = len(members_data)
+            num_configurations_in_cluster = len(members_data)
 
-            if num_conformations_in_cluster == 1:
+            if num_configurations_in_cluster == 1:
                 cluster_name_prefix = f"cluster_{current_global_cluster_id}"
             else:
-                cluster_name_prefix = f"cluster_{current_global_cluster_id}_{num_conformations_in_cluster}"
+                cluster_name_prefix = f"cluster_{current_global_cluster_id}_{num_configurations_in_cluster}"
 
-            # Pass hbond_count to write_cluster_dat_file
-            write_cluster_dat_file(cluster_name_prefix, members_data, output_base_dir, rmsd_threshold, hbond_count_for_original_cluster=hbond_count)
+            write_cluster_dat_file(cluster_name_prefix, members_data, output_base_dir, rmsd_threshold, 
+                                   hbond_count_for_original_cluster=hbond_count, weights=weights)
 
             cluster_xyz_subfolder = os.path.join(extracted_clusters_folder, cluster_name_prefix)
             os.makedirs(cluster_xyz_subfolder, exist_ok=True)
@@ -1736,27 +2111,71 @@ def perform_clustering_and_analysis(input_folder, threshold=1.0, file_extension_
 
             for m_data in members_data:
                 xyz_filename = os.path.join(cluster_xyz_subfolder, os.path.splitext(m_data['filename'])[0] + ".xyz")
-                write_xyz_file(m_data, xyz_filename) # Pass mol_data directly
+                write_xyz_file(m_data, xyz_filename) 
             
-            # combine_xyz_files now handles single vs. multiple conformations internally
             combine_xyz_files(members_data, cluster_xyz_subfolder, output_base_name=cluster_name_prefix)
 
-            total_clusters_outputted += 1 # Accumulate total clusters for overall summary
+            total_clusters_outputted += 1 
             cluster_global_id_counter += 1
 
-        previous_hbond_group_processed = True # Mark that at least one HB group has been processed
+        previous_hbond_group_processed = True 
 
 
-    # Final update to the placeholder lines in the summary header
-    # Find the lines and replace them in the list directly
     for i, line in enumerate(summary_file_content_lines):
         if "<TOTAL_CLUSTERS_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<TOTAL_CLUSTERS_PLACEHOLDER>", str(total_clusters_outputted))
         if "<TOTAL_RMSD_OUTLIERS_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<TOTAL_RMSD_OUTLIERS_PLACEHOLDER>", str(total_rmsd_outliers_first_pass))
 
-    # Add final footer
-    summary_file_content_lines.append("\n" + "=" * 75 + "\n")
+    # Add comparison-specific details at the very end if in comparison mode
+    if is_compare_mode:
+        comparison_specific_summary_lines.append("\n" + "=" * 75 + "\n")
+        comparison_specific_summary_lines.append("Comparison Parameters:\n")
+        if weights:
+            comparison_specific_summary_lines.append("  Applied Feature Weights:")
+            for key, value in weights.items():
+                comparison_specific_summary_lines.append(f"    - {key}: {value}")
+        if abs_tolerances:
+            comparison_specific_summary_lines.append("  Applied Absolute Tolerances:")
+            for key, value in abs_tolerances.items():
+                # Format the float to a fixed number of decimal places to avoid scientific notation
+                # Adjust precision as needed, e.g., for 1e-5 use 5 decimal places, for 0.5 use 1 decimal place
+                # A general approach is to find the number of decimal places or use a high fixed number.
+                # For simplicity and to cover common cases, I'll use a fixed high precision like 7.
+                formatted_value = f"{value:.7f}".rstrip('0').rstrip('.') if '.' in f"{value:.7f}" else f"{int(value)}"
+                comparison_specific_summary_lines.append(f"    - {key}: {formatted_value}")
+        summary_file_content_lines.extend(comparison_specific_summary_lines)
+
+    # --- Append Boltzmann Population Analysis to clustering_summary.txt ---
+    if global_min_gibbs_energy is not None:
+        summary_file_content_lines.append("\n" + "=" * 90 + "\n\n")
+        summary_file_content_lines.append("Boltzmann Population Analysis:\n")
+        summary_file_content_lines.append(f"  Reference: {os.path.splitext(global_min_rep_filename)[0]} from cluster_{global_min_cluster_id}\n")
+        summary_file_content_lines.append(f"  Reference Energy (Emin): {global_min_gibbs_energy:.6f} Hartree\n")
+        summary_file_content_lines.append(f"  Temperature (T): {DEFAULT_TEMPERATURE_K:.2f} K\n\n")
+        
+        summary_file_content_lines.append("Population by Energy Minimum (assuming non-degeneracy, gi = 1):\n")
+        # Sort by population percentage descending for better readability
+        sorted_g1_data = sorted(boltzmann_g1_data.items(), key=lambda item: item[1]['population'], reverse=True)
+        for cluster_id, data in sorted_g1_data:
+            summary_file_content_lines.append(f"    cluster_{cluster_id}")
+            summary_file_content_lines.append(f"    Lowest Energy ({os.path.splitext(data['filename'])[0]}): {data['energy']:.6f} Hartree")
+            summary_file_content_lines.append(f"    Population: {data['population']:.2f} %\n")
+
+        summary_file_content_lines.append("\n" + "-" * 75 + "\n\n")
+
+        summary_file_content_lines.append("Population by Ensemble Size (assuming gi = number of found configurations):\n")
+        # Sort by population percentage descending
+        sorted_g_deg_data = sorted(boltzmann_g_deg_data.items(), key=lambda item: item[1]['population'], reverse=True)
+        for cluster_id, data in sorted_g_deg_data:
+            summary_file_content_lines.append(f"    cluster_{cluster_id}")
+            summary_file_content_lines.append(f"    Lowest Energy ({os.path.splitext(data['filename'])[0]}): {data['energy']:.6f} Hartree")
+            summary_file_content_lines.append(f"    Number of structures = {data['cluster_size']}")
+            summary_file_content_lines.append(f"    Population: {data['population']:.2f} %\n")
+
+        summary_file_content_lines.append("\n" + "=" * 90 + "\n")
+    # --- End Boltzmann Population Analysis ---
+
 
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
     with open(summary_file, "w", newline='\n') as f:
@@ -1775,102 +2194,176 @@ if __name__ == "__main__":
                         help="Specify the base directory for all output folders (dendrograms, extracted data, clusters). Defaults to the current working directory.")
     parser.add_argument("--reprocess-files", action="store_true",
                         help="Force re-extraction of data from log files, ignoring any existing cache.")
+    parser.add_argument("--compare", nargs=2, 
+                        help="Compare two specific log/out files (e.g., --compare file1.log file2.log).")
+    parser.add_argument("--weights", type=str, default="", 
+                        help="Specify feature weights as a string, e.g., '(electronic_energy=0.1)(homo_lumo_gap=0.2)'.")
+    parser.add_argument("--min-std-threshold", type=float, default=1e-6, 
+                        help="Minimum standard deviation for a feature to be scaled. Features with std dev below this are treated as constant (0.0). Default is 1e-6.")
+    parser.add_argument("--abs-tolerance", type=str, default="",
+                        help="Specify absolute tolerances for features as a string, e.g., '(electronic_energy=1e-5)(dipole_moment=1e-3)'. Features with max difference below tolerance are zeroed out for scaling.")
+
+
     args = parser.parse_args()
     clustering_threshold = args.threshold
     rmsd_validation_threshold = args.rmsd 
     output_directory = args.output_dir
     force_reprocess_cache = args.reprocess_files
+    weights_dict = parse_weights_argument(args.weights)
+    min_std_threshold_val = args.min_std_threshold 
+    abs_tolerances_dict = parse_abs_tolerance_argument(args.abs_tolerance)
+
+    # Set default absolute tolerances if not provided via command line
+    if not abs_tolerances_dict:
+        abs_tolerances_dict = {
+            "electronic_energy": 5e-6,  # Tighter, was 1e-6
+            "gibbs_free_energy": 5e-6,  # Tighter, was 1e-6
+            "homo_energy": 3e-4,        # Increased from 1e-4
+            "lumo_energy": 2e-4,        # Keep as is
+            "homo_lumo_gap": 3e-4,      # Increased from 1e-4
+            "dipole_moment": 1.5e-3,    # Keep as is
+            "radius_of_gyration": 1.5e-4, # Keep as is
+            "rotational_constants_A": 7e-5, # Keep as is
+            "rotational_constants_B": 3.5e-4, # Keep as is
+            "rotational_constants_C": 3e-4, # Keep as is
+            "first_vib_freq": 1e-2,     # Keep as is
+            "last_vib_freq": 0.3,      # Keep as is
+            "average_hbond_distance": 1e-3, # Keep as is
+            "average_hbond_angle": 1e-2   # Keep as is
+        }
 
     current_dir = os.getcwd()
     
-    all_potential_folders = [current_dir] + [d for d in glob.glob(os.path.join(current_dir, '*')) if os.path.isdir(d)]
-    
-    folders_with_log_files = []
-    folders_with_out_files = []
+    if args.compare:
+        file1_path = args.compare[0]
+        file2_path = args.compare[1]
 
-    for folder in all_potential_folders:
-        has_log = bool(glob.glob(os.path.join(folder, "*.log")))
-        has_out = bool(glob.glob(os.path.join(folder, "*.out")))
+        if not os.path.exists(file1_path):
+            print(f"Error: File not found: {file1_path}")
+            exit(1)
+        if not os.path.exists(file2_path):
+            print(f"Error: File not found: {file2_path}")
+            exit(1)
+
+        # Determine file extension pattern from the provided files
+        ext1 = os.path.splitext(file1_path)[1].lower()
+        ext2 = os.path.splitext(file2_path)[1].lower()
+
+        if ext1 != ext2:
+            print(f"Warning: Comparing files with different extensions ({ext1} and {ext2}). Proceeding, but ensure they are compatible.")
         
-        if has_log:
-            folders_with_log_files.append(folder)
-        if has_out:
-            folders_with_out_files.append(folder)
+        # For comparison mode, the "input_source" is the list of files itself.
+        # The file_extension_pattern is not strictly used for globbing here, but passed for consistency.
+        # We can just use the extension of the first file, or assume both are valid.
+        file_extension_pattern_for_compare = ext1 if ext1 in ['.log', '.out'] else None
+        if not file_extension_pattern_for_compare:
+            print("Error: Provided files do not have .log or .out extensions.")
+            exit(1)
 
-    all_valid_folders_to_display = sorted(list(set(folders_with_log_files + folders_with_out_files)))
+        print(f"\n--- Comparing files: {os.path.basename(file1_path)} and {os.path.basename(file2_path)} ---\n")
+        perform_clustering_and_analysis(
+            input_source=[file1_path, file2_path],
+            threshold=clustering_threshold,
+            file_extension_pattern=file_extension_pattern_for_compare, # Pass for consistency, though not used for glob
+            rmsd_threshold=rmsd_validation_threshold,
+            output_base_dir=output_directory,
+            force_reprocess_cache=True, # Always reprocess for comparison
+            weights=weights_dict,
+            is_compare_mode=True,
+            min_std_threshold=min_std_threshold_val,
+            abs_tolerances=abs_tolerances_dict # Pass the new argument
+        )
+        print(f"\n--- Finished comparing files: {os.path.basename(file1_path)} and {os.path.basename(file2_path)} ---\n")
 
-    if not all_valid_folders_to_display:
-        print("No subdirectories containing .log or .out files found, or files are organized directly in the current directory.")
-        exit(0)
-
-    print("\nFound the following folder(s) containing quantum chemistry log/out files:\n")
-    for i, folder in enumerate(all_valid_folders_to_display):
-        display_name = os.path.basename(folder)
-        if folder == current_dir:
-            display_name = "./"
+    else: # Normal mode (folder processing)
+        all_potential_folders = [current_dir] + [d for d in glob.glob(os.path.join(current_dir, '*')) if os.path.isdir(d)]
         
-        folder_types_present = []
-        if folder in folders_with_log_files: folder_types_present.append(".log")
-        if folder in folders_with_out_files: folder_types_present.append(".out")
-        
-        print(f"  [{i+1}] {display_name} (Contains: {', '.join(folder_types_present)})")
+        folders_with_log_files = []
+        folders_with_out_files = []
 
-    selected_folders = []
-    while True:
-        choice = input("\nEnter the number of the folder to process, or type 'a' to process all: ").strip().lower()
-        
-        if choice == 'a':
-            selected_folders = all_valid_folders_to_display
-            break
-        try:
-            folder_index = int(choice) - 1
-            if 0 <= folder_index < len(all_valid_folders_to_display):
-                selected_folders = [all_valid_folders_to_display[folder_index]]
+        for folder in all_potential_folders:
+            has_log = bool(glob.glob(os.path.join(folder, "*.log")))
+            has_out = bool(glob.glob(os.path.join(folder, "*.out")))
+            
+            if has_log:
+                folders_with_log_files.append(folder)
+            if has_out:
+                folders_with_out_files.append(folder)
+
+        all_valid_folders_to_display = sorted(list(set(folders_with_log_files + folders_with_out_files)))
+
+        if not all_valid_folders_to_display:
+            print("No subdirectories containing .log or .out files found, or files are organized directly in the current directory.")
+            exit(0)
+
+        print("\nFound the following folder(s) containing quantum chemistry log/out files:\n")
+        for i, folder in enumerate(all_valid_folders_to_display):
+            display_name = os.path.basename(folder)
+            if folder == current_dir:
+                display_name = "./"
+            
+            folder_types_present = []
+            if folder in folders_with_log_files: folder_types_present.append(".log")
+            if folder in folders_with_out_files: folder_types_present.append(".out")
+            
+            print(f"  [{i+1}] {display_name} (Contains: {', '.join(folder_types_present)})")
+
+        selected_folders = []
+        while True:
+            choice = input("\nEnter the number of the folder to process, or type 'a' to process all: ").strip().lower()
+            
+            if choice == 'a':
+                selected_folders = all_valid_folders_to_display
                 break
-            else:
-                print("\nInvalid number. Please enter a valid number from the list.")
-        except ValueError:
-            print("\nInvalid input. Please enter a number or 'a'.")
+            try:
+                folder_index = int(choice) - 1
+                if 0 <= folder_index < len(all_valid_folders_to_display):
+                    selected_folders = [all_valid_folders_to_display[folder_index]]
+                    break
+                else:
+                    print("\nInvalid number. Please enter a valid number from the list.")
+            except ValueError:
+                print("\nInvalid input. Please enter a number or 'a'.")
 
-    selected_set_has_log = False
-    selected_set_has_out = False
-    for folder_path in selected_folders:
-        if folder_path in folders_with_log_files:
-            selected_set_has_log = True
-        if folder_path in folders_with_out_files:
-            selected_set_has_out = True
+        selected_set_has_log = False
+        selected_set_has_out = False
+        for folder_path in selected_folders:
+            if folder_path in folders_with_log_files:
+                selected_set_has_log = True
+            if folder_path in folders_with_out_files:
+                selected_set_has_out = True
+            if selected_set_has_log and selected_set_has_out:
+                break
+
+        file_extension_pattern = None 
         if selected_set_has_log and selected_set_has_out:
-            break
+            while file_extension_pattern is None:
+                type_choice = input("\nBoth .log and .out files are present in the selected folder(s).\nWhich file type would you like to process?\n  [1] .log files\n  [2] .out files\n  Enter your choice (1 or 2): ").strip()
+                if type_choice == '1':
+                    file_extension_pattern = "*.log"
+                elif type_choice == '2':
+                    file_extension_pattern = "*.out"
+                else:
+                    print("Invalid choice. Please enter '1' or '2'.")
+        elif selected_set_has_log:
+            file_extension_pattern = "*.log" 
+            print("\nOnly .log files found in the selected folder(s). Processing .log files.")
+        elif selected_set_has_out:
+            file_extension_pattern = "*.out" 
+            print("\nOnly .out files found in the selected folder(s). Processing .out files.")
+        else:
+            print("\nNo .log or .out files found in the selected folder(s) that match available types. Exiting.")
+            exit(0)
 
-    file_extension_pattern = None 
-    if selected_set_has_log and selected_set_has_out:
-        while file_extension_pattern is None:
-            type_choice = input("\nBoth .log and .out files are present in the selected folder(s).\nWhich file type would you like to process?\n  [1] .log files\n  [2] .out files\n  Enter your choice (1 or 2): ").strip()
-            if type_choice == '1':
-                file_extension_pattern = "*.log"
-            elif type_choice == '2':
-                file_extension_pattern = "*.out"
-            else:
-                print("Invalid choice. Please enter '1' or '2'.")
-    elif selected_set_has_log:
-        file_extension_pattern = "*.log" 
-        print("\nOnly .log files found in the selected folder(s). Processing .log files.")
-    elif selected_set_has_out:
-        file_extension_pattern = "*.out" 
-        print("\nOnly .out files found in the selected folder(s). Processing .out files.")
-    else:
-        print("\nNo .log or .out files found in the selected folder(s) that match available types. Exiting.")
-        exit(0)
+        print(f"\nProcessing {len(selected_folders)} folder(s) for files matching '{file_extension_pattern}'...")
+        for folder_path in selected_folders:
+            display_name = os.path.basename(folder_path)
+            if folder_path == current_dir:
+                display_name = "./"
+            print(f"\n--- Processing folder: {display_name} ---\n")
 
-    print(f"\nProcessing {len(selected_folders)} folder(s) for files matching '{file_extension_pattern}'...")
-    for folder_path in selected_folders:
-        display_name = os.path.basename(folder_path)
-        if folder_path == current_dir:
-            display_name = "./"
-        print(f"\n--- Processing folder: {display_name} ---\n")
+            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict)
 
-        perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache)
-
-        print(f"\n--- Finished processing folder: {display_name} ---\n")
+            print(f"\n--- Finished processing folder: {display_name} ---\n")
 
     print("\nAll selected molecular analyses complete!\n")
