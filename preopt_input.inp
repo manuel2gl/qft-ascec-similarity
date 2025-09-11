@@ -1,0 +1,16 @@
+# name
+! Opt GFN2-xTB
+
+%pal
+  nprocs 12
+end
+
+%maxcore 4000
+
+%geom
+  maxiter 5000
+end
+
+* xyz 0 1
+#
+*

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import dataclasses
+import glob
 import math
 import numpy as np
 import os
+from pathlib import Path
 import random
 import re
 import shutil
@@ -13,8 +15,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from typing import Dict, List, Optional, Tuple 
-from datetime import timedelta # To format wall time
+from datetime import timedelta
 
 # Global Constants
 MAX_ATOM = 1000 # Increase this if your systems are larger than 1000 atoms
@@ -29,8 +32,10 @@ MAX_OVERLAP_PLACEMENT_ATTEMPTS = 100000 # Max attempts to place a single molecul
 # (e.g., mtobox_seed.xyz) which will include 8 dummy 'X' atoms for
 # visualizing the box in programs like GaussView.
 # If False, only the original XYZ file (mto_seed.xyz) will be generated.
+# This can be overridden by the --nobox command line flag.
 CREATE_BOX_XYZ_COPY = True 
-#CREATE_BOX_XYZ_COPY = False 
+
+version = "* ASCEC-v04: Jun-2025 *"  # Version of the ASCEC script
 
 # Symbol for dummy atoms used to mark box corners.
 
@@ -42,47 +47,113 @@ DUMMY_ATOM_SYMBOL = "X"
 # If your Fortran Ratom array uses different values or a specific parameterized set,
 # please ensure consistency with that source.
 R_ATOM = {
+    # Covalent radii for elements in Angstroms (for volume calculations and steric interactions)
+    # Based on Cordero et al. (2008) "Covalent radii revisited" Dalton Trans. 2832-2838
+    # and optimized values from previous ASCEC usage
+    
     # Period 1
-    1: 0.31,   # H (Hydrogen) - Your previous was 0.373
-    # 2: He (Helium) - Noble gases generally do not have covalent radii.
-    #    If present in your system and requiring steric interaction, Van der Waals radii would be used for them.
-
+    1: 0.31,   # H (Hydrogen)
+    2: 0.28,   # He (Helium) - Van der Waals approximation
+    
     # Period 2
-    3: 1.34,   # Li (Lithium)
-    4: 1.02,   # Be (Beryllium)
-    5: 0.82,   # B (Boron)
-    6: 0.77,   # C (Carbon) - Your previous was 0.772
-    7: 0.75,   # N (Nitrogen) - Your previous was 0.710
-    8: 0.73,   # O (Oxygen) - Your previous was 0.604
-    9: 0.71,   # F (Fluorine)
-    # 10: Ne (Neon) - No covalent radius
-
+    3: 1.28,   # Li (Lithium)
+    4: 0.96,   # Be (Beryllium)
+    5: 0.84,   # B (Boron)
+    6: 0.73,   # C (Carbon) - Standard covalent radius
+    7: 0.71,   # N (Nitrogen)
+    8: 0.66,   # O (Oxygen)
+    9: 0.57,   # F (Fluorine)
+    10: 0.58,  # Ne (Neon) - Van der Waals approximation
+    
     # Period 3
-    11: 1.54,  # Na (Sodium)
-    12: 1.30,  # Mg (Magnesium)
-    13: 1.18,  # Al (Aluminum)
+    11: 1.66,  # Na (Sodium)
+    12: 1.41,  # Mg (Magnesium)
+    13: 1.21,  # Al (Aluminum)
     14: 1.11,  # Si (Silicon)
     15: 1.07,  # P (Phosphorus)
     16: 1.05,  # S (Sulfur)
     17: 1.02,  # Cl (Chlorine)
-    # 18: Ar (Argon) - No covalent radius
-
+    18: 1.06,  # Ar (Argon) - Van der Waals approximation
+    
     # Period 4
-    19: 1.96,  # K (Potassium)
+    19: 2.03,  # K (Potassium)
     20: 1.76,  # Ca (Calcium)
-    # Transition metals: Covalent radii can vary significantly based on oxidation state and coordination.
-    # The following are typical single bond values.
+    21: 1.70,  # Sc (Scandium)
+    22: 1.60,  # Ti (Titanium)
+    23: 1.53,  # V (Vanadium)
+    24: 1.39,  # Cr (Chromium)
+    25: 1.39,  # Mn (Manganese) - low spin
+    26: 1.32,  # Fe (Iron) - low spin
+    27: 1.26,  # Co (Cobalt) - low spin
+    28: 1.24,  # Ni (Nickel)
+    29: 1.32,  # Cu (Copper)
     30: 1.22,  # Zn (Zinc)
     31: 1.22,  # Ga (Gallium)
     32: 1.20,  # Ge (Germanium)
-    33: 1.21,  # As (Arsenic)
+    33: 1.19,  # As (Arsenic)
     34: 1.20,  # Se (Selenium)
     35: 1.20,  # Br (Bromine)
-    # 36: Kr (Krypton) - No covalent radius
-
+    36: 1.16,  # Kr (Krypton) - Van der Waals approximation
+    
     # Period 5
+    37: 2.20,  # Rb (Rubidium)
+    38: 1.95,  # Sr (Strontium)
+    39: 1.90,  # Y (Yttrium)
+    40: 1.75,  # Zr (Zirconium)
+    41: 1.64,  # Nb (Niobium)
+    42: 1.54,  # Mo (Molybdenum)
+    43: 1.47,  # Tc (Technetium)
+    44: 1.46,  # Ru (Ruthenium)
+    45: 1.42,  # Rh (Rhodium)
+    46: 1.39,  # Pd (Palladium)
+    47: 1.45,  # Ag (Silver)
+    48: 1.44,  # Cd (Cadmium)
+    49: 1.42,  # In (Indium)
+    50: 1.39,  # Sn (Tin)
+    51: 1.39,  # Sb (Antimony)
+    52: 1.38,  # Te (Tellurium)
     53: 1.39,  # I (Iodine)
-    # 54: Xe (Xenon) - No covalent radius
+    54: 1.40,  # Xe (Xenon) - Van der Waals approximation
+    
+    # Period 6
+    55: 2.44,  # Cs (Cesium)
+    56: 2.15,  # Ba (Barium)
+    57: 2.07,  # La (Lanthanum)
+    
+    # Period 6 - Lanthanides (f-block, elements 58-71)
+    58: 2.04,  # Ce (Cerium)
+    59: 2.03,  # Pr (Praseodymium)
+    60: 2.01,  # Nd (Neodymium)
+    61: 1.99,  # Pm (Promethium)
+    62: 1.98,  # Sm (Samarium)
+    63: 1.98,  # Eu (Europium)
+    64: 1.96,  # Gd (Gadolinium)
+    65: 1.94,  # Tb (Terbium)
+    66: 1.92,  # Dy (Dysprosium)
+    67: 1.92,  # Ho (Holmium)
+    68: 1.89,  # Er (Erbium)
+    69: 1.90,  # Tm (Thulium)
+    70: 1.87,  # Yb (Ytterbium)
+    71: 1.87,  # Lu (Lutetium)
+    
+    # Period 6 - Transition metals (d-block, elements 72-80)
+    72: 1.75,  # Hf (Hafnium)
+    73: 1.70,  # Ta (Tantalum)
+    74: 1.62,  # W (Tungsten)
+    75: 1.51,  # Re (Rhenium)
+    76: 1.44,  # Os (Osmium)
+    77: 1.41,  # Ir (Iridium)
+    78: 1.36,  # Pt (Platinum)
+    79: 1.36,  # Au (Gold)
+    80: 1.32,  # Hg (Mercury)
+    
+    # Period 6 - Main group (p-block, elements 81-86)
+    81: 1.45,  # Tl (Thallium)
+    82: 1.46,  # Pb (Lead)
+    83: 1.48,  # Bi (Bismuth)
+    84: 1.40,  # Po (Polonium)
+    85: 1.50,  # At (Astatine)
+    86: 1.50,  # Rn (Radon)
 }
 
 # Element Symbol to Atomic Number Mapping
@@ -93,20 +164,30 @@ ELEMENT_SYMBOLS = {
     "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25, "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30,
     "Ga": 31, "Ge": 32, "As": 33, "Se": 34, "Br": 35, "Kr": 36, "Rb": 37, "Sr": 38, "Y": 39, "Zr": 40,
     "Nb": 41, "Mo": 42, "Tc": 43, "Ru": 44, "Rh": 45, "Pd": 46, "Ag": 47, "Cd": 48, "In": 49, "Sn": 50,
-    "Sb": 51, "Te": 52, 53: 'I',  54: 'Xe', 55: 'Cs',
-    56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd',
-    61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd', 65: 'Tb',
-    66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb',
-    71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W',  75: 'Re',
-    76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
-    81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At',
-    86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th',
-    91: 'Pa', 92: 'U',  93: 'Np', 94: 'Pu', 95: 'Am',
-    96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db',
-    106: 'Sg', 107: 'Bh', 108: 'Hs', 109: 'Mt', 110: 'Ds',
-    111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc',
-    116: 'Lv', 117: 'Ts', 118: 'Og'
+    "Sb": 51, "Te": 52, "I": 53, "Xe": 54, "Cs": 55, "Ba": 56, "La": 57, "Ce": 58, "Pr": 59, "Nd": 60,
+    "Pm": 61, "Sm": 62, "Eu": 63, "Gd": 64, "Tb": 65, "Dy": 66, "Ho": 67, "Er": 68, "Tm": 69, "Yb": 70,
+    "Lu": 71, "Hf": 72, "Ta": 73, "W": 74, "Re": 75, "Os": 76, "Ir": 77, "Pt": 78, "Au": 79, "Hg": 80,
+    "Tl": 81, "Pb": 82, "Bi": 83, "Po": 84, "At": 85, "Rn": 86, "Fr": 87, "Ra": 88, "Ac": 89, "Th": 90,
+    "Pa": 91, "U": 92, "Np": 93, "Pu": 94, "Am": 95, "Cm": 96, "Bk": 97, "Cf": 98, "Es": 99, "Fm": 100,
+    "Md": 101, "No": 102, "Lr": 103, "Rf": 104, "Db": 105, "Sg": 106, "Bh": 107, "Hs": 108, "Mt": 109, "Ds": 110,
+    "Rg": 111, "Cn": 112, "Nh": 113, "Fl": 114, "Mc": 115, "Lv": 116, "Ts": 117, "Og": 118
+}
+
+# Atomic Number to Element Symbol Mapping (reverse of ELEMENT_SYMBOLS)
+# This dictionary will be used to convert atomic numbers to element symbols for output.
+ATOMIC_NUMBER_TO_SYMBOL = {
+    1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O", 9: "F", 10: "Ne",
+    11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P", 16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca",
+    21: "Sc", 22: "Ti", 23: "V", 24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu", 30: "Zn",
+    31: "Ga", 32: "Ge", 33: "As", 34: "Se", 35: "Br", 36: "Kr", 37: "Rb", 38: "Sr", 39: "Y", 40: "Zr",
+    41: "Nb", 42: "Mo", 43: "Tc", 44: "Ru", 45: "Rh", 46: "Pd", 47: "Ag", 48: "Cd", 49: "In", 50: "Sn",
+    51: "Sb", 52: "Te", 53: "I", 54: "Xe", 55: "Cs", 56: "Ba", 57: "La", 58: "Ce", 59: "Pr", 60: "Nd",
+    61: "Pm", 62: "Sm", 63: "Eu", 64: "Gd", 65: "Tb", 66: "Dy", 67: "Ho", 68: "Er", 69: "Tm", 70: "Yb",
+    71: "Lu", 72: "Hf", 73: "Ta", 74: "W", 75: "Re", 76: "Os", 77: "Ir", 78: "Pt", 79: "Au", 80: "Hg",
+    81: "Tl", 82: "Pb", 83: "Bi", 84: "Po", 85: "At", 86: "Rn", 87: "Fr", 88: "Ra", 89: "Ac", 90: "Th",
+    91: "Pa", 92: "U", 93: "Np", 94: "Pu", 95: "Am", 96: "Cm", 97: "Bk", 98: "Cf", 99: "Es", 100: "Fm",
+    101: "Md", 102: "No", 103: "Lr", 104: "Rf", 105: "Db", 106: "Sg", 107: "Bh", 108: "Hs", 109: "Mt", 110: "Ds",
+    111: "Rg", 112: "Cn", 113: "Nh", 114: "Fl", 115: "Mc", 116: "Lv", 117: "Ts", 118: "Og"
 }
 
 # Atomic Weights for elements (Global Constant) - used for center of mass calculations
@@ -158,14 +239,14 @@ ELECTRONEGATIVITY_VALUES = {
     'Fr': 0.7, 'Ra': 0.9, 'Ac': 1.1, 'Th': 1.3, 'Pa': 1.5, 'U': 1.38, 'Np': 1.36,
     'Pu': 1.28, 'Am': 1.13, 'Cm': 1.28, 'Bk': 1.3, 'Cf': 1.3, 'Es': 1.3, 'Fm': 1.3,
     'Md': 101, 'No': 102, 'Lr': 103, 'Rf': 104, 'Db': 105, 'Sg': 106, 'Bh': 107,
-    'Hs': 108, 'Mt': 109, 'Ds': 110, 'Rg': 111, 'Cn': 112, 'Nh': 113, 'Fl': 114, # Corrected some values based on common tables
+    'Hs': 108, 'Mt': 109, 'Ds': 110, 'Rg': 111, 'Cn': 112, 'Nh': 113, 'Fl': 114,
     'Mc': 115, 'Lv': 116, 'Ts': 117, 'Og': 118
 }
 
 # 2. Define SystemState Class
 class SystemState:
     def __init__(self):
-        # --- Configuration parameters (typically read from input file) ---
+        # Configuration parameters read from input file
         self.random_generate_config: int = 0      # 0: Annealing; 1: Random configurations
         self.num_random_configs: int = 0          # Used if random_generate_config is 1
         self.cube_length: float = 0.0             # Simulation Cube Length (Angstroms)
@@ -177,6 +258,7 @@ class SystemState:
         self.geom_temp_factor: float = 0.0
         self.geom_num_steps: int = 0
         self.max_cycle: int = 0                   # Maximum Monte Carlo Cycles per Temperature (initial value from input)
+        self.max_cycle_floor: int = 10            # Floor value for maxstep reduction (default: 10)
         self.max_displacement_a: float = 0.0      # Maximum Displacement of each mass center (ds)
         self.max_rotation_angle_rad: float = 0.0  # Maximum Rotation angle in radians (dphi)
         self.ia: int = 0                          # QM program type (1: Gaussian, 2: ORCA, etc.)
@@ -504,15 +586,44 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
             # Adjusted spacing and added newline
             output_config_message = f"Geometrical quenching route.\n  To = {state.geom_temp_init:.1f} K  %dism = {(1.0 - state.geom_temp_factor) * 100:.1f} %  nT = {state.geom_num_steps} steps"
 
-    # Print centered headers
-    centered_header1 = "Annealing Simulado Con Energía Cuántica (ASCEC)".center(60)
-    centered_header2 = "* ASCEC-V04: Jun-2025 *".center(60)
-
+    # Print the new ASCII art header
+    
+    # Helper function to center text within 70 characters
+    def center_text(text, width=70):
+        return text.center(width)
+    
     # Write to the file handle
-    print("=" * 60 + "\n", file=output_file_handle)
-    print(centered_header1, file=output_file_handle)
-    print(centered_header2 + "\n", file=output_file_handle)
-    print("=" * 60 + "\n", file=output_file_handle) # New separator
+    print("======================================================================", file=output_file_handle)
+    print("", file=output_file_handle)
+    print(center_text("*********************"), file=output_file_handle)
+    print(center_text("*     A S C E C     *"), file=output_file_handle)
+    print(center_text("*********************"), file=output_file_handle)
+    print("", file=output_file_handle)
+    print("                             √≈≠==≈                                  ", file=output_file_handle)
+    print("   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       ", file=output_file_handle)
+    print("     ÷++÷       ÷++÷           =++=                     ÷×××××=      ", file=output_file_handle)
+    print("     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      ", file=output_file_handle)
+    print("     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     ", file=output_file_handle)
+    print("     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    ", file=output_file_handle)
+    print("     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    ", file=output_file_handle)
+    print("     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   ", file=output_file_handle)
+    print("      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   ", file=output_file_handle)
+    print("       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- ", file=output_file_handle)
+    print("          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ ", file=output_file_handle)
+    print("", file=output_file_handle)
+    print("", file=output_file_handle)
+    print(center_text("Universidad de Antioquia - Medellín - Colombia"), file=output_file_handle)
+    print("", file=output_file_handle)
+    print("", file=output_file_handle)
+    print(center_text("Annealing Simulado Con Energía Cuántica"), file=output_file_handle)
+    print("", file=output_file_handle)
+    print(center_text(version), file=output_file_handle)
+    print("", file=output_file_handle)
+    print(center_text("Química Física Teórica - QFT"), file=output_file_handle)
+    print("", file=output_file_handle)
+    print("", file=output_file_handle)
+    print("======================================================================", file=output_file_handle)
+    print("", file=output_file_handle)
     print("Elemental composition of the system:", file=output_file_handle)
     for line in element_composition_lines:
         print(line, file=output_file_handle)
@@ -561,42 +672,16 @@ def initialize_element_symbols(state: SystemState):
     Initializes a dictionary mapping atomic numbers to element symbols
     and populates the Fortran-style list state.sym.
     """
-    element_map = {
-        1: 'H',   2: 'He',  3: 'Li',  4: 'Be',  5: 'B',
-        6: 'C',   7: 'N',   8: 'O',   9: 'F',  10: 'Ne',
-        11: 'Na', 12: 'Mg', 13: 'Al', 14: 'Si', 15: 'P',
-        16: 'S',  17: 'Cl', 18: 'Ar', 19: 'K',  20: 'Ca',
-        21: 'Sc', 22: 'Ti', 23: 'V',  24: 'Cr', 25: 'Mn',
-        26: 'Fe', 27: 'Co', 28: 'Ni', 29: 'Cu', 30: 'Zn',
-        31: 'Ga', 32: 'Ge', 33: 'As', 34: 'Se', 35: 'Br',
-        36: 'Kr', 37: 'Rb', 38: 'Sr', 39: 'Y',  40: 'Zr',
-        41: 'Nb', 42: 'Mo', 43: 'Tc', 44: 'Ru', 45: 'Rh',
-        46: 'Pd', 47: 'Ag', 48: 'Cd', 49: 'In', 50: 'Sn',
-        51: 'Sb', 52: 'Te', 53: 'I',  54: 'Xe', 55: 'Cs',
-    56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd',
-    61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd', 65: 'Tb',
-    66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb',
-    71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W',  75: 'Re',
-    76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
-    81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At',
-    86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th',
-    91: 'Pa', 92: 'U',  93: 'Np', 94: 'Pu', 95: 'Am',
-    96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db',
-    106: 'Sg', 107: 'Bh', 108: 'Hs', 109: 'Mt', 110: 'Ds',
-    111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc',
-    116: 'Lv', 117: 'Ts', 118: 'Og'
-    }
-    state.atomic_number_to_symbol = element_map
+    state.atomic_number_to_symbol = ATOMIC_NUMBER_TO_SYMBOL.copy()
 
-    for z, symbol in element_map.items():
+    for z, symbol in ATOMIC_NUMBER_TO_SYMBOL.items():
         if z < len(state.sym):
             state.sym[z] = symbol.strip()
 
 # Helper function to get element symbol (used in rless.out and history output)
 def get_element_symbol(atomic_number: int) -> str:
     """Retrieves the element symbol for a given atomic number."""
-    return ELEMENT_SYMBOLS.get(atomic_number, 'X') # Default to 'X' for unknown/dummy
+    return ATOMIC_NUMBER_TO_SYMBOL.get(atomic_number, 'X') # Default to 'X' for unknown/dummy
 
 # 4. Initialize element weights
 def initialize_element_weights(state: SystemState):
@@ -923,8 +1008,12 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                 state.geom_temp_factor = float(parts[1])
             state.geom_num_steps = int(parts[2])
 
-        elif config_lines_parsed == 5: # Line 6: Maximum Monte Carlo Cycles per T
+        elif config_lines_parsed == 5: # Line 6: Maximum Monte Carlo Cycles per T and floor value (optional)
             state.max_cycle = int(parts[0])
+            # Check if floor value is provided (optional second parameter)
+            if len(parts) >= 2:
+                state.max_cycle_floor = int(parts[1])
+            # If not provided, default value (10) is already set in __init__
             state.maxstep = state.max_cycle # Initialize maxstep with the initial max_cycle from input
 
         elif config_lines_parsed == 6: # Line 7: Maximum Displacement & Rotation
@@ -1116,10 +1205,83 @@ QM_PROGRAM_DETAILS = {
         "default_exe": "orca", # Common executable name.
         "input_ext": ".inp",
         "output_ext": ".out",
-        "energy_regex": r"FINAL SINGLE POINT ENERGY:\s*([-\d.]+)\s*Eh", # More precise for ORCA
+        "energy_regex": r"FINAL SINGLE POINT ENERGY:\s*([-+]?\d+\.\d+)\s*(?:Eh|E_h)?", # More robust for ORCA
         "termination_string": "ORCA TERMINATED NORMALLY",
+        "alternative_termination": ["****ORCA TERMINATED NORMALLY****", "OPTIMIZATION RUN DONE"],  # Additional termination patterns
     },
 }
+
+# Helper function to preserve QM files from last accepted configuration
+def preserve_last_qm_files(state: SystemState, run_dir: str):
+    """
+    Preserve the QM input and output files from the most recent QM calculation
+    by copying them to special "last_accepted" filenames for debugging purposes.
+    """
+    call_id = state.qm_call_count
+    
+    # Source files (from the most recent calculation)
+    source_input = os.path.join(run_dir, f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
+    source_output = os.path.join(run_dir, f"qm_output_{call_id}{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    source_chk = os.path.join(run_dir, f"qm_chk_{call_id}.chk") if state.qm_program == "gaussian" else None
+    
+    # Destination files (preserved versions)
+    dest_input = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
+    dest_output = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    dest_chk = os.path.join(run_dir, "anneal.chk") if state.qm_program == "gaussian" else None
+    
+    # Copy files if they exist
+    try:
+        if os.path.exists(source_input):
+            import shutil
+            shutil.copy2(source_input, dest_input)
+            _print_verbose(f"  Preserved QM input file: {os.path.basename(dest_input)}", 2, state)
+        
+        if os.path.exists(source_output):
+            import shutil
+            shutil.copy2(source_output, dest_output)
+            _print_verbose(f"  Preserved QM output file: {os.path.basename(dest_output)}", 2, state)
+            
+        if source_chk and os.path.exists(source_chk):
+            import shutil
+            shutil.copy2(source_chk, dest_chk)
+            _print_verbose(f"  Preserved QM checkpoint file: {os.path.basename(dest_chk)}", 2, state)
+    except Exception as e:
+        _print_verbose(f"  Warning: Could not preserve QM files: {e}", 1, state)
+
+# Helper function to preserve QM files for debugging (last attempt, successful or failed)
+def preserve_last_qm_files_debug(state: SystemState, run_dir: str, call_id: int, status: int):
+    """
+    Preserve the QM input and output files from the most recent calculation attempt
+    for debugging purposes. This preserves files from both successful and failed calculations.
+    """
+    # Source files (from the most recent calculation)
+    source_input = os.path.join(run_dir, f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
+    source_output = os.path.join(run_dir, f"qm_output_{call_id}{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    source_chk = os.path.join(run_dir, f"qm_chk_{call_id}.chk") if state.qm_program == "gaussian" else None
+    
+    # Destination files (preserved versions for debugging)
+    dest_input = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
+    dest_output = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    dest_chk = os.path.join(run_dir, f"anneal.chk") if source_chk else None
+    
+    # Copy files if they exist
+    try:
+        if os.path.exists(source_input):
+            import shutil
+            shutil.copy2(source_input, dest_input)
+            _print_verbose(f"  Preserved QM input file for debugging: {os.path.basename(dest_input)}", 2, state)
+        
+        if os.path.exists(source_output):
+            import shutil
+            shutil.copy2(source_output, dest_output)
+            _print_verbose(f"  Preserved QM output file for debugging: {os.path.basename(dest_output)}", 2, state)
+            
+        if source_chk and os.path.exists(source_chk):
+            import shutil
+            shutil.copy2(source_chk, dest_chk)
+            _print_verbose(f"  Preserved QM checkpoint file for debugging: {os.path.basename(dest_chk)}", 2, state)
+    except Exception as e:
+        _print_verbose(f"  Warning: Could not preserve QM files for debugging: {e}", 1, state)
 
 # 13. Calculate energy function
 def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: SystemState, run_dir: str) -> Tuple[float, int]:
@@ -1147,6 +1309,22 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     temp_files_to_clean = [qm_input_path, qm_output_path]
     if qm_chk_path:
         temp_files_to_clean.append(qm_chk_path)
+    
+    # Add ORCA-specific files to cleanup list
+    if state.qm_program == "orca":
+        input_basename = f"qm_input_{call_id}"
+        orca_files = [
+            f"{input_basename}.gbw",
+            f"{input_basename}.densities", 
+            f"{input_basename}_property.txt",
+            f"{input_basename}.engrad",
+            f"{input_basename}.pcgrad",
+            f"{input_basename}.hess",
+            f"{input_basename}.cis",
+            f"{input_basename}.uno"
+        ]
+        for orca_file in orca_files:
+            temp_files_to_clean.append(os.path.join(run_dir, orca_file))
 
     try:
         # Generate QM input file
@@ -1168,18 +1346,32 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 if state.qm_additional_keywords: f.write(f"{state.qm_additional_keywords}\n")
                 f.write("\n") 
             elif state.qm_program == "orca":
-                # Changed from / to space if a basis set is present, otherwise no change.
-                # ORCA typically uses space for keywords unless it's a specific block definition.
-                f.write(f"! {state.qm_method} {state.qm_basis_set}\n") 
+                # ORCA keyword line generation
+                # For semi-empirical methods like PM3, AM1, MNDO, we don't include basis sets
+                semi_empirical_methods = ['pm3', 'am1', 'mndo', 'pm6', 'pm7']
+                
+                if state.qm_method.lower() in semi_empirical_methods:
+                    # Semi-empirical methods don't need basis sets
+                    f.write(f"! {state.qm_method}\n")
+                else:
+                    # Ab initio or DFT methods need basis sets
+                    f.write(f"! {state.qm_method} {state.qm_basis_set}\n")
+                
                 if state.qm_additional_keywords: f.write(f"! {state.qm_additional_keywords}\n")
                 
                 # Only write %maxcore if qm_memory was explicitly provided in the input file
                 if state.qm_memory:
                     mem_val = state.qm_memory.replace('GB', '').replace('MB', '')
                     f.write(f"%maxcore {mem_val}\n") 
-                if state.qm_nproc: f.write(f"%pal nprocs {state.qm_nproc} end\n")
                 
-                f.write("* xyz {state.charge} {state.multiplicity}\n")
+                # Only use parallel processing for non-semi-empirical methods
+                # Semi-empirical methods (NDO methods) in ORCA don't support parallel execution
+                if state.qm_nproc and state.qm_method.lower() not in semi_empirical_methods:
+                    f.write(f"%pal nprocs {state.qm_nproc} end\n")
+                elif state.qm_nproc and state.qm_method.lower() in semi_empirical_methods:
+                    _print_verbose(f"Note: Parallel processing disabled for semi-empirical method {state.qm_method} (ORCA limitation)", 1, state)
+                
+                f.write(f"* xyz {state.charge} {state.multiplicity}\n")
                 for i in range(state.natom):
                     symbol = state.atomic_number_to_symbol.get(atomic_numbers[i], "X")
                     f.write(f"{symbol} {coords[i, 0]:.6f} {coords[i, 1]:.6f} {coords[i, 2]:.6f}\n")
@@ -1193,26 +1385,47 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
         _print_verbose(f"Error in QM input generation: {e}", 0, state)
         return 0.0, 0
 
-    # Determine QM command
-    qm_exe = QM_PROGRAM_DETAILS[state.ia]["default_exe"]
+    # Determine QM command - use alias from input file if provided, otherwise use default
+    qm_exe = state.alias if state.alias else QM_PROGRAM_DETAILS[state.ia]["default_exe"]
     if state.qm_program == "gaussian":
         qm_command = f"{qm_exe} {qm_input_filename} {qm_output_filename}"
     elif state.qm_program == "orca":
-        qm_command = f"{qm_exe} {qm_input_filename} > {qm_output_filename}"
+        # For ORCA, we'll use subprocess to capture output properly
+        qm_command = [qm_exe, qm_input_filename]
     else:
         _print_verbose(f"Error: Unsupported QM program '{state.qm_program}' for command execution.", 0, state)
         return 0.0, 0
 
     try:
-        process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
+        # First, check if the QM executable is available
+        if state.qm_program == "orca":
+            # Test if ORCA is available
+            try:
+                test_process = subprocess.run([qm_exe, "--help"], capture_output=True, text=True, timeout=5)
+                if test_process.returncode != 0:
+                    _print_verbose(f"Warning: ORCA executable '{qm_exe}' may not be properly installed or accessible.", 1, state)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                _print_verbose(f"Error: ORCA executable '{qm_exe}' not found or not working: {e}", 1, state)
+                return 0.0, 0
+        
+        if state.qm_program == "orca":
+            # Special handling for ORCA to capture output properly
+            with open(qm_output_path, 'w') as output_file:
+                process = subprocess.run(qm_command, cwd=run_dir, stdout=output_file, stderr=subprocess.PIPE, text=True, check=False)
+        else:
+            # For Gaussian and other programs
+            process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
         
         # Check for non-zero exit code first
         if process.returncode != 0:
             _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 1, state)
-            # Only print detailed stdout/stderr if verbosity is high
-            if state.verbosity_level >= 2:
-                _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 2, state)
-                _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 2, state)
+            if state.qm_program == "orca":
+                _print_verbose(f"  Command executed: {' '.join(qm_command)}", 1, state)
+                _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 1, state)
+            else:
+                _print_verbose(f"  Command executed: {qm_command}", 1, state)
+                _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 1, state)
+                _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 1, state)
             status = 0 
         elif not os.path.exists(qm_output_path):
             _print_verbose(f"QM output file '{qm_output_path}' was not generated.", 1, state)
@@ -1222,7 +1435,16 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 output_content = f.read()
             
             # Check for normal termination string
-            if QM_PROGRAM_DETAILS[state.ia]["termination_string"] not in output_content:
+            termination_found = QM_PROGRAM_DETAILS[state.ia]["termination_string"] in output_content
+            
+            # For programs with alternative termination patterns, check those too
+            if not termination_found and "alternative_termination" in QM_PROGRAM_DETAILS[state.ia]:
+                for alt_term in QM_PROGRAM_DETAILS[state.ia]["alternative_termination"]:
+                    if alt_term in output_content:
+                        termination_found = True
+                        break
+            
+            if not termination_found:
                 _print_verbose(f"QM program '{state.qm_program}' did not terminate normally for config {call_id}.", 1, state)
                 status = 0
             else:
@@ -1231,14 +1453,33 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     energy = float(match.group(1))
                     status = 1
                 else:
-                    _print_verbose(f"Could not find energy in {state.qm_program} output file: {qm_output_path}", 1, state)
-                    status = 0
+                    # For ORCA, try alternative energy patterns as fallback
+                    if state.qm_program == "orca":
+                        # Try alternative patterns commonly found in ORCA output
+                        fallback_patterns = [
+                            r"Total Energy\s*:\s*([-+]?\d+\.\d+)\s*Eh",
+                            r"E\(SCF\)\s*=\s*([-+]?\d+\.\d+)\s*Eh",
+                            r"TOTAL SCF ENERGY\s*=\s*([-+]?\d+\.\d+)\s*Eh?"
+                        ]
+                        for pattern in fallback_patterns:
+                            match = re.search(pattern, output_content)
+                            if match:
+                                energy = float(match.group(1))
+                                status = 1
+                                _print_verbose(f"Found energy using fallback pattern: {pattern}", 2, state)
+                                break
+                    
+                    if status == 0:
+                        _print_verbose(f"Could not find energy in {state.qm_program} output file: {qm_output_path}", 1, state)
     
     except Exception as e:
         _print_verbose(f"An error occurred during QM calculation or parsing: {e}", 0, state)
         status = 0
     finally:
-        # Immediate cleanup of QM files for this specific call
+        # Always preserve the last QM files for debugging (both successful and failed attempts)
+        preserve_last_qm_files_debug(state, run_dir, call_id, status)
+        
+        # Clean up numbered QM files but keep the "last_" versions for debugging
         for fpath in temp_files_to_clean:
             if os.path.exists(fpath):
                 try:
@@ -1339,8 +1580,8 @@ def write_accepted_xyz(prefix: str, config_number: int, energy: float, temp: flo
         state (SystemState): The current SystemState object.
         is_initial (bool): True if this is the very first accepted configuration.
     """
-    xyz_path = f"{prefix}.xyz"
-    box_xyz_path = f"{prefix.replace('mto_', 'mtobox_').replace('result_', 'resultbox_')}.xyz" # Corrected replacement for box name
+    xyz_path = os.path.join(state.output_dir, f"{prefix}.xyz")
+    box_xyz_path = os.path.join(state.output_dir, f"{prefix.replace('mto_', 'mtobox_').replace('result_', 'resultbox_')}.xyz") # Corrected replacement for box name
 
     remark = "" # Removed specific remarks, now handled by write_single_xyz_configuration's internal logic
 
@@ -1697,58 +1938,280 @@ def cleanup_qm_files(files_to_clean: List[str], state: SystemState):
         _print_verbose(f"Cleaned up {cleaned_count} leftover QM files during final cleanup.", 1, state)
 
 # Add this function somewhere in your script, e.g., near helper functions.
+def calculate_molecular_volume(mol_def, method='covalent_spheres') -> float:
+    """
+    Calculates the approximate volume of a molecule using different methods.
+    
+    Args:
+        mol_def: MoleculeData object containing atomic coordinates and numbers
+        method (str): Calculation method - 'covalent_spheres', 'convex_hull', or 'grid_based'
+    
+    Returns:
+        float: Estimated molecular volume in Angstroms^3
+    """
+    if not mol_def.atoms_coords:
+        return 0.0
+    
+    if method == 'covalent_spheres':
+        # Sum of individual atomic volumes using covalent radii
+        # This is an upper bound estimate but computationally simple
+        total_volume = 0.0
+        for atomic_num, x, y, z in mol_def.atoms_coords:
+            radius = R_ATOM.get(atomic_num, 1.5)  # Default to 1.5 Å for unknown atoms
+            atomic_volume = (4.0/3.0) * np.pi * (radius ** 3)
+            total_volume += atomic_volume
+        
+        # Apply an overlap correction factor (molecules are not just isolated spheres)
+        # Typical values: 0.6-0.8 for organic molecules, 0.7-0.9 for inorganic
+        overlap_factor = 0.74  # Based on typical molecular packing
+        return total_volume * overlap_factor
+    
+    elif method == 'convex_hull':
+        # Calculate volume using the convex hull of atomic spheres
+        # More accurate for elongated or complex-shaped molecules
+        try:
+            from scipy.spatial import ConvexHull
+            
+            # Create points on the surface of each atomic sphere
+            all_surface_points = []
+            for atomic_num, x, y, z in mol_def.atoms_coords:
+                radius = R_ATOM.get(atomic_num, 1.5)
+                center = np.array([x, y, z])
+                
+                # Generate points on sphere surface (using spherical coordinates)
+                n_points = 20  # Number of points per atom
+                phi = np.random.uniform(0, 2*np.pi, n_points)
+                costheta = np.random.uniform(-1, 1, n_points)
+                theta = np.arccos(costheta)
+                
+                sphere_points = center + radius * np.column_stack([
+                    np.sin(theta) * np.cos(phi),
+                    np.sin(theta) * np.sin(phi),
+                    np.cos(theta)
+                ])
+                all_surface_points.extend(sphere_points)
+            
+            if len(all_surface_points) < 4:
+                # Fall back to covalent_spheres method
+                return calculate_molecular_volume(mol_def, 'covalent_spheres')
+            
+            hull = ConvexHull(all_surface_points)
+            return hull.volume
+            
+        except ImportError:
+            # scipy not available, fall back to covalent_spheres
+            return calculate_molecular_volume(mol_def, 'covalent_spheres')
+        except Exception:
+            # Any other error, fall back to covalent_spheres
+            return calculate_molecular_volume(mol_def, 'covalent_spheres')
+    
+    else:
+        # Default to covalent_spheres method
+        return calculate_molecular_volume(mol_def, 'covalent_spheres')
+
+
+def calculate_optimal_box_length(state: SystemState, target_packing_fractions: List[float] = None) -> Dict:
+    """
+    Calculates optimal box lengths based on molecular volumes and target packing densities.
+    
+    Args:
+        state: SystemState object containing molecule definitions
+        target_packing_fractions: List of target packing fractions to calculate box sizes for
+    
+    Returns:
+        Dict: Results containing volumes, box lengths for different packing fractions, and recommendations
+    """
+    if target_packing_fractions is None:
+        # Use more conservative packing fractions for hydrogen-bonded systems
+        target_packing_fractions = [0.05, 0.10, 0.15, 0.20, 0.25]  # 5% to 25% packing
+    
+    if not state.all_molecule_definitions:
+        return {'error': 'No molecule definitions found'}
+    
+    results = {
+        'individual_molecular_volumes': [],
+        'total_molecular_volume': 0.0,
+        'num_molecules': state.num_molecules,
+        'box_length_recommendations': {},
+        'packing_analysis': {}
+    }
+    
+    # Calculate volume for each unique molecule definition
+    unique_molecular_volumes = []
+    for mol_def in state.all_molecule_definitions:
+        volume = calculate_molecular_volume(mol_def, method='covalent_spheres')
+        unique_molecular_volumes.append(volume)
+        results['individual_molecular_volumes'].append({
+            'molecule_label': mol_def.label,
+            'num_atoms': mol_def.num_atoms,
+            'volume_A3': volume
+        })
+    
+    # Calculate total volume of all molecules that will be placed
+    total_molecular_volume = 0.0
+    for i, mol_def_idx in enumerate(state.molecules_to_add):
+        if mol_def_idx < len(unique_molecular_volumes):
+            total_molecular_volume += unique_molecular_volumes[mol_def_idx]
+    
+    results['total_molecular_volume'] = total_molecular_volume
+    
+    if total_molecular_volume <= 0:
+        return {'error': 'Total molecular volume is zero or negative'}
+    
+    # Calculate box lengths for different packing fractions
+    for packing_fraction in target_packing_fractions:
+        # Box volume = total_molecular_volume / packing_fraction
+        required_box_volume = total_molecular_volume / packing_fraction
+        
+        # For a cubic box: L^3 = required_box_volume
+        box_length = required_box_volume ** (1.0/3.0)
+        
+        results['box_length_recommendations'][f'{packing_fraction:.1%}'] = {
+            'packing_fraction': packing_fraction,
+            'box_length_A': box_length,
+            'box_volume_A3': required_box_volume,
+            'free_volume_A3': required_box_volume - total_molecular_volume,
+            'free_volume_fraction': 1.0 - packing_fraction
+        }
+    
+    # Add analysis for current box length if available
+    if hasattr(state, 'cube_length') and state.cube_length > 0:
+        current_box_volume = state.cube_length ** 3
+        current_packing_fraction = total_molecular_volume / current_box_volume
+        
+        results['current_box_analysis'] = {
+            'current_box_length_A': state.cube_length,
+            'current_box_volume_A3': current_box_volume,
+            'current_packing_fraction': current_packing_fraction,
+            'current_free_volume_A3': current_box_volume - total_molecular_volume,
+            'current_free_volume_fraction': 1.0 - current_packing_fraction
+        }
+    
+    # Calculate largest molecular dimension for comparison with old method
+    max_molecular_extent = 0.0
+    for mol_def in state.all_molecule_definitions:
+        if not mol_def.atoms_coords:
+            continue
+        coords_array = np.array([atom[1:] for atom in mol_def.atoms_coords])
+        min_coords = np.min(coords_array, axis=0)
+        max_coords = np.max(coords_array, axis=0)
+        extents = max_coords - min_coords
+        current_max_extent = np.max(extents)
+        if current_max_extent > max_molecular_extent:
+            max_molecular_extent = current_max_extent
+    
+    results['max_molecular_extent_A'] = max_molecular_extent
+    results['old_method_recommendation_A'] = max_molecular_extent + 16.0  # 8 Å on each side
+    
+    return results
+
+
 def provide_box_length_advice(state: SystemState):
     """
-    Analyzes molecule definitions and provides advice on appropriate box lengths
-    based on the largest molecular dimension and a minimum vacuum clearance.
+    Provides comprehensive advice on appropriate box lengths based on molecular volumes
+    and target packing densities. This is a much more rigorous approach than the simple
+    8 Angstrom rule of thumb.
     """
     if not state.all_molecule_definitions:
         _print_verbose("Cannot provide box length advice: No molecule definitions found.", 0, state)
         return
 
-    # Constant for advice
-    MIN_VACUUM_PER_SIDE_ANGSTROM = 8.0 # Minimum recommended vacuum between molecule and wall
-
-    max_molecular_extent = 0.0 # Will store the largest dimension of any molecule
-
-    for mol_def in state.all_molecule_definitions:
-        if not mol_def.atoms_coords:
-            continue
-
-        coords_array = np.array([atom[1:] for atom in mol_def.atoms_coords]) # Extract just x,y,z
-        
-        # Calculate min/max for each dimension for the current molecule
-        min_coords = np.min(coords_array, axis=0)
-        max_coords = np.max(coords_array, axis=0)
-        
-        # Calculate spatial extent (length, width, height) of the current molecule
-        extent_x = max_coords[0] - min_coords[0]
-        extent_y = max_coords[1] - min_coords[1]
-        extent_z = max_coords[2] - min_coords[2]
-        
-        # The largest dimension of this molecule
-        current_mol_max_extent = max(extent_x, extent_y, extent_z)
-        
-        if current_mol_max_extent > max_molecular_extent:
-            max_molecular_extent = current_mol_max_extent
-
-    if max_molecular_extent == 0.0:
-        _print_verbose("Cannot provide box length advice: Molecular dimensions could not be determined.", 0, state)
+    _print_verbose("\n" + "="*78, 1, state)
+    _print_verbose("Box length analysis", 1, state)
+    _print_verbose("="*78, 1, state)
+    _print_verbose(f"Successfully parsed {state.natom} atoms", 1, state)
+    _print_verbose("", 1, state)
+    
+    # Calculate optimal box lengths using volume-based approach
+    results = calculate_optimal_box_length(state)
+    
+    if 'error' in results:
+        _print_verbose(f"Error in volume analysis: {results['error']}", 0, state)
         return
     
-    state.max_molecular_extent = max_molecular_extent # Store this in state for summary printing
-
-    # Calculate recommended minimum box length
-    # This accounts for the largest molecule plus some vacuum on both sides.
-    recommended_box_length = max_molecular_extent + (2 * MIN_VACUUM_PER_SIDE_ANGSTROM)
+    # Display molecular volume analysis
+    _print_verbose("1. Molecular volume analysis:", 1, state)
+    _print_verbose("-" * 35, 1, state)
     
-    _print_verbose("\n--- Box Length Suggestion ---", 1, state)
-    _print_verbose(f"Based on your molecule definitions:", 1, state)
-    _print_verbose(f"    - Largest molecule's maximum dimension: {max_molecular_extent:.2f} A", 1, state) # Changed to A
-    _print_verbose(f"\nRecommendation for Simulation Cube Length:", 1, state)
-    _print_verbose(f"    - Practical box length: {recommended_box_length:.2f} A", 1, state) # Changed to A
-    _print_verbose(f"    - Ensures {MIN_VACUUM_PER_SIDE_ANGSTROM:.1f} A clearance per side", 1, state) # Changed to A
-    _print_verbose("-----------------------------\n", 1, state)
+    total_volume = results['total_molecular_volume']
+    _print_verbose(f"Number of molecules to place: {results['num_molecules']}", 1, state)
+    _print_verbose(f"Total molecular volume: {total_volume:.2f} Å³", 1, state)
+    
+    _print_verbose("\nIndividual molecule volumes:", 1, state)
+    for mol_info in results['individual_molecular_volumes']:
+        _print_verbose(f"  • {mol_info['molecule_label']}: {mol_info['volume_A3']:.2f} Å³ "
+                      f"({mol_info['num_atoms']} atoms)", 1, state)
+    
+    # Display box length recommendations
+    _print_verbose("\n2. BoxBOX LENGTH RECOMMENDATIONS (Volume-Based):", 1, state)
+    _print_verbose("-" * 79, 1, state)
+    
+    recommendations = results['box_length_recommendations']
+    _print_verbose("Packing Fraction (%)     Box Length (Å)     Box Volume (Å³)    Free Volume (%)", 1, state)
+    _print_verbose("-" * 79, 1, state)
+
+    for key, rec in recommendations.items():
+        pf = rec['packing_fraction']
+        bl = rec['box_length_A']
+        bv = rec['box_volume_A3']
+        fv = rec['free_volume_A3']
+        total_bv = rec['box_volume_A3']
+        free_volume_pct = (fv / total_bv) * 100  # Calculate percentage
+        _print_verbose(f"         {pf*100:4.1f}                 {bl:5.2f}               {bv:3.0f}               {free_volume_pct:4.1f}", 1, state)
+    
+    # Current box analysis - show current cube length and largest molecular extent
+    if 'current_box_analysis' in results:
+        _print_verbose("\n3. CURRENT BOX ANALYSIS:", 1, state)
+        _print_verbose("-" * 26, 1, state)
+        current = results['current_box_analysis']
+        _print_verbose(f"Cube's length = {current['current_box_length_A']:.2f} Å", 1, state)
+        _print_verbose(f"Current packing fraction: {current['current_packing_fraction']:.1%}", 1, state)
+        _print_verbose(f"Current free volume: {current['current_free_volume_A3']:.0f} Å³ "
+                      f"({current['current_free_volume_fraction']:.1%})", 1, state)
+        
+        # Show largest molecular extent
+        max_extent = results['max_molecular_extent_A']
+        _print_verbose(f"Largest molecular extent: {max_extent:.2f} Å", 1, state)
+        
+        # Provide assessment of current box size
+        pf = current['current_packing_fraction']
+        if pf < 0.05:
+            assessment = "Extremely dilute - may be unnecessarily large"
+        elif pf < 0.15:
+            assessment = "Very dilute - good for gas phase simulations"
+        elif pf < 0.25:
+            assessment = "Dilute - suitable for most applications"
+        elif pf < 0.35:
+            assessment = "Moderate density - good for fluid studies"
+        elif pf < 0.45:
+            assessment = "Dense - approaching liquid-like density"
+        else:
+            assessment = "Very dense - may lead to steric clashes"
+        
+        _print_verbose(f"{assessment}", 1, state)
+    
+    # Store results in state for potential use elsewhere
+    max_extent = results['max_molecular_extent_A']
+    state.max_molecular_extent = max_extent
+    state.volume_based_recommendations = recommendations
+    
+    # Final recommendations
+    _print_verbose("\n4. RECOMMENDATIONS:", 1, state)
+    _print_verbose("-" * 18, 1, state)
+    
+    # Get the 10% and 15% recommendations as reasonable defaults for H-bonded systems
+    rec_10 = recommendations.get('10.0%', {}).get('box_length_A', 0)
+    rec_15 = recommendations.get('15.0%', {}).get('box_length_A', 0)
+    
+    if rec_10 > 0 and rec_15 > 0:
+        _print_verbose(f"• For gas phase studies: {rec_10:.1f} Å (10% packing)", 1, state)
+        _print_verbose(f"• For cluster formation: {rec_15:.1f} Å (15% packing)", 1, state)
+        _print_verbose(f"• Choose based on your simulation goals and computational resources", 1, state)
+    
+    _print_verbose("\n" + "="*78, 1, state)
+    _print_verbose("Note: This analysis is based on molecular volume calculations.", 1, state)
+    _print_verbose("Run the full simulation to validate these recommendations.", 1, state)
+    _print_verbose("="*78 + "\n", 1, state)
 
 def format_time_difference(seconds: float) -> str:
     """Formats a time difference in seconds into days, hours, minutes, seconds, milliseconds."""
@@ -1815,15 +2278,2763 @@ def write_tvse_file(tvse_filepath: str, entry: Dict, state: SystemState):
     except IOError as e:
         _print_verbose(f"Error writing energy evolution history to '{tvse_filepath}': {e}", 0, state)
 
+
+def create_launcher_script(replicated_files: List[str], input_dir: str, script_name: str = "launcher_ascec.sh") -> str:
+    """
+    Creates a bash launcher script for sequential execution of replicated runs.
+    
+    Args:
+        replicated_files (List[str]): List of paths to the replicated input files
+        input_dir (str): Directory where the launcher script should be created
+        script_name (str): Name of the launcher script
+    
+    Returns:
+        str: Path to the created launcher script
+    """
+    launcher_path = os.path.join(input_dir, script_name)
+    
+    # Get the directory where ascec-v04.py is located
+    ascec_script_path = os.path.abspath(__file__)
+    ascec_directory = os.path.dirname(ascec_script_path)
+    
+    try:
+        with open(launcher_path, 'w') as f:
+            f.write("#!/bin/bash\n\n")
+            
+            # Configuration for ASCEC v04
+            f.write("# Configuration for ASCEC v04\n")
+            f.write("# Set ASCEC_ROOT to the directory containing ascec-v04.py\n")
+            f.write(f'export ASCEC_ROOT="{ascec_directory}"\n\n')
+            
+            f.write("# Save original environment paths\n")
+            f.write('_SYSTEM_PATH="$PATH"\n\n')
+            
+            f.write("# Add the ASCEC directory to the system PATH for direct execution\n")
+            f.write('export PATH="$ASCEC_ROOT:$_SYSTEM_PATH"\n\n')
+            
+            f.write('echo "ASCEC v04 environment is now active via direct script setup."\n')
+            f.write('echo "ASCEC_ROOT set to: $ASCEC_ROOT"\n\n')
+            
+            f.write("# Run ASCEC using the full path\n")
+            
+            commands = []
+            for i, replicated_file in enumerate(replicated_files):
+                rel_path = os.path.relpath(replicated_file, input_dir)
+                output_name = os.path.splitext(rel_path)[0] + ".out"
+                
+                # Add separator before each calculation (except the first one)
+                if i > 0:
+                    commands.append('echo "=================================================================="')
+                
+                commands.append(f"python3 {ascec_script_path} {rel_path} > {output_name}")
+            
+            # Join commands with " && \\\n" for sequential execution
+            f.write(" && \\\n".join(commands))
+            f.write("\n")
+        
+        # Make the script executable
+        os.chmod(launcher_path, 0o755)
+        
+        print(f"Created launcher script: {script_name}")
+        return launcher_path
+        
+    except IOError as e:
+        print(f"Error creating launcher script '{launcher_path}': {e}")
+        return ""
+
+
+def merge_launcher_scripts(working_dir: str = ".") -> str:
+    """
+    Finds all launcher_ascec.sh scripts in the working directory and subfolders,
+    and merges them into a single launcher script.
+    
+    Args:
+        working_dir (str): Working directory to search for launcher scripts
+    
+    Returns:
+        str: Path to the merged launcher script
+    """
+    working_dir_full = os.path.abspath(working_dir)
+    merged_launcher_path = os.path.join(working_dir_full, "launcher_ascec.sh")
+    
+    # Find all launcher scripts
+    launcher_scripts = []
+    for root, dirs, files in os.walk(working_dir_full):
+        for file in files:
+            if file == "launcher_ascec.sh":
+                launcher_scripts.append(os.path.join(root, file))
+    
+    if not launcher_scripts:
+        print("No launcher_ascec.sh scripts found in the working directory or subfolders.")
+        return ""
+    
+    print(f"Found {len(launcher_scripts)} launcher scripts:")
+    for script in launcher_scripts:
+        rel_path = os.path.relpath(script, working_dir_full)
+        print(f"  {rel_path}")
+    
+    # Merge all launcher scripts
+    all_commands = []
+    
+    try:
+        for script_path in launcher_scripts:
+            with open(script_path, 'r') as f:
+                lines = f.readlines()
+                
+            # Extract commands (skip shebang and comments)
+            commands = []
+            for line in lines:
+                line = line.strip()
+                if line and not line.startswith('#') and 'python3 ascec-v04.py' in line:
+                    # Remove trailing " && \\" if present
+                    line = line.rstrip(' \\&')
+                    commands.append(line)
+            
+            if commands:
+                # Add commands from this script
+                all_commands.extend(commands)
+                # Add separator comment between different script groups
+                if script_path != launcher_scripts[-1]:  # Don't add separator after last script
+                    all_commands.append("###")
+        
+        # Write merged launcher script
+        with open(merged_launcher_path, 'w') as f:
+            f.write("#!/bin/bash\n\n")
+            
+            # Configuration for ASCEC v04
+            # Get the directory where ascec-v04.py is located
+            ascec_script_path = os.path.abspath(__file__)
+            ascec_directory = os.path.dirname(ascec_script_path)
+            
+            f.write("# Configuration for ASCEC v04\n")
+            f.write("# Set ASCEC_ROOT to the directory containing ascec-v04.py\n")
+            f.write(f'export ASCEC_ROOT="{ascec_directory}"\n\n')
+            
+            f.write("# Save original environment paths\n")
+            f.write('_SYSTEM_PATH="$PATH"\n\n')
+            
+            f.write("# Add the ASCEC directory to the system PATH for direct execution\n")
+            f.write('export PATH="$ASCEC_ROOT:$_SYSTEM_PATH"\n\n')
+            
+            f.write('echo "ASCEC v04 environment is now active via direct script setup."\n')
+            f.write('echo "ASCEC_ROOT set to: $ASCEC_ROOT"\n\n')
+            
+            f.write("# Run ASCEC using the full path\n")
+            
+            # Process commands with proper formatting
+            for i, cmd in enumerate(all_commands):
+                if cmd == "###":
+                    # Write separator on its own line
+                    f.write(" && \\\n###\n")
+                else:
+                    f.write(cmd)
+                    # Add " && \" only if this is not the last command and the next command is not "###"
+                    if i < len(all_commands) - 1 and all_commands[i + 1] != "###":
+                        f.write(" && \\\n")
+                    elif i == len(all_commands) - 1:
+                        f.write("\n")  # Last command, just add newline
+        
+        # Make the script executable
+        os.chmod(merged_launcher_path, 0o755)
+        
+        print(f"\nCreated merged launcher script: launcher_ascec.sh")
+        print(f"Total commands: {len([cmd for cmd in all_commands if cmd != '###'])}")
+        return merged_launcher_path
+        
+    except IOError as e:
+        print(f"Error creating merged launcher script: {e}")
+        return ""
+
+
+def extract_configurations_from_xyz(xyz_file_path: str) -> List[Dict]:
+    """
+    Extracts all configurations from an XYZ file.
+    
+    Args:
+        xyz_file_path (str): Path to the XYZ file
+    
+    Returns:
+        List[Dict]: List of configuration dictionaries with atoms, energy, and config number
+    """
+    configurations = []
+    
+    try:
+        with open(xyz_file_path, 'r') as f:
+            lines = f.readlines()
+        
+        i = 0
+        while i < len(lines):
+            # Skip empty lines
+            if not lines[i].strip():
+                i += 1
+                continue
+            
+            # Read number of atoms
+            try:
+                num_atoms = int(lines[i].strip())
+            except (ValueError, IndexError):
+                i += 1
+                continue
+            
+            # Read comment line with configuration info
+            if i + 1 >= len(lines):
+                break
+            
+            comment_line = lines[i + 1].strip()
+            
+            # Extract configuration number and energy from comment
+            config_num = 1
+            energy = 0.0
+            
+            if "Configuration:" in comment_line:
+                parts = comment_line.split("|")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("Configuration:"):
+                        try:
+                            config_num = int(part.split(":")[1].strip())
+                        except (ValueError, IndexError):
+                            pass
+                    elif "E =" in part:
+                        try:
+                            energy_str = part.split("=")[1].strip().split()[0]
+                            energy = float(energy_str)
+                        except (ValueError, IndexError):
+                            pass
+            
+            # Read atom coordinates (preserve original string format for precision)
+            atoms = []
+            for j in range(num_atoms):
+                if i + 2 + j >= len(lines):
+                    break
+                
+                atom_line = lines[i + 2 + j].strip()
+                if atom_line:
+                    parts = atom_line.split()
+                    if len(parts) >= 4:
+                        symbol = parts[0]
+                        x_str = parts[1]  # Keep original string format
+                        y_str = parts[2]  # Keep original string format
+                        z_str = parts[3]  # Keep original string format
+                        # Also store float values for numerical operations if needed
+                        try:
+                            x_float = float(x_str)
+                            y_float = float(y_str)
+                            z_float = float(z_str)
+                            atoms.append((symbol, x_str, y_str, z_str, x_float, y_float, z_float))
+                        except ValueError:
+                            # Skip malformed coordinates
+                            continue
+            
+            if len(atoms) == num_atoms:
+                configurations.append({
+                    'config_num': config_num,
+                    'energy': energy,
+                    'atoms': atoms,
+                    'comment': comment_line
+                })
+            
+            i += num_atoms + 2
+    
+    except IOError as e:
+        print(f"Error reading XYZ file '{xyz_file_path}': {e}")
+        return []
+    
+    return configurations
+
+
+def create_qm_input_file(config_data: Dict, template_content: str, output_path: str, qm_program: str) -> bool:
+    """
+    Creates a QM input file from configuration data and template.
+    
+    Args:
+        config_data (Dict): Configuration data with atoms, energy, etc.
+        template_content (str): Template file content
+        output_path (str): Path where to save the input file
+        qm_program (str): QM program type ('orca' or 'gaussian')
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Create coordinates section (preserve original precision with proper alignment)
+        coords_section = ""
+        for atom in config_data['atoms']:
+            if len(atom) == 7:  # New format with string coordinates
+                symbol, x_str, y_str, z_str, x_float, y_float, z_float = atom
+                # Right-align coordinates to maintain column alignment while preserving original precision
+                coords_section += f"{symbol: <3} {x_str: >12}  {y_str: >12}  {z_str: >12}\n"
+            else:  # Old format compatibility
+                symbol, x, y, z = atom
+                coords_section += f"{symbol: <3} {x: 12.6f}  {y: 12.6f}  {z: 12.6f}\n"
+        
+        # Replace the name placeholder with the configuration comment
+        content = template_content.replace("# name", f"# {config_data['comment']}")
+        
+        if qm_program == 'orca':
+            # For ORCA, replace the coordinate section between * xyz and *
+            # Look for * xyz pattern (case-insensitive) with charge and multiplicity
+            import re
+            
+            lines = content.split('\n')
+            new_lines = []
+            in_coords = False
+            xyz_pattern = re.compile(r'^\s*\*\s+xyz\s+[-\d]+\s+\d+\s*$', re.IGNORECASE)
+            
+            for line in lines:
+                if xyz_pattern.match(line.strip()):
+                    new_lines.append(line)
+                    new_lines.append(coords_section.rstrip())
+                    in_coords = True
+                elif in_coords and line.strip() == "*":
+                    new_lines.append(line)
+                    in_coords = False
+                elif not in_coords:
+                    new_lines.append(line)
+            
+            content = '\n'.join(new_lines)
+        
+        elif qm_program == 'gaussian':
+            # For Gaussian, replace coordinate section after the charge/multiplicity line
+            lines = content.split('\n')
+            new_lines = []
+            found_charge_mult = False
+            
+            for i, line in enumerate(lines):
+                new_lines.append(line)
+                # Look for charge and multiplicity line (usually "0 1")
+                if not found_charge_mult and line.strip() and len(line.strip().split()) == 2:
+                    try:
+                        int(line.strip().split()[0])  # charge
+                        int(line.strip().split()[1])  # multiplicity
+                        new_lines.append("")  # blank line
+                        new_lines.append(coords_section.rstrip())
+                        new_lines.append("")  # blank line
+                        found_charge_mult = True
+                    except ValueError:
+                        pass
+            
+            content = '\n'.join(new_lines)
+        
+        # Create directory if it doesn't exist
+        output_dir = os.path.dirname(output_path)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
+        
+        # Write the input file
+        with open(output_path, 'w') as f:
+            f.write(content)
+        
+        return True
+        
+    except IOError as e:
+        print(f"Error creating QM input file '{output_path}': {e}")
+        return False
+
+
+def interactive_directory_selection_with_pattern(input_ext: str, pattern: str = "") -> List[str]:
+    """
+    Provides interactive directory selection for updating input files with optional pattern filtering.
+    Shows only directories that contain matching files and lets user choose.
+    
+    Args:
+        input_ext (str): File extension to search for
+        pattern (str): Pattern to filter files (empty string means no filtering)
+    
+    Returns:
+        List[str]: List of selected input file paths
+    """
+    print("\n" + "=" * 60)
+    print("Directory selection".center(60))
+    if pattern and pattern.strip():
+        print(f"Filtering files containing: '{pattern}'".center(60))
+    print("=" * 60)
+    
+    def filter_files(files, pattern):
+        """Filter files by pattern if pattern is provided"""
+        if not pattern or not pattern.strip():
+            return files
+        return [f for f in files if pattern in os.path.basename(f)]
+    
+    # Scan for directories with matching files, but group similar paths
+    directories_with_files = {}
+    all_files = []
+    
+    # Find all matching files recursively
+    for root, dirs, files in os.walk("."):
+        matching_files_in_dir = []
+        for file in files:
+            if file.endswith(input_ext):
+                full_path = os.path.join(root, file)
+                if not pattern or not pattern.strip() or pattern in file:
+                    matching_files_in_dir.append(full_path)
+                    all_files.append(full_path)
+        
+        # Only include directories that have matching files
+        if matching_files_in_dir:
+            # Normalize and group directory paths
+            if root == ".":
+                dir_display = "Current working directory"
+            else:
+                dir_display = root
+                if dir_display.startswith("./"):
+                    dir_display = dir_display[2:]
+                dir_display += "/"
+            
+            # Group similar directories (e.g., merge individual semiempiric/calculation/opt1_conf_XX/ into one)
+            if "semiempiric/calculation/" in dir_display and dir_display.count("/") > 2:
+                # Group all semiempiric individual calculation directories
+                parent_dir = "semiempiric/calculation/ (individual directories)"
+                if parent_dir not in directories_with_files:
+                    directories_with_files[parent_dir] = []
+                directories_with_files[parent_dir].extend(matching_files_in_dir)
+            else:
+                directories_with_files[dir_display] = matching_files_in_dir
+    
+    if not directories_with_files:
+        if pattern and pattern.strip():
+            print(f"No files found containing pattern '{pattern}'.")
+        else:
+            print("No input files found in any directory.")
+        return []
+    
+    # Display options - only directories with files
+    print("\nDirectories with matching files:")
+    print("-" * 40 + "\n")
+    
+    # Create numbered options
+    options = {}
+    option_num = 1
+    
+    # Sort directories by name for consistent ordering
+    sorted_dirs = sorted(directories_with_files.items(), key=lambda x: (len(x[1]), x[0]))
+    
+    for dir_name, files in sorted_dirs:
+        options[str(option_num)] = (dir_name, files)
+        print(f"{option_num}. {dir_name}: {len(files)} files")
+        
+        # Show first few files as examples
+        if len(files) <= 5:
+            # Show all files if 5 or fewer
+            for file_path in files:
+                filename = os.path.basename(file_path)
+                print(f"   - {filename}")
+        else:
+            # Show first 3 files if more than 5
+            examples = files[:3]
+            for example in examples:
+                filename = os.path.basename(example)
+                print(f"   - {filename}")
+            print(f"   ... and {len(files) - 3} more")
+        print()
+        option_num += 1
+    
+    # Add "all" option if there are multiple directories
+    if len(directories_with_files) > 1:
+        options["a"] = ("All directories", all_files)
+        print(f"a. All directories: {len(all_files)} files total")
+        print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            if len(valid_options) > 6:  # If too many options, simplify the prompt
+                choice = input(f"Select option (1-{len(valid_options)-2}, 'a' for all, or 'q' to quit): ").strip().lower()
+            else:
+                # Build a cleaner prompt with explicit 'a' for all description
+                option_parts = []
+                for opt in valid_options[:-1]:  # Exclude 'q'
+                    if opt == 'a':
+                        option_parts.append("'a' for all")
+                    else:
+                        option_parts.append(opt)
+                choice = input(f"Select option ({', '.join(option_parts)}, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Update cancelled.")
+                return []
+            
+            if choice in options:
+                selected_files = options[choice][1]
+                dir_name = options[choice][0]
+                
+                print(f"\nSelected: {dir_name}")
+                print(f"Files to update: {len(selected_files)}")
+                if pattern and pattern.strip():
+                    print(f"Pattern filter: '{pattern}'")
+                
+                return selected_files
+            else:
+                if len(valid_options) > 6:
+                    print(f"Invalid option. Please choose 1-{len(valid_options)-2}, 'a', or 'q' to quit.")
+                else:
+                    print(f"Invalid option. Please choose {', '.join(valid_options[:-1])}, or 'q' to quit.")
+                
+        except KeyboardInterrupt:
+            print("\nUpdate cancelled by user.")
+            return []
+        except EOFError:
+            print("\nUpdate cancelled.")
+            return []
+
+
+def interactive_directory_selection(input_ext: str) -> List[str]:
+    """
+    Provides interactive directory selection for updating input files.
+    Shows only directories that contain files and lets user choose.
+    
+    Args:
+        input_ext (str): File extension to search for
+    
+    Returns:
+        List[str]: List of selected input file paths
+    """
+    print("\n" + "=" * 60)
+    print("Directory selection".center(60))
+    print("=" * 60)
+    
+    # Scan for directories with matching files
+    directories_with_files = {}
+    all_files = []
+    
+    # Find all matching files recursively
+    for root, dirs, files in os.walk("."):
+        matching_files_in_dir = []
+        for file in files:
+            if file.endswith(input_ext):
+                full_path = os.path.join(root, file)
+                matching_files_in_dir.append(full_path)
+                all_files.append(full_path)
+        
+        # Only include directories that have matching files
+        if matching_files_in_dir:
+            # Normalize directory path for display
+            dir_display = root if root != "." else "Current working directory"
+            if root.startswith("./"):
+                dir_display = root[2:] + "/"
+            elif root == ".":
+                dir_display = "Current working directory"
+            else:
+                dir_display = root + "/"
+            
+            directories_with_files[dir_display] = matching_files_in_dir
+    
+    if not directories_with_files:
+        print("No input files found in any directory.")
+        return []
+    
+    # Display options - only directories with files
+    print("\nDirectories with matching files:")
+    print("-" * 40 + "\n")
+
+    # Create numbered options
+    options = {}
+    option_num = 1
+    
+    for dir_name, files in directories_with_files.items():
+        options[str(option_num)] = (dir_name, files)
+        print(f"{option_num}. {dir_name}: {len(files)} files")
+        
+        # Show first few files as examples
+        examples = files[:3]
+        for example in examples:
+            filename = os.path.basename(example)
+            print(f"   - {filename}")
+        if len(files) > 3:
+            print(f"   ... and {len(files) - 3} more")
+        print()
+        option_num += 1
+    
+    # Add "all" option if there are multiple directories
+    if len(directories_with_files) > 1:
+        options["a"] = ("All directories", all_files)
+        print(f"a. All directories: {len(all_files)} files total")
+        print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            # Build a cleaner prompt with explicit 'a' for all description
+            option_parts = []
+            for opt in valid_options[:-1]:  # Exclude 'q'
+                if opt == 'a':
+                    option_parts.append("'a' for all")
+                else:
+                    option_parts.append(opt)
+            choice = input(f"Select option ({', '.join(option_parts)}, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Update cancelled.")
+                return []
+            
+            if choice in options:
+                selected_files = options[choice][1]
+                dir_name = options[choice][0]
+                
+                print(f"\nSelected: {dir_name}")
+                print(f"Files to update: {len(selected_files)}")
+                
+                return selected_files
+            else:
+                print(f"Invalid option. Please choose {', '.join(valid_options[:-1])}, or 'q' to quit.")
+                
+        except KeyboardInterrupt:
+            print("\nUpdate cancelled by user.")
+            return []
+        except EOFError:
+            print("\nUpdate cancelled.")
+            return []
+
+
+def find_files_by_pattern(pattern: str, input_ext: str) -> List[str]:
+    """
+    Finds input files matching a specific pattern across all directories.
+    
+    Args:
+        pattern (str): Pattern to match in filenames
+        input_ext (str): File extension to search for
+    
+    Returns:
+        List[str]: List of matching file paths
+    """
+    matching_files = []
+    
+    # Search recursively in all directories
+    for root, dirs, files in os.walk("."):
+        for file in files:
+            if file.endswith(input_ext) and pattern in file:
+                matching_files.append(os.path.join(root, file))
+    
+    print(f"\nFound {len(matching_files)} files matching pattern '{pattern}':")
+    for file in matching_files:
+        print(f"  - {file}")
+    
+    return matching_files
+
+
+def update_existing_input_files(template_file: str, target_pattern: str = "") -> str:
+    """
+    Updates existing QM input files with a new template, preserving the coordinates 
+    and configuration information from the original files.
+    
+    Args:
+        template_file (str): New template file (e.g., new_template.inp)
+        target_pattern (str): Search pattern - empty string for all locations, or specific pattern for filtered search
+    
+    Returns:
+        str: Status message
+    """
+    # Determine QM program from template file extension
+    if template_file.endswith('.inp'):
+        qm_program = 'orca'
+        input_ext = '.inp'
+    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.com'
+    else:
+        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
+    
+    # Check if template file exists
+    if not os.path.exists(template_file):
+        return f"Error: Template file '{template_file}' not found."
+    
+    # Read template content
+    try:
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    except IOError as e:
+        return f"Error reading template file '{template_file}': {e}"
+    
+    # Always show interactive directory selection, but filter by pattern if provided
+    input_files = interactive_directory_selection_with_pattern(input_ext, target_pattern)
+    if not input_files:
+        return "No files selected for update."
+    
+    # Exclude the template file from the update list
+    template_file_abs = os.path.abspath(template_file)
+    input_files = [f for f in input_files if os.path.abspath(f) != template_file_abs]
+    
+    if not input_files:
+        return "No input files found for update (excluding template file)."
+    
+    updated_count = 0
+    skipped_count = 0
+    backup_files = []  # Track backup files for potential revert
+    
+    print(f"\nStarting update of {len(input_files)} files...")
+    
+    for input_file in input_files:
+        try:
+            # Read existing input file
+            with open(input_file, 'r') as f:
+                existing_content = f.read()
+            
+            # Create backup file
+            backup_file = input_file + '.backup_temp'
+            with open(backup_file, 'w') as f:
+                f.write(existing_content)
+            backup_files.append((input_file, backup_file))
+            
+            # Extract configuration information and coordinates from existing file
+            config_info = extract_config_from_input_file(existing_content, qm_program)
+            if not config_info:
+                print(f"Warning: Could not extract configuration from {os.path.basename(input_file)}, skipping.")
+                skipped_count += 1
+                continue
+            
+            # Create updated content using the new template
+            if create_qm_input_file(config_info, template_content, input_file, qm_program):
+                print(f"  Updated: {os.path.basename(input_file)}")
+                updated_count += 1
+            else:
+                print(f"  Failed to update: {os.path.basename(input_file)}")
+                skipped_count += 1
+                
+        except IOError as e:
+            print(f"Error processing {os.path.basename(input_file)}: {e}")
+            skipped_count += 1
+    
+    # Show final result and offer revert option
+    print(f"\nUpdate completed: {updated_count} files updated, {skipped_count} files skipped.")
+    
+    if updated_count > 0:
+        print("\nPress ENTER to finish and keep changes, or type 'r' and ENTER to revert all changes:")
+        try:
+            user_choice = input().strip().lower()
+            if user_choice == 'r':
+                # Revert all changes
+                reverted_count = 0
+                for original_file, backup_file in backup_files:
+                    try:
+                        if os.path.exists(backup_file):
+                            # Restore original content
+                            with open(backup_file, 'r') as f:
+                                original_content = f.read()
+                            with open(original_file, 'w') as f:
+                                f.write(original_content)
+                            reverted_count += 1
+                    except IOError as e:
+                        print(f"Error reverting {os.path.basename(original_file)}: {e}")
+                
+                # Clean up backup files
+                for _, backup_file in backup_files:
+                    try:
+                        if os.path.exists(backup_file):
+                            os.remove(backup_file)
+                    except OSError:
+                        pass
+                
+                return f"Reverted {reverted_count} files to original state."
+            else:
+                # Keep changes, clean up backup files
+                for _, backup_file in backup_files:
+                    try:
+                        if os.path.exists(backup_file):
+                            os.remove(backup_file)
+                    except OSError:
+                        pass
+                return f"Changes kept: {updated_count} files updated, {skipped_count} files skipped."
+        except KeyboardInterrupt:
+            print("\nKeeping changes (Ctrl+C pressed).")
+            # Clean up backup files
+            for _, backup_file in backup_files:
+                try:
+                    if os.path.exists(backup_file):
+                        os.remove(backup_file)
+                except OSError:
+                    pass
+            return f"Changes kept: {updated_count} files updated, {skipped_count} files skipped."
+        except EOFError:
+            print("\nKeeping changes.")
+            # Clean up backup files
+            for _, backup_file in backup_files:
+                try:
+                    if os.path.exists(backup_file):
+                        os.remove(backup_file)
+                except OSError:
+                    pass
+            return f"Changes kept: {updated_count} files updated, {skipped_count} files skipped."
+    else:
+        # No files were updated, just clean up any backup files
+        for _, backup_file in backup_files:
+            try:
+                if os.path.exists(backup_file):
+                    os.remove(backup_file)
+            except OSError:
+                pass
+        return f"Update completed: {updated_count} files updated, {skipped_count} files skipped."
+
+
+def extract_config_from_input_file(content: str, qm_program: str) -> Optional[Dict]:
+    """
+    Extracts configuration information from an existing QM input file.
+    
+    Args:
+        content (str): Content of the input file
+        qm_program (str): QM program type ('orca' or 'gaussian')
+    
+    Returns:
+        Dict: Configuration data or None if extraction fails
+    """
+    try:
+        lines = content.split('\n')
+        
+        # Extract comment line (configuration info)
+        comment = ""
+        for line in lines:
+            if line.strip().startswith('#') and ('Configuration:' in line or 'E =' in line):
+                comment = line.strip()[1:].strip()  # Remove # and extra spaces
+                break
+        
+        # Extract coordinates
+        atoms = []
+        
+        if qm_program == 'orca':
+            # For ORCA, find coordinates between "* xyz 0 1" and "*"
+            in_coords = False
+            for line in lines:
+                if line.strip() == "* xyz 0 1":
+                    in_coords = True
+                    continue
+                elif line.strip() == "*" and in_coords:
+                    break
+                elif in_coords and line.strip():
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        symbol = parts[0]
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        z = float(parts[3])
+                        atoms.append((symbol, x, y, z))
+        
+        elif qm_program == 'gaussian':
+            # For Gaussian, find coordinates after charge/multiplicity line
+            found_charge_mult = False
+            for line in lines:
+                if not found_charge_mult and line.strip() and len(line.strip().split()) == 2:
+                    try:
+                        int(line.strip().split()[0])  # charge
+                        int(line.strip().split()[1])  # multiplicity
+                        found_charge_mult = True
+                        continue
+                    except ValueError:
+                        pass
+                elif found_charge_mult and line.strip():
+                    parts = line.strip().split()
+                    if len(parts) >= 4:
+                        symbol = parts[0]
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        z = float(parts[3])
+                        atoms.append((symbol, x, y, z))
+                elif found_charge_mult and not line.strip():
+                    # Empty line might indicate end of coordinates
+                    if atoms:  # Only break if we have found some atoms
+                        break
+        
+        if not atoms:
+            return None
+        
+        return {
+            'comment': comment,
+            'atoms': atoms
+        }
+        
+    except Exception as e:
+        print(f"Error extracting configuration: {e}")
+        return None
+
+
+def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".") -> List[str]:
+    """
+    Provides interactive selection for XYZ files to process.
+    
+    Args:
+        xyz_files (List[str]): List of available XYZ file paths
+        calc_dir (str): Directory where combined files should be created
+    
+    Returns:
+        List[str]: List of selected XYZ file paths
+    """
+    print("\n" + "=" * 60)
+    print("XYZ file selection".center(60))
+    print("=" * 60)
+    
+    if not xyz_files:
+        print("No XYZ files found.")
+        return []
+    
+    # Separate result_*.xyz files from combined_results.xyz
+    result_files = [f for f in xyz_files if not os.path.basename(f).startswith("combined_results")]
+    combined_files = [f for f in xyz_files if os.path.basename(f).startswith("combined_results")]
+    
+    # Display options
+    print("\nAvailable XYZ files:")
+    print("-" * 40)
+    
+    # Create numbered options
+    options = {}
+    option_num = 1
+    
+    # First show result_*.xyz files
+    if result_files:
+        print("\nResult files:")
+        for xyz_file in result_files:
+            options[str(option_num)] = xyz_file
+            print(f"{option_num}. {xyz_file}")
+            option_num += 1
+    
+    # Then show combined_results.xyz files
+    if combined_files:
+        print("\nCombined files:")
+        for xyz_file in combined_files:
+            options[str(option_num)] = xyz_file
+            print(f"{option_num}. {xyz_file}")
+            option_num += 1
+    
+    # Add special options
+    print("\nSpecial options:")
+    if len(result_files) > 1:
+        options["a"] = "All result files"
+        print(f"a. Process all result_*.xyz files ({len(result_files)} files, excluding combined)")
+        options["c"] = "Combine result files"
+        print(f"c. Combine all result_*.xyz files first, then process the combined file")
+    
+    print("q. Quit")
+    
+    # Get user choice
+    while True:
+        try:
+            choice = input("\nSelect files (enter numbers separated by spaces, 'a' for all, or 'c' to combine): ").strip()
+            
+            if choice.lower() == 'q':
+                print("Operation cancelled.")
+                return []
+            
+            if choice.lower() == 'a' and len(result_files) > 1:
+                print(f"Selected: All result_*.xyz files ({len(result_files)} files)")
+                return result_files
+            
+            if choice.lower() == 'c' and len(result_files) > 1:
+                print(f"Combining {len(result_files)} result_*.xyz files...")
+                # Use merge_xyz_files to combine result files only
+                combined_filename = os.path.join(calc_dir, "combined_results.xyz")
+                success = merge_xyz_files(result_files, combined_filename)
+                if success:
+                    print(f"Successfully created {os.path.basename(combined_filename)}")
+                    return [combined_filename]
+                else:
+                    print("Failed to combine files. Using individual files instead.")
+                    return result_files
+            
+            # Handle numbered selections (single or multiple)
+            try:
+                numbers = [int(x.strip()) for x in choice.split() if x.strip().isdigit()]
+                selected_files = []
+                
+                for num in numbers:
+                    if str(num) in options:
+                        selected_files.append(options[str(num)])
+                    else:
+                        print(f"Invalid number: {num}")
+                        raise ValueError
+                
+                if selected_files:
+                    print(f"Selected {len(selected_files)} file(s):")
+                    for f in selected_files:
+                        print(f"  - {f}")
+                    return selected_files
+                else:
+                    print("No valid files selected.")
+                    
+            except ValueError:
+                print("Invalid input. Please enter numbers separated by spaces, or 'a' for all result files.")
+                
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            return []
+        except EOFError:
+            print("\nOperation cancelled.")
+            return []
+
+
+def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
+    """
+    Create a combined XYZ file from a list of XYZ files.
+    
+    Args:
+        xyz_files (List[str]): List of XYZ file paths to combine
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not xyz_files:
+        print("No XYZ files to combine.")
+        return False
+    
+    combined_content = []
+    
+    for xyz_file in xyz_files:
+        try:
+            with open(xyz_file, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    combined_content.append(f"# {xyz_file}")
+                    combined_content.append(content)
+                    combined_content.append("")  # Empty line between structures
+        except Exception as e:
+            print(f"Error reading {xyz_file}: {e}")
+    
+    if combined_content:
+        try:
+            with open("combined_results.xyz", 'w') as f:
+                f.write("\n".join(combined_content))
+            print(f"Created combined_results.xyz with {len(xyz_files)} structures.")
+            return True
+        except Exception as e:
+            print(f"Error creating combined_results.xyz: {e}")
+            return False
+    else:
+        print("No content to combine.")
+        return False
+    
+    # Add special options
+    if len(xyz_files) > 1:
+        options["a"] = "All files"
+        print(f"a. All files: {len(xyz_files)} files total")
+    
+    options["c"] = "Combined results"
+    print("c. Create combined_results.xyz first, then process it")
+    print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            if len(valid_options) > 6:
+                choice = input(f"Select option (1-{len(valid_options)-3}, 'a' for all, 'c' for combined, or 'q' to quit): ").strip().lower()
+            else:
+                # Build a cleaner prompt
+                option_parts = []
+                for opt in valid_options[:-1]:  # Exclude 'q'
+                    if opt == 'a':
+                        option_parts.append("'a' for all")
+                    elif opt == 'c':
+                        option_parts.append("'c' for combined")
+                    else:
+                        option_parts.append(opt)
+                choice = input(f"Select option ({', '.join(option_parts)}, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Calculation system creation cancelled.")
+                return []
+            
+            if choice == 'c':
+                # Create combined_results.xyz first
+                print("\nCreating combined_results.xyz...")
+                if combine_xyz_files():
+                    if os.path.exists("combined_results.xyz"):
+                        print("Successfully created combined_results.xyz")
+                        return ["combined_results.xyz"]
+                    else:
+                        print("Error: combined_results.xyz was not created.")
+                        return []
+                else:
+                    print("Failed to create combined_results.xyz")
+                    return []
+            
+            if choice == 'a':
+                if len(xyz_files) > 1:
+                    print(f"\nSelected: All files ({len(xyz_files)} files)")
+                    return xyz_files
+                else:
+                    print("Only one file available, selecting it.")
+                    return xyz_files
+            
+            if choice in options and choice not in ['a', 'c']:
+                selected_file = options[choice]
+                print(f"\nSelected: {selected_file}")
+                return [selected_file]
+            else:
+                if len(valid_options) > 6:
+                    print(f"Invalid option. Please choose 1-{len(valid_options)-3}, 'a', 'c', or 'q' to quit.")
+                else:
+                    print(f"Invalid option. Please choose {', '.join(valid_options[:-1])}, or 'q' to quit.")
+                
+        except KeyboardInterrupt:
+            print("\nCalculation system creation cancelled by user.")
+            return []
+        except EOFError:
+            print("\nCalculation system creation cancelled.")
+            return []
+
+
+def create_simple_calculation_system(template_file: str, launcher_template: str) -> str:
+    """
+    Creates a calculation system by looking for result_*.xyz or combined_results.xyz files
+    and generating QM input files with launcher scripts.
+    
+    Args:
+        template_file (str): Template input file (e.g., example_input.inp)
+        launcher_template (str): Template launcher file (e.g., launcher_orca.sh)
+    
+    Returns:
+        str: Status message
+    """
+    # Determine QM program from template file extension
+    if template_file.endswith('.inp'):
+        qm_program = 'orca'
+        input_ext = '.inp'
+        output_ext = '.out'
+    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.com'
+        output_ext = '.log'
+    else:
+        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
+    
+    # Check if template files exist
+    if not os.path.exists(template_file):
+        return f"Error: Template file '{template_file}' not found."
+    
+    if not os.path.exists(launcher_template):
+        return f"Error: Launcher template '{launcher_template}' not found."
+    
+    # Read template content
+    try:
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    except IOError as e:
+        return f"Error reading template file '{template_file}': {e}"
+    
+    try:
+        with open(launcher_template, 'r') as f:
+            launcher_content = f.read()
+    except IOError as e:
+        return f"Error reading launcher template '{launcher_template}': {e}"
+    
+    # Create calculation directory with incremental numbering
+    def get_next_calc_dir():
+        """Find the next available calculation directory (calculation, calculation_2, etc.)"""
+        base_name = "calculation"
+        if not os.path.exists(base_name):
+            return base_name
+        
+        counter = 2
+        while True:
+            calc_dir_name = f"{base_name}_{counter}"
+            if not os.path.exists(calc_dir_name):
+                return calc_dir_name
+            counter += 1
+    
+    calc_dir = get_next_calc_dir()
+    os.makedirs(calc_dir, exist_ok=True)
+    
+    # Look for XYZ files: result_*.xyz AND combined_results.xyz
+    xyz_files = []
+    
+    # Check for combined_results.xyz in current directory
+    if os.path.exists("combined_results.xyz"):
+        xyz_files.append("combined_results.xyz")
+    
+    # Look for result_*.xyz files recursively in subdirectories
+    for root, dirs, files in os.walk("."):
+        for file in files:
+            if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
+                xyz_files.append(os.path.join(root, file))
+    
+    if not xyz_files:
+        return "No result_*.xyz or combined_results.xyz files found in the current directory or subdirectories."
+    
+    # Sort XYZ files by annealing number (extracted from directory name)
+    def get_annealing_number(file_path):
+        """Extract annealing number from file path like './some_name_2/result_*.xyz'"""
+        import re
+        # Look for pattern like 'name_N' in the directory path
+        directory = os.path.dirname(file_path)
+        match = re.search(r'_(\d+)$', directory)
+        if match:
+            return int(match.group(1))
+        # If no _N pattern found in directory, try to extract from filename
+        match = re.search(r'result_(\d+)', os.path.basename(file_path))
+        if match:
+            return int(match.group(1))
+        return float('inf')  # Put unmatched files at the end
+    
+    xyz_files.sort(key=get_annealing_number)
+    
+    print(f"Found {len(xyz_files)} XYZ file(s) to process:")
+    for xyz_file in xyz_files:
+        print(f"  - {xyz_file}")
+    
+    # Always let user choose which files to process
+    selected_xyz_files = interactive_xyz_file_selection(xyz_files, calc_dir)
+    if not selected_xyz_files:
+        return "No XYZ files selected for processing."
+    xyz_files = selected_xyz_files
+    
+    # Process each XYZ file
+    all_input_files = []
+    
+    for xyz_file in xyz_files:
+        # Extract configurations
+        configurations = extract_configurations_from_xyz(xyz_file)
+        if not configurations:
+            print(f"Warning: No configurations found in {xyz_file}")
+            continue
+        
+        # Determine run number from filename and directory
+        if xyz_file == "combined_results.xyz":
+            run_num = 1
+        else:
+            # Extract seed from result_<seed>.xyz
+            filename = os.path.basename(xyz_file)
+            try:
+                seed = filename.replace("result_", "").replace(".xyz", "")
+                run_num = int(seed) if seed.isdigit() else 1
+            except:
+                run_num = 1
+            
+            # Also try to get run number from directory name if it contains meaningful info
+            dir_name = os.path.dirname(xyz_file)
+            if dir_name != ".":
+                # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
+                parts = os.path.basename(dir_name).split('_')
+                for part in reversed(parts):
+                    try:
+                        dir_run_num = int(part)
+                        run_num = dir_run_num  # Use directory number if available
+                        break
+                    except ValueError:
+                        continue
+        
+        print(f"\nProcessing {xyz_file} with {len(configurations)} configurations:")
+        
+        # Create input files for each configuration
+        for config in configurations:
+            # Clean up the comment for result files to remove temperature and add source info
+            if xyz_file != "combined_results.xyz":
+                # Extract energy from original comment
+                original_comment = config['comment']
+                energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+                config_match = re.search(r'Configuration: (\d+)', original_comment)
+                
+                energy = energy_match.group(1) if energy_match else "unknown"
+                config_num = config_match.group(1) if config_match else config['config_num']
+                
+                # Create new comment without temperature, with source info
+                source_name = os.path.basename(xyz_file).replace('.xyz', '')
+                if energy == "unknown":
+                    config['comment'] = f"Configuration: {config_num} | {source_name}"
+                else:
+                    config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
+            
+            if os.path.basename(xyz_file) == "combined_results.xyz":
+                input_name = f"opt_conf_{config['config_num']}{input_ext}"
+            else:
+                input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
+                
+            input_path = os.path.join(calc_dir, input_name)
+            
+            if create_qm_input_file(config, template_content, input_path, qm_program):
+                all_input_files.append(input_name)
+                print(f"  Created: {input_name}")
+            else:
+                print(f"  Failed to create: {input_name}")
+    
+    if not all_input_files:
+        return "No input files were created successfully."
+    
+    # Create launcher script
+    launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
+    
+    try:
+        # Group commands by run number
+        run_groups = {}
+        for input_file in all_input_files:
+            # Extract run number from filename
+            if input_file.startswith("opt_conf_"):
+                run_num = 0  # For combined_results files (opt_conf_X.inp)
+            elif input_file.startswith("opt") and "_conf_" in input_file:
+                run_num = int(input_file.split("_")[0][3:])  # Extract number from "optX_conf_Y.inp"
+            else:
+                run_num = 0  # Default fallback
+            
+            if run_num not in run_groups:
+                run_groups[run_num] = []
+            
+            output_file = input_file.replace(input_ext, output_ext)
+            if qm_program == 'orca':
+                cmd = f"$ORCA5_ROOT/orca {input_file} > {output_file}"
+            else:  # gaussian
+                cmd = f"$G16_ROOT/g16 {input_file} {output_file}"
+            run_groups[run_num].append(cmd)
+        
+        # Sort run groups and commands within each group
+        sorted_runs = sorted(run_groups.keys())
+        for run_num in sorted_runs:
+            run_groups[run_num].sort()  # Sort commands within each run group
+        
+        # Write launcher script
+        with open(launcher_path, 'w') as f:
+            # Process launcher template content to remove any existing example commands
+            launcher_lines = launcher_content.rstrip().split('\n')
+            filtered_lines = []
+            
+            for line in launcher_lines:
+                # Skip lines that contain ORCA commands (example commands to be replaced)
+                if '$ORCA5_ROOT/orca' in line and '.inp' in line:
+                    continue
+                # Also skip lines that are just '&&' continuation from removed commands
+                if line.strip() == '&&' or line.strip() == '&& \\':
+                    continue
+                filtered_lines.append(line)
+            
+            # Write the cleaned launcher template content
+            f.write('\n'.join(filtered_lines))
+            f.write("\n")
+            
+            # Write grouped commands with separators
+            for i, run_num in enumerate(sorted_runs):
+                commands = run_groups[run_num]
+                
+                # Write commands for this run
+                for j, cmd in enumerate(commands):
+                    f.write(cmd)
+                    if j < len(commands) - 1:
+                        f.write(" && \\\n")
+                    else:
+                        f.write(" && \\\n")  # End this run group with &&
+                
+                # Add separator between run groups (except after the last group)
+                if i < len(sorted_runs) - 1:
+                    f.write("###\n")
+            
+            # Remove the trailing " && \" from the last command and add final newline
+            f.seek(f.tell() - 5)  # Go back to remove " && \"
+            f.write("\n")
+            f.truncate()  # Remove any content after the current position
+        
+        # Make launcher executable
+        os.chmod(launcher_path, 0o755)
+        
+        print(f"\nCreated calculation system in '{calc_dir}' directory:")
+        print(f"  Input files: {len(all_input_files)}")
+        print(f"  Launcher script: launcher_{qm_program}.sh")
+        print(f"\nTo run all calculations, use:")
+        print(f"  cd {calc_dir}")
+        print(f"  ./launcher_{qm_program}.sh")
+        
+        return f"Successfully created calculation system with {len(all_input_files)} input files."
+        
+    except IOError as e:
+        return f"Error creating launcher script: {e}"
+
+
+def execute_merge_command():
+    """
+    Execute the merge command functionality.
+    Shows directories with XYZ files and allows user to merge them.
+    """
+    print("\n" + "=" * 60)
+    print("XYZ Files Merge System".center(60))
+    print("=" * 60)
+    
+    # Scan for directories with XYZ files (excluding _trj.xyz files)
+    directories_with_xyz = {}
+    
+    # Check current directory
+    current_xyz = []
+    for file in os.listdir("."):
+        if file.endswith(".xyz") and not file.endswith("_trj.xyz") and not file.startswith("combined_results"):
+            current_xyz.append(file)
+    
+    if current_xyz:
+        directories_with_xyz["."] = current_xyz
+    
+    # Check subdirectories
+    for root, dirs, files in os.walk("."):
+        if root == ".":
+            continue
+            
+        xyz_files = []
+        for file in files:
+            if file.endswith(".xyz") and not file.endswith("_trj.xyz") and not file.startswith("combined_results"):
+                xyz_files.append(os.path.join(root, file))
+        
+        if xyz_files:
+            directories_with_xyz[root] = xyz_files
+    
+    if not directories_with_xyz:
+        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz and combined_results files).")
+        return
+
+    # Display options
+    print("\nDirectories with XYZ files:")
+    print("-" * 40)
+    
+    options = {}
+    option_num = 1
+    
+    total_files = 0
+    for dir_path, xyz_files in directories_with_xyz.items():
+        dir_display = "Current directory" if dir_path == "." else dir_path
+        options[str(option_num)] = (dir_path, xyz_files)
+        file_count = len(xyz_files)
+        total_files += file_count
+        
+        print(f"{option_num}. {dir_display}: {file_count} files")
+        
+        # Show first few files as examples
+        examples = xyz_files[:3]
+        for example in examples:
+            filename = os.path.basename(example)
+            print(f"   - {filename}")
+        if len(xyz_files) > 3:
+            print(f"   ... and {len(xyz_files) - 3} more")
+        print()
+        option_num += 1
+    
+    # Add "all" option if there are multiple directories
+    if len(directories_with_xyz) > 1:
+        all_files = []
+        for files in directories_with_xyz.values():
+            all_files.extend(files)
+        options["a"] = ("All directories", all_files)
+        print(f"a. All directories: {total_files} files total")
+        print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            choice = input(f"Select option (1-{len(directories_with_xyz)}, 'a' for all, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Merge operation cancelled.")
+                return
+            
+            if choice in options:
+                dir_path, files_to_merge = options[choice]
+                
+                if choice == "a":
+                    output_file = "combined_results.xyz"
+                    print(f"\nMerging {len(files_to_merge)} files from all directories...")
+                else:
+                    if dir_path == ".":
+                        output_file = "combined_results.xyz"
+                        print(f"\nMerging {len(files_to_merge)} files from current directory...")
+                    else:
+                        dir_name = os.path.basename(dir_path)
+                        output_file = f"combined_results_{dir_name}.xyz"
+                        print(f"\nMerging {len(files_to_merge)} files from {dir_path}...")
+                
+                # Perform the merge
+                success = merge_xyz_files(files_to_merge, output_file)
+                
+                if success:
+                    print(f"✓ Successfully created {output_file}")
+                    print(f"  Combined {len(files_to_merge)} XYZ files")
+                    
+                    # Check if .mol file was also created
+                    mol_file = output_file.replace('.xyz', '.mol')
+                    if os.path.exists(mol_file):
+                        print(f"  Also created {mol_file}")
+                else:
+                    print(f"✗ Failed to create {output_file}")
+                
+                return
+            else:
+                print(f"Invalid option. Please select 1-{len(directories_with_xyz)}, 'a', or 'q'.")
+                
+        except KeyboardInterrupt:
+            print("\nMerge operation cancelled by user.")
+            return
+        except EOFError:
+            print("\nMerge operation cancelled.")
+            return
+
+
+def execute_merge_result_command():
+    """
+    Execute the merge result command functionality (original behavior).
+    Shows directories with result_*.xyz files and allows user to merge them.
+    """
+    print("\n" + "=" * 60)
+    print("Result XYZ Files Merge System".center(60))
+    print("=" * 60)
+    
+    # Scan for directories with result_*.xyz files only
+    directories_with_xyz = {}
+    
+    # Check current directory
+    current_xyz = []
+    for file in os.listdir("."):
+        if file.startswith("result_") and file.endswith(".xyz"):
+            current_xyz.append(file)
+    
+    if current_xyz:
+        directories_with_xyz["."] = current_xyz
+    
+    # Check subdirectories
+    for root, dirs, files in os.walk("."):
+        if root == ".":
+            continue
+            
+        xyz_files = []
+        for file in files:
+            if file.startswith("result_") and file.endswith(".xyz"):
+                xyz_files.append(os.path.join(root, file))
+        
+        if xyz_files:
+            directories_with_xyz[root] = xyz_files
+    
+    if not directories_with_xyz:
+        print("No result_*.xyz files found in current directory or subdirectories.")
+        return
+
+    # Display options
+    print("\nDirectories with result XYZ files:")
+    print("-" * 40)
+    
+    options = {}
+    option_num = 1
+    
+    total_files = 0
+    for dir_path, xyz_files in directories_with_xyz.items():
+        dir_display = "Current directory" if dir_path == "." else dir_path
+        options[str(option_num)] = (dir_path, xyz_files)
+        file_count = len(xyz_files)
+        total_files += file_count
+        
+        print(f"{option_num}. {dir_display}: {file_count} files")
+        
+        # Show first few files as examples
+        examples = xyz_files[:3]
+        for example in examples:
+            filename = os.path.basename(example)
+            print(f"   - {filename}")
+        if len(xyz_files) > 3:
+            print(f"   ... and {len(xyz_files) - 3} more")
+        print()
+        option_num += 1
+    
+    # Add "all" option if there are multiple directories
+    if len(directories_with_xyz) > 1:
+        all_files = []
+        for files in directories_with_xyz.values():
+            all_files.extend(files)
+        options["a"] = ("All directories", all_files)
+        print(f"a. All directories: {total_files} files total")
+        print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            choice = input(f"Select option (1-{len(directories_with_xyz)}, 'a' for all, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Merge operation cancelled.")
+                return
+            
+            if choice in options:
+                dir_path, files_to_merge = options[choice]
+                
+                if choice == "a":
+                    output_file = "combined_results.xyz"
+                    print(f"\nMerging {len(files_to_merge)} result files from all directories...")
+                else:
+                    if dir_path == ".":
+                        output_file = "combined_results.xyz"
+                        print(f"\nMerging {len(files_to_merge)} result files from current directory...")
+                    else:
+                        dir_name = os.path.basename(dir_path)
+                        output_file = f"combined_results_{dir_name}.xyz"
+                        print(f"\nMerging {len(files_to_merge)} result files from {dir_path}...")
+                
+                # Perform the merge
+                success = merge_xyz_files(files_to_merge, output_file)
+                
+                if success:
+                    print(f"✓ Successfully created {output_file}")
+                    print(f"  Combined {len(files_to_merge)} result XYZ files")
+                    
+                    # Check if .mol file was also created
+                    mol_file = output_file.replace('.xyz', '.mol')
+                    if os.path.exists(mol_file):
+                        print(f"  Also created {mol_file}")
+                else:
+                    print(f"✗ Failed to create {output_file}")
+                
+                return
+            else:
+                print(f"Invalid option. Please select 1-{len(directories_with_xyz)}, 'a', or 'q'.")
+                
+        except KeyboardInterrupt:
+            print("\nMerge operation cancelled by user.")
+            return
+        except EOFError:
+            print("\nMerge operation cancelled.")
+            return
+        
+        if xyz_files:
+            directories_with_xyz[root] = xyz_files
+    
+    if not directories_with_xyz:
+        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz and combined_results files).")
+        return
+    
+    # Display options
+    print("\nDirectories with XYZ files:")
+    print("-" * 40)
+    
+    options = {}
+    option_num = 1
+    
+    total_files = 0
+    for dir_path, xyz_files in directories_with_xyz.items():
+        dir_display = "Current directory" if dir_path == "." else dir_path
+        options[str(option_num)] = (dir_path, xyz_files)
+        file_count = len(xyz_files)
+        total_files += file_count
+        
+        print(f"{option_num}. {dir_display}: {file_count} files")
+        
+        # Show first few files as examples
+        examples = xyz_files[:3]
+        for example in examples:
+            filename = os.path.basename(example)
+            print(f"   - {filename}")
+        if len(xyz_files) > 3:
+            print(f"   ... and {len(xyz_files) - 3} more")
+        print()
+        option_num += 1
+    
+    # Add "all" option if there are multiple directories
+    if len(directories_with_xyz) > 1:
+        all_files = []
+        for files in directories_with_xyz.values():
+            all_files.extend(files)
+        options["a"] = ("All directories", all_files)
+        print(f"a. All directories: {total_files} files total")
+        print()
+    
+    # Get user choice
+    while True:
+        try:
+            valid_options = list(options.keys()) + ['q']
+            choice = input(f"Select option (1-{len(directories_with_xyz)}, 'a' for all, or 'q' to quit): ").strip().lower()
+            
+            if choice == 'q':
+                print("Merge operation cancelled.")
+                return
+            
+            if choice in options:
+                dir_path, files_to_merge = options[choice]
+                
+                if choice == "a":
+                    output_file = "combined_results.xyz"
+                    print(f"\nMerging {len(files_to_merge)} files from all directories...")
+                else:
+                    if dir_path == ".":
+                        output_file = "combined_results.xyz"
+                        print(f"\nMerging {len(files_to_merge)} files from current directory...")
+                    else:
+                        dir_name = os.path.basename(dir_path)
+                        output_file = f"combined_results_{dir_name}.xyz"
+                        print(f"\nMerging {len(files_to_merge)} files from {dir_path}...")
+                
+                # Perform the merge
+                success = merge_xyz_files(files_to_merge, output_file)
+                
+                if success:
+                    print(f"✓ Successfully created {output_file}")
+                    print(f"  Combined {len(files_to_merge)} XYZ files")
+                    
+                    # Check if .mol file was also created
+                    mol_file = output_file.replace('.xyz', '.mol')
+                    if os.path.exists(mol_file):
+                        print(f"  Also created {mol_file}")
+                else:
+                    print(f"✗ Failed to create {output_file}")
+                
+                return
+            else:
+                print(f"Invalid option. Please select 1-{len(directories_with_xyz)}, 'a', or 'q'.")
+                
+        except KeyboardInterrupt:
+            print("\nMerge operation cancelled by user.")
+            return
+        except EOFError:
+            print("\nMerge operation cancelled.")
+            return
+
+
+def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
+    """
+    Merge a list of XYZ files into a single output file.
+    Renumbers configurations sequentially and adds source file information.
+    
+    Args:
+        xyz_files (List[str]): List of XYZ file paths to merge
+        output_filename (str): Name of the output file
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not xyz_files:
+        return False
+    
+    try:
+        # Sort files by the number in the filename for consistent ordering
+        def get_sort_key(filepath):
+            filename = os.path.basename(filepath)
+            # Try multiple patterns to extract configuration numbers
+            patterns = [
+                r'result_(\d+)\.xyz',           # result_123.xyz
+                r'conf_(\d+)\.xyz',             # conf_20.xyz
+                r'opt\d+_conf_(\d+)\.xyz',      # opt1_conf_20.xyz
+                r'_(\d+)\.xyz',                 # any_123.xyz (general pattern)
+                r'(\d+)\.xyz'                   # 123.xyz (number only)
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, filename)
+                if match:
+                    return int(match.group(1))
+            
+            # If no pattern matches, sort alphabetically by filename
+            return (float('inf'), filename)
+        
+        sorted_files = sorted(xyz_files, key=get_sort_key)
+        
+        total_configs = 0
+        
+        with open(output_filename, 'w') as outfile:
+            for file_idx, xyz_file in enumerate(sorted_files):
+                try:
+                    # Extract configurations from this file
+                    configurations = extract_configurations_from_xyz(xyz_file)
+                    
+                    if not configurations:
+                        print(f"Warning: No configurations found in {xyz_file}")
+                        continue
+                    
+                    source_name = os.path.basename(xyz_file).replace('.xyz', '')
+                    
+                    for config in configurations:
+                        total_configs += 1
+                        
+                        # Write atom count
+                        outfile.write(f"{len(config['atoms'])}\n")
+                        
+                        # Parse original comment to extract energy
+                        original_comment = config['comment']
+                        energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+                        
+                        energy = energy_match.group(1) if energy_match else "unknown"
+                        
+                        # Create new comment with sequential numbering and source info (no temperature, no "Source:" label)
+                        if energy == "unknown":
+                            new_comment = f"Configuration: {total_configs} | {source_name}"
+                        else:
+                            new_comment = f"Configuration: {total_configs} | E = {energy} a.u. | {source_name}"
+                        
+                        outfile.write(f"{new_comment}\n")
+                        
+                        # Write atoms (preserve original coordinate precision with proper column alignment)
+                        for atom in config['atoms']:
+                            if len(atom) == 7:  # New format with string coordinates
+                                symbol, x_str, y_str, z_str, x_float, y_float, z_float = atom
+                                # Right-align coordinates to maintain column alignment while preserving original precision
+                                outfile.write(f"{symbol: <3} {x_str: >12}  {y_str: >12}  {z_str: >12}\n")
+                            else:  # Old format compatibility (fallback to 6 decimal places)
+                                symbol, x, y, z = atom
+                                outfile.write(f"{symbol: <3} {x: 12.6f}  {y: 12.6f}  {z: 12.6f}\n")
+                        
+                except IOError as e:
+                    print(f"Warning: Could not read {xyz_file}: {e}")
+                    continue
+        
+        print(f"Merged {len(sorted_files)} files into {output_filename} with {total_configs} configurations")
+        
+        # Create .mol file if obabel is available
+        if shutil.which("obabel"):
+            success, error_msg = convert_xyz_to_mol_simple(output_filename, output_filename.replace('.xyz', '.mol'))
+            if success:
+                print(f"Also created {output_filename.replace('.xyz', '.mol')}")
+            else:
+                print(f"Warning: Could not create .mol file: {error_msg}")
+        
+        return True
+        
+    except IOError as e:
+        print(f"Error writing to {output_filename}: {e}")
+        return False
+
+
+def create_calculation_system(template_file: str, launcher_template: str) -> str:
+    """
+    Creates a calculation system by extracting configurations from XYZ files
+    and generating QM input files with launcher scripts.
+    
+    Args:
+        template_file (str): Template input file (e.g., example_input.inp)
+        launcher_template (str): Template launcher file (e.g., launcher_orca.sh)
+    
+    Returns:
+        str: Status message
+    """
+    # Determine QM program from template file extension
+    if template_file.endswith('.inp'):
+        qm_program = 'orca'
+        input_ext = '.inp'
+        output_ext = '.out'
+    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.com'
+        output_ext = '.log'
+    else:
+        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
+    
+    # Check if template files exist
+    if not os.path.exists(template_file):
+        return f"Error: Template file '{template_file}' not found."
+    
+    if not os.path.exists(launcher_template):
+        return f"Error: Launcher template '{launcher_template}' not found."
+    
+    # Read template content
+    try:
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    except IOError as e:
+        return f"Error reading template file '{template_file}': {e}"
+    
+    try:
+        with open(launcher_template, 'r') as f:
+            launcher_content = f.read()
+    except IOError as e:
+        return f"Error reading launcher template '{launcher_template}': {e}"
+    
+    # Create calculation directory with incremental numbering
+    def get_next_calc_dir():
+        """Find the next available calculation directory (calculation, calculation_2, etc.)"""
+        base_name = "calculation"
+        if not os.path.exists(base_name):
+            return base_name
+        
+        counter = 2
+        while True:
+            calc_dir_name = f"{base_name}_{counter}"
+            if not os.path.exists(calc_dir_name):
+                return calc_dir_name
+            counter += 1
+    
+    calc_dir = get_next_calc_dir()
+    os.makedirs(calc_dir, exist_ok=True)
+    
+    # Find all result_*.xyz files (ignore resultbox_*.xyz)
+    xyz_files = []
+    for root, dirs, files in os.walk("."):
+        for file in files:
+            if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
+                xyz_path = os.path.join(root, file)
+                xyz_files.append(xyz_path)
+    
+    if not xyz_files:
+        return "No result_*.xyz files found in the working directory and subfolders."
+    
+    # Sort XYZ files by annealing number (extracted from directory name)
+    def get_annealing_number(file_path):
+        """Extract annealing number from file path like './some_name_2/result_*.xyz'"""
+        import re
+        # Look for pattern like 'name_N' in the directory path
+        directory = os.path.dirname(file_path)
+        match = re.search(r'_(\d+)$', directory)
+        if match:
+            return int(match.group(1))
+        # If no _N pattern found in directory, try to extract from filename
+        match = re.search(r'result_(\d+)', os.path.basename(file_path))
+        if match:
+            return int(match.group(1))
+        return float('inf')  # Put unmatched files at the end
+    
+    xyz_files.sort(key=get_annealing_number)
+    
+    # Interactive selection of XYZ files
+    selected_xyz_files = interactive_xyz_file_selection(xyz_files, calc_dir)
+    if not selected_xyz_files:
+        return "No XYZ files selected for processing."
+    
+    # Process each selected XYZ file
+    all_input_files = []
+    
+    for xyz_file in selected_xyz_files:
+        # Extract configurations
+        configurations = extract_configurations_from_xyz(xyz_file)
+        if not configurations:
+            print(f"Warning: No configurations found in {xyz_file}")
+            continue
+        
+        # Determine the run number from the directory name
+        dir_name = os.path.dirname(xyz_file)
+        if dir_name == ".":
+            run_num = 1
+        else:
+            # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
+            parts = os.path.basename(dir_name).split('_')
+            run_num = 1
+            for part in reversed(parts):
+                try:
+                    run_num = int(part)
+                    break
+                except ValueError:
+                    continue
+        
+        print(f"\nProcessing {xyz_file} (run {run_num}) with {len(configurations)} configurations:")
+        
+        # Create input files for each configuration
+        for config in configurations:
+            # Clean up the comment to remove temperature and add source info
+            original_comment = config['comment']
+            energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+            config_match = re.search(r'Configuration: (\d+)', original_comment)
+            
+            energy = energy_match.group(1) if energy_match else "unknown"
+            config_num = config_match.group(1) if config_match else config['config_num']
+            
+            # Create new comment without temperature, with source info
+            source_name = os.path.basename(xyz_file).replace('.xyz', '')
+            if energy == "unknown":
+                config['comment'] = f"Configuration: {config_num} | {source_name}"
+            else:
+                config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
+            
+            input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
+            input_path = os.path.join(calc_dir, input_name)
+            
+            if create_qm_input_file(config, template_content, input_path, qm_program):
+                all_input_files.append(input_name)
+                print(f"  Created: {input_name}")
+            else:
+                print(f"  Failed to create: {input_name}")
+    
+    if not all_input_files:
+        return "No input files were created successfully."
+    
+    # Create launcher script
+    launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
+    
+    try:
+        # Group input files by run number for separator placement
+        run_groups = {}
+        for input_file in all_input_files:
+            # Extract run number from filename (e.g., opt1_conf_1.inp -> 1)
+            run_num = int(input_file.split('_')[0].replace('opt', ''))
+            if run_num not in run_groups:
+                run_groups[run_num] = []
+            run_groups[run_num].append(input_file)
+        
+        # Sort run groups
+        sorted_runs = sorted(run_groups.keys())
+        
+        # Create commands
+        all_commands = []
+        for i, run_num in enumerate(sorted_runs):
+            run_files = sorted(run_groups[run_num])
+            for input_file in run_files:
+                output_file = input_file.replace(input_ext, output_ext)
+                if qm_program == 'orca':
+                    cmd = f"$ORCA5_ROOT/orca {input_file} > {output_file}"
+                else:  # gaussian
+                    cmd = f"$G16_ROOT/g16 {input_file} {output_file}"
+                all_commands.append(cmd)
+            
+            # Add separator between runs (except after last run)
+            if i < len(sorted_runs) - 1:
+                all_commands.append("###")
+        
+        # Write launcher script
+        with open(launcher_path, 'w') as f:
+            # Process launcher template content to remove any existing example commands
+            launcher_lines = launcher_content.rstrip().split('\n')
+            filtered_lines = []
+            
+            for line in launcher_lines:
+                # Skip lines that contain ORCA commands (example commands to be replaced)
+                if '$ORCA5_ROOT/orca' in line and '.inp' in line:
+                    continue
+                # Also skip lines that are just '&&' continuation from removed commands
+                if line.strip() == '&&' or line.strip() == '&& \\':
+                    continue
+                filtered_lines.append(line)
+            
+            # Write the cleaned launcher template content
+            f.write('\n'.join(filtered_lines))
+            f.write("\n")
+            
+            # Process commands with proper formatting
+            for i, cmd in enumerate(all_commands):
+                if cmd == "###":
+                    f.write(" && \\\n###\n")
+                else:
+                    f.write(cmd)
+                    if i < len(all_commands) - 1 and all_commands[i + 1] != "###":
+                        f.write(" && \\\n")
+                    elif i == len(all_commands) - 1:
+                        f.write("\n")  # Final newline for last command
+        
+        # Make launcher executable
+        os.chmod(launcher_path, 0o755)
+        
+        print(f"\nCreated calculation system in '{calc_dir}' directory:")
+        print(f"  Input files: {len(all_input_files)}")
+        print(f"  Launcher script: launcher_{qm_program}.sh")
+        print(f"\nTo run all calculations, use:")
+        print(f"  cd {calc_dir}")
+        print(f"  ./launcher_{qm_program}.sh")
+        
+        return f"Successfully created calculation system with {len(all_input_files)} input files."
+        
+    except IOError as e:
+        return f"Error creating launcher script: {e}"
+
+
+def create_replicated_runs(input_file_path: str, num_replicas: int) -> List[str]:
+    """
+    Creates replicated folders and input files for multiple annealing runs.
+    
+    Args:
+        input_file_path (str): Path to the original input file
+        num_replicas (int): Number of replicas to create
+    
+    Returns:
+        List[str]: List of paths to the replicated input files
+    """
+    input_file_path_full = os.path.abspath(input_file_path)
+    input_dir = os.path.dirname(input_file_path_full)
+    input_basename = os.path.basename(input_file_path_full)
+    input_name, input_ext = os.path.splitext(input_basename)
+    
+    replicated_files = []
+    
+    print(f"Creating {num_replicas} replicated runs for '{input_basename}'...")
+    
+    for i in range(1, num_replicas + 1):
+        # Create folder name: e.g., example_1, example_2, example_3
+        folder_name = f"{input_name}_{i}"
+        folder_path = os.path.join(input_dir, folder_name)
+        
+        # Create the folder if it doesn't exist
+        os.makedirs(folder_path, exist_ok=True)
+        
+        # Create the replicated input file name: e.g., example_1.in, example_2.in, example_3.in
+        replicated_input_name = f"{input_name}_{i}{input_ext}"
+        replicated_input_path = os.path.join(folder_path, replicated_input_name)
+        
+        # Copy the original input file to the new location
+        try:
+            with open(input_file_path_full, 'r') as src:
+                content = src.read()
+            with open(replicated_input_path, 'w') as dst:
+                dst.write(content)
+            
+            replicated_files.append(replicated_input_path)
+            print(f"  Created: {folder_name}/{replicated_input_name}")
+            
+        except IOError as e:
+            print(f"Error creating replicated file '{replicated_input_path}': {e}")
+            continue
+    
+    print(f"\nSuccessfully created {len(replicated_files)} replicated runs.")
+    
+    # Create launcher script
+    if replicated_files:
+        create_launcher_script(replicated_files, input_dir)
+    
+    print("\nTo run all simulations sequentially, use:")
+    print("  ./launcher_ascec.sh")
+    
+    return replicated_files
+
+
+# Sort functionality - integrated from sort_files.py
+def extract_base(filename):
+    """Extract base name from filename by removing extension and known suffixes."""
+    # Define optional suffixes that can appear before extensions
+    KNOWN_SUFFIXES = ['_trj', '_opt', '_property', '_gu', '_xtbrestart', '_engrad', '_xyz', '_out', '_inp', '_tmp']
+    
+    # Remove extension
+    name, *_ = filename.split('.', 1)
+    # Remove known suffixes (only the last one)
+    for suffix in KNOWN_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    return name
+
+def group_files_by_base(directory='.'):
+    """Group files by base name and move them to folders."""
+    
+    files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    base_map = defaultdict(list)
+
+    for file in files:
+        base = extract_base(file)
+        if base:
+            base_map[base].append(file)
+
+    # Move files
+    moved_count = 0
+    for base, grouped_files in base_map.items():
+        if len(grouped_files) > 1:
+            folder_path = os.path.join(directory, base)
+            os.makedirs(folder_path, exist_ok=True)
+            for file in grouped_files:
+                src = os.path.join(directory, file)
+                dest = os.path.join(folder_path, file)
+                shutil.move(src, dest)
+            print(f"Moved {len(grouped_files)} files to folder: {base}")
+            moved_count += len(grouped_files)
+    
+    if moved_count == 0:
+        print("No files needed to be grouped.")
+    else:
+        print(f"Total files moved: {moved_count}")
+
+# Merge XYZ functionality - integrated from mergexyz_files.py
+def get_sort_key(filename):
+    """Extract the first configuration number after an underscore before .xyz for sorting."""
+    import re
+    match = re.search(r'_(\d+)\.xyz', filename)
+    if match:
+        return int(match.group(1))
+    return float('inf')
+
+def combine_xyz_files(output_filename="combined_results.xyz", exclude_pattern="_trj.xyz"):
+    """Combine all relevant .xyz files into a single .xyz file."""
+    
+    all_xyz_files = []
+    for root, _, files in os.walk("."):
+        for file in files:
+            filepath = os.path.join(root, file)
+            if filepath.endswith(".xyz") and exclude_pattern not in file and file != output_filename:
+                all_xyz_files.append(filepath)
+
+    if not all_xyz_files:
+        print(f"No relevant .xyz files found (excluding '{exclude_pattern}' and '{output_filename}').")
+        return False
+
+    # Sort the files based on the first configuration number found
+    sorted_xyz_files = sorted(all_xyz_files, key=lambda x: get_sort_key(os.path.basename(x)))
+
+    with open(output_filename, "w") as outfile:
+        for xyz_file in sorted_xyz_files:
+            print(f"Processing: {xyz_file}")
+            with open(xyz_file, "r") as infile:
+                lines = infile.readlines()
+                outfile.writelines(lines)
+
+    print(f"\nSuccessfully combined {len(sorted_xyz_files)} .xyz files into: {output_filename}")
+    
+    # Create .mol file if obabel is available
+    if shutil.which("obabel"):
+        success, error_msg = convert_xyz_to_mol_simple(output_filename, output_filename.replace('.xyz', '.mol'))
+        if success:
+            print(f"Also created {output_filename.replace('.xyz', '.mol')}")
+        else:
+            print(f"Warning: Could not create .mol file: {error_msg}")
+    
+    return True
+
+# MOL conversion functionality - integrated from mol_files.py
+def convert_xyz_to_mol_simple(input_xyz, output_mol):
+    """Convert an XYZ file to a MOL file using Open Babel."""
+    try:
+        # Make paths absolute
+        input_xyz = os.path.abspath(input_xyz)
+        output_mol = os.path.abspath(output_mol)
+
+        # Ensure the output directory exists
+        output_dir = os.path.dirname(output_mol)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        command = ["obabel", "-i", "xyz", input_xyz, "-o", "mol", "-O", output_mol]
+        subprocess.run(command, check=True, capture_output=True)
+        return True, None
+    except subprocess.CalledProcessError as e:
+        return False, f"Error converting {input_xyz}: {e.stderr.decode()}"
+    except FileNotFoundError:
+        return False, "Error: Open Babel ('obabel') command not found. Make sure it's installed and in your system's PATH."
+    except Exception as e:
+        return False, f"An unexpected error occurred: {e}"
+
+def create_combined_mol():
+    """Create MOL file from combined_results.xyz."""
+    if os.path.exists("combined_results.xyz"):
+        success, error_message = convert_xyz_to_mol_simple("combined_results.xyz", "combined_results.mol")
+        if success:
+            print("Successfully created combined_results.mol")
+            return True
+        else:
+            print(f"Failed to create MOL file: {error_message}")
+            return False
+    else:
+        print("No combined_results.xyz file found to convert.")
+        return False
+
+# Summary functionality - integrated from summary_files.py
+def parse_orca_output(filename):
+    """Parse an ORCA output file to extract key information."""
+    
+    results = {}
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            content = f.read()
+    except (FileNotFoundError, IOError, UnicodeDecodeError) as e:
+        print(f"Error reading file {filename}: {e}")
+        return None
+
+    # Check for ORCA signature
+    if "ORCA - Electronic Structure Program" not in content:
+        if "*******" not in content:
+            print(f"File {filename} is not an ORCA output file.")
+            return None
+
+    results['input_file'] = os.path.splitext(os.path.basename(filename))[0]
+
+    # Extract final single point energy
+    energy_matches = re.findall(r"FINAL SINGLE POINT ENERGY\s*(-?\d+\.\d+)", content)
+    if energy_matches:
+        optimization_done_index = content.find("*** OPTIMIZATION RUN DONE ***")
+        if optimization_done_index != -1:
+            last_valid_energy_index = -1
+            for i, match in enumerate(energy_matches):
+                match_index = content.find(r"FINAL SINGLE POINT ENERGY\s*(-?\d+\.\d+)", 0)
+                if match_index < optimization_done_index:
+                    last_valid_energy_index = i
+            if last_valid_energy_index != -1:
+                results['energy'] = float(energy_matches[last_valid_energy_index])
+            else:
+                results['energy'] = None
+        else:
+            results['energy'] = float(energy_matches[-1])
+    else:
+        results['energy'] = None
+
+    # Extract total run time
+    time_match = re.search(r"TOTAL RUN TIME:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+)\s*seconds\s*(\d+)\s*msec", content)
+    if time_match:
+        days = int(time_match.group(1))
+        hours = int(time_match.group(2))
+        minutes = int(time_match.group(3))
+        seconds = int(time_match.group(4))
+        milliseconds = int(time_match.group(5))
+        results['time'] = (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds + (milliseconds / 1000.0)
+    else:
+        results['time'] = None
+    return results
+
+def format_time_summary(seconds, include_days=False):
+    """Format time for summary output."""
+    days, rem = divmod(seconds, 24 * 3600)
+    hours, rem = divmod(rem, 3600)
+    minutes, sec = divmod(rem, 60)
+    if include_days:
+        return f"{int(days)} days, {int(hours)}:{int(minutes)}:{sec:.3f}"
+    else:
+        return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
+
+def format_total_time(seconds):
+    """Format the total time."""
+    days, rem = divmod(seconds, 24 * 3600)
+    hours, rem = divmod(rem, 3600)
+    minutes, sec = divmod(rem, 60)
+    total_hours = int(seconds // 3600)
+    return f"{total_hours}:{int(minutes)}:{sec:.3f}"
+
+def format_wall_time(seconds):
+    """Format the wall time in days and hours."""
+    days, rem = divmod(seconds, 24 * 3600)
+    hours = rem // 3600
+    return f"{int(days)} days, {int(hours)} hours"
+
+def format_hours_only(seconds):
+    """Format time in total hours."""
+    hours = seconds / 3600
+    return f"{hours:.3f} hours"
+
+def summarize_calculations(directory="."):
+    """Create summary of ORCA calculations."""
+    summary_file = "orca_summary.txt"
+    job_summaries = []
+    all_results = {
+        'job_count': 0,
+        'total_time': 0,
+        'min_time': None,
+        'max_time': None,
+    }
+
+    with open(summary_file, 'w', encoding='utf-8') as outfile:
+        for root, _, files in os.walk(directory):
+            for filename in files:
+                if filename.endswith(".out"):
+                    filepath = os.path.join(root, filename)
+                    results = parse_orca_output(filepath)
+                    if results:
+                        job_summaries.append(results)
+                        all_results['job_count'] += 1
+                        if results.get('time') is not None:
+                            all_results['total_time'] += results['time']
+                            if all_results['min_time'] is None or results['time'] < all_results['min_time']:
+                                all_results['min_time'] = results['time']
+                            if all_results['max_time'] is None or results['time'] > all_results['max_time']:
+                                all_results['max_time'] = results['time']
+
+        # Sort the job summaries by total_time
+        job_summaries.sort(key=lambda x: x.get('time') or float('inf'))
+
+        # Write summary
+        outfile.write("=" * 40 + "\n")
+        outfile.write("Summary of all calculations:\n")
+        outfile.write(f"  Number of jobs: {all_results['job_count']}\n")
+        if all_results['total_time']:
+            outfile.write(f"  Total execution time: {format_total_time(all_results['total_time'])}\n")
+            outfile.write(f"  Mean execution time: {format_hours_only(all_results['total_time'] / all_results['job_count'])}\n")
+            outfile.write(f"  Shortest execution time: {format_time_summary(all_results['min_time'], include_days=False)}\n")
+            outfile.write(f"  Longest execution time: {format_time_summary(all_results['max_time'], include_days=False)}\n")
+            outfile.write(f"  Total wall time: {format_wall_time(all_results['total_time'])}\n")
+
+        outfile.write("=" * 40 + "\n\n")
+
+        # Write individual job details
+        job_index = 1
+        for result in job_summaries:
+            outfile.write(f"=> {job_index}. {result['input_file']}.out\n")
+            job_index += 1
+            for key, value in result.items():
+                if key == 'time' and value is not None:
+                    outfile.write(f"  time = {format_time_summary(value, include_days=False)}\n")
+                elif key != 'input_file':
+                    outfile.write(f"  {key} = {value}\n")
+            outfile.write("\n")
+
+    print(f"Summary written to {summary_file}")
+    return len(job_summaries)
+
+def find_out_files(root_dir):
+    """Find all .out files in the directory tree."""
+    out_files = []
+    for root, dirs, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith('.out'):
+                out_files.append(os.path.join(root, file))
+    return out_files
+
+
+def get_unique_folder_name(base_name, current_dir):
+    """Generate a unique folder name if base_name already exists."""
+    folder_path = os.path.join(current_dir, base_name)
+    counter = 1
+    
+    while os.path.exists(folder_path):
+        new_name = f"{base_name}_{counter}"
+        folder_path = os.path.join(current_dir, new_name)
+        counter += 1
+    
+    return os.path.basename(folder_path)
+
+
+def collect_out_files():
+    """Collect all .out files into a single folder inside a similarity directory."""
+    current_directory = os.getcwd()
+    print(f"Searching for .out files in: {current_directory} and its subfolders...")
+
+    all_out_files = find_out_files(current_directory)
+
+    if not all_out_files:
+        print("No .out files found in the current directory or its subfolders.")
+        return False
+
+    num_files = len(all_out_files)
+    base_destination_folder_name = f"orca_out_{num_files}"
+    
+    # Create similarity directory at parent level
+    parent_directory = os.path.dirname(current_directory)
+    similarity_path = os.path.join(parent_directory, "similarity")
+    os.makedirs(similarity_path, exist_ok=True)
+    
+    destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_path)
+    destination_path = os.path.join(similarity_path, destination_folder_name)
+
+    os.makedirs(destination_path)
+    print(f"\nCreated destination folder: similarity/{destination_folder_name}")
+
+    print(f"Copying {num_files} .out files to 'similarity/{destination_folder_name}'...")
+    for file_path in all_out_files:
+        try:
+            shutil.copy2(file_path, destination_path)
+        except Exception as e:
+            print(f"Error copying {os.path.basename(file_path)}: {e}")
+
+    print(f"\nCopied {num_files} .out files to similarity/{destination_folder_name}")
+    print("Process complete. Original files remain untouched.")
+    return True
+
+def execute_sort_command(include_summary=True):
+    """Execute the complete sort process."""
+    print("=" * 50)
+    print("ASCEC Sort Process Started")
+    print("=" * 50)
+    
+    # Step 1: Sort files by base names
+    print("\n1. Sorting files by base names...")
+    group_files_by_base(".")
+    
+    # Step 2: Merge XYZ files
+    print("\n2. Merging XYZ files...")
+    if combine_xyz_files():
+        # Step 3: Create MOL file
+        print("\n3. Creating MOL file...")
+        create_combined_mol()
+    
+    # Step 4: Create summary (if requested)
+    if include_summary:
+        print("\n4. Creating calculation summary...")
+        num_summaries = summarize_calculations(".")
+        if num_summaries == 0:
+            print("No ORCA output files found for summary.")
+    else:
+        print("\n4. Skipping summary creation (--nosum flag used)")
+    
+    # Step 5: Collect .out files
+    print("\n5. Collecting .out files...")
+    collect_out_files()
+    
+    print("\n" + "=" * 50)
+    print("ASCEC Sort Process Completed")
+    print("=" * 50)
+    
+    # Suggest similarity analysis if .out files were collected
+    similarity_dir = os.path.join("..", "similarity")
+    if os.path.exists(similarity_dir):
+        print("\nSuggested next step:")
+        print("  python3 ascec-v04.py sim --threshold 0.9")
+        print("  Run similarity analysis on collected output files")
+
+
+def execute_similarity_analysis(*args):
+    """Execute similarity analysis by calling the similarity script."""
+    import subprocess
+    import sys
+    
+    # Get the directory where ascec-v04.py is located
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    similarity_script = os.path.join(script_dir, "similarity_v01.py")
+    
+    if not os.path.exists(similarity_script):
+        print(f"Error: similarity_v01.py not found in {script_dir}")
+        print("Make sure similarity_v01.py is in the same directory as ascec-v04.py")
+        return
+    
+    # Build command
+    cmd = [sys.executable, similarity_script] + list(args)
+    
+    print("=" * 50)
+    print("ASCEC Similarity Analysis")
+    print("=" * 50)
+    print(f"Executing: {' '.join(cmd[1:])}")  # Don't show python path
+    print()
+    
+    try:
+        # Execute the similarity script with all arguments
+        result = subprocess.run(cmd, check=True)
+        print("\n" + "=" * 50)
+        print("Similarity analysis completed successfully.")
+        print("=" * 50)
+    except subprocess.CalledProcessError as e:
+        print(f"\nError executing similarity analysis: {e}")
+        print("Check the similarity script arguments and try again.")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
+
+
+def execute_box_analysis(input_file: str):
+    """
+    Analyze an input file and provide box length recommendations without running the simulation.
+    This reads the input file, parses the molecular structure, and outputs the volume-based 
+    box length analysis to help users choose appropriate box sizes.
+    """
+    try:
+        # Check if input file exists
+        if not os.path.exists(input_file):
+            print(f"Error: Input file '{input_file}' not found.")
+            sys.exit(1)
+        
+        # Create a minimal SystemState for parsing
+        state = SystemState()
+        state.verbosity_level = 1  # Enable verbose output for box analysis
+        
+        # Parse the input file
+        read_input_file(state, input_file)
+        
+        # Provide box length analysis using the existing function
+        provide_box_length_advice(state)
+        
+        # Exit successfully after box analysis
+        return
+        
+    except Exception as e:
+        print(f"Error during box analysis: {e}")
+        sys.exit(1)
+
 # 16. main ascec integrated function
+def print_all_commands():
+    """Print comprehensive command line usage information."""
+    print("=" * 80)
+    print("ASCEC v04 - All Available Commands")
+    print("=" * 80)
+    print()
+    
+    print("1. SIMULATION COMMANDS:")
+    print("-" * 40)
+    print("  Run single simulation:")
+    print("    python3 ascec-v04.py input_file.in > output.out  # Run simulation with output redirect")
+    print("    python3 ascec-v04.py input_file.in --v > output.out  # Verbose mode")
+    print("    python3 ascec-v04.py input_file.in --va > output.out # Very verbose mode")
+    print("    python3 ascec-v04.py input_file.in --standard > output.out # Standard Metropolis")
+    print("    python3 ascec-v04.py input_file.in --nobox > output.out    # Disable box XYZ files")
+    print()
+    print("  Analyze box length requirements:")
+    print("    python3 ascec-v04.py input_file.in box        # Show box analysis in terminal")
+    print("    python3 ascec-v04.py box input_file.in        # Alternative syntax")
+    print("    python3 ascec-v04.py input_file.in box > box.txt  # Save analysis to file")
+    print()
+    
+    print("  Run replicated simulations:")
+    print("    python3 ascec-v04.py input_file.in r3         # Create 3 replicas")
+    print("    python3 ascec-v04.py input_file.in r5         # Create 5 replicas")
+    print()
+    
+    print("2. CALCULATION SYSTEM COMMANDS:")
+    print("-" * 40)
+    print("  Create QM input files from simulation results:")
+    print("    python3 ascec-v04.py calc template.inp launcher.sh     # Uses result_*.xyz or combined_results.xyz")
+    print("    python3 ascec-v04.py calc template.com launcher.sh     # Gaussian version")
+    print("  ")
+    print("  Merge XYZ files:")
+    print("    python3 ascec-v04.py merge                             # Interactive selection (all .xyz files)")
+    print("    python3 ascec-v04.py merge result                      # Interactive selection (result_*.xyz files only)")
+    print("  ")
+    print("  Update existing QM input files with new template:")
+    print("    python3 ascec-v04.py update new_template.inp             # Interactive selection (same extension)")
+    print("    python3 ascec-v04.py update new_template.inp pattern     # Interactive selection (filtered by pattern)")
+    print()
+    
+    print("3. ORGANIZATION COMMANDS:")
+    print("-" * 40)
+    print("  Sort and organize calculation results:")
+    print("    python3 ascec-v04.py sort                     # Full sort with summary")
+    print("    python3 ascec-v04.py sort --nosum             # Sort without summary")
+    print()
+    
+    print("  Merge launcher scripts:")
+    print("    python3 ascec-v04.py launcher                 # Merge all launcher scripts")
+    print()
+    
+    print("4. ANALYSIS COMMANDS:")
+    print("-" * 40)
+    print("  Similarity analysis:")
+    print("    python3 ascec-v04.py sim --threshold 0.9      # Run similarity analysis")
+    print("    python3 ascec-v04.py sim --help               # See similarity options")
+    print()
+    
+    print("5. INPUT FILE FORMAT:")
+    print("-" * 40)
+    print("  Line 1: Number of different Temperatures")
+    print("  Line 2: Initial Temperature")
+    print("  Line 3: Temperature schedule (linear/geometric)")
+    print("  Line 4: Cube length")
+    print("  Line 5: Temperature step parameters")
+    print("  Line 6: MaxCycle [floor_value]    # floor_value optional, default: 10")
+    print("  Line 7: Max displacement and rotation")
+    print("  Line 8: QM program and alias")
+    print("  Line 9: QM method and basis set")
+    print("  Line 10: Charge and multiplicity")
+    print("  Line 11+: Molecule definitions")
+    print()
+    
+    print("6. TEMPLATE FILE FORMAT (for update command):")
+    print("-" * 40)
+    print("  Template should contain:")
+    print("    # name                         # This will be replaced with config info")
+    print("    ! Opt B3LYP 6-311++g**         # QM method line")
+    print("    %pal")
+    print("      nprocs 8")
+    print("    end")
+    print("    %maxcore 1000")
+    print("    %geom")
+    print("      maxiter 5000")
+    print("    end")
+    print("    * xyz 0 1                      # Coordinates will be inserted here")
+    print("    *")
+    print()
+    
+    print("7. EXAMPLES:")
+    print("-" * 40)
+    print("  Complete workflow:")
+    print("    1. python3 ascec-v04.py input.in box          # Check box requirements first")
+    print("    2. python3 ascec-v04.py input.in r3           # Create 3 replicated runs")
+    print("    3. python3 ascec-v04.py merge                 # Combine XYZ files")
+    print("    4. python3 ascec-v04.py calc template.inp launcher.sh")
+    print("    5. cd calculation && ./launcher_orca.sh")
+    print("    6. cd .. && python3 ascec-v04.py sort")
+    print("    7. python3 ascec-v04.py sim --threshold 0.9")
+    print()
+    
+    print("  Update existing calculations:")
+    print("    python3 ascec-v04.py update new_template.inp            # Interactive selection (same extension)")
+    print("    python3 ascec-v04.py update new_template.inp conf_1     # Interactive selection (filtered)")
+    print()
+    
+    print("=" * 80)
+
+
 def main_ascec_integrated():
-    # Setup argument parser
+    # Setup argument parser - use parse_known_args to handle shell expansion
     parser = argparse.ArgumentParser(description="ASCEC: Annealing Simulation")
-    parser.add_argument("input_file", help="Path to the input file (e.g., w5-apy.in)")
+    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'calc' to create calculation system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
+    parser.add_argument("arg1", nargs='?', default=None, 
+                       help="Second argument: replication mode (e.g., 'r3'), template file for calc, etc.")
+    parser.add_argument("arg2", nargs='?', default=None,
+                       help="Third argument: launcher template for calc command")
     parser.add_argument("--v", action="store_true", help="Verbose output: print detailed steps every 10 cycles.")
     parser.add_argument("--va", action="store_true", help="Very verbose output: print detailed steps for every cycle.")
     parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
-    args = parser.parse_args()
+    parser.add_argument("--nosum", action="store_true", help="Skip summary creation in sort command.")
+    parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
+    
+    # Use parse_known_args to handle shell expansion gracefully
+    args, unknown_args = parser.parse_known_args()
+    
+    # Check if help is requested
+    if args.command.lower() in ["help", "--help", "-h", "commands"]:
+        print_all_commands()
+        return
+    
+    # Check if similarity analysis mode is requested
+    if args.command.lower() == "sim":
+        # Pass all remaining arguments to similarity script
+        similarity_args = sys.argv[2:]  # Skip 'ascec-v04.py' and 'sim'
+        execute_similarity_analysis(*similarity_args)
+        return
+    
+    # Check if sort mode is requested
+    if args.command.lower() == "sort":
+        execute_sort_command(include_summary=not args.nosum)
+        return
+    
+    # Check if box analysis mode is requested
+    if args.command.lower() == "box":
+        if args.arg1:
+            # Use specified input file
+            input_file = args.arg1
+        else:
+            print("Error: box command requires an input file.")
+            print("Usage: python3 ascec-v04.py box input_file.inp")
+            print("   or: python3 ascec-v04.py box input_file.inp > box_info.txt")
+            sys.exit(1)
+        
+        execute_box_analysis(input_file)
+        return
+    
+    # Check if calculation mode is requested
+    if args.command.lower() == "calc":
+        if not args.arg1 or not args.arg2:
+            print("Error: calc command requires both template file and launcher template.")
+            print("Usage: python3 ascec-v04.py calc template_file launcher_template")
+            print("Example: python3 ascec-v04.py calc example_input.inp launcher_orca.sh")
+            sys.exit(1)
+        
+        result = create_simple_calculation_system(args.arg1, args.arg2)
+        print(result)
+        return
+    
+    # Check if merge mode is requested
+    if args.command.lower() == "merge":
+        if args.arg1 and args.arg1.lower() == "result":
+            execute_merge_result_command()
+        else:
+            execute_merge_command()
+        return
+    
+    # Check if update mode is requested
+    if args.command.lower() == "update":
+        if not args.arg1:
+            print("Error: update command requires a template file.")
+            print("Usage: python3 ascec-v04.py update new_template.inp")
+            print("   or: python3 ascec-v04.py update new_template.inp pattern")
+            print("This will search for files with the same extension as the template")
+            sys.exit(1)
+        
+        # Handle shell expansion issue - if we have unknown arguments, it means shell expanded *
+        if unknown_args:
+            # If we have unknown arguments, it means shell expanded * 
+            print(f"Detected shell expansion (found {len(unknown_args) + 2} total arguments). Switching to interactive mode...")
+            target_pattern = ""
+        elif args.arg2 is None:
+            # If no second argument, default to interactive selection for same extension
+            target_pattern = ""
+        else:
+            target_pattern = args.arg2
+        
+        result = update_existing_input_files(args.arg1, target_pattern)
+        print(result)
+        return
+    
+    # Check if launcher merge mode is requested
+    if args.command.lower() == "launcher":
+        # Merge all launcher scripts in current directory and subfolders
+        merge_launcher_scripts(".")
+        return
+    
+    # For simulation mode, the command is the input file
+    input_file = args.command
+    replication = args.arg1
+    
+    # Check if box analysis is requested as second argument
+    if replication is not None and replication.lower() == "box":
+        execute_box_analysis(input_file)
+        sys.exit(0)  # Explicitly exit after box analysis to prevent any further execution
+        
+    # Check if replication mode is requested
+    if replication is not None:
+        # Parse replication argument (e.g., "r3" -> 3 replicas)
+        if replication.lower().startswith('r') and len(replication) > 1:
+            try:
+                num_replicas = int(replication[1:])
+                if num_replicas <= 0:
+                    raise ValueError("Number of replicas must be positive")
+                
+                # Create replicated runs and exit
+                create_replicated_runs(input_file, num_replicas)
+                return
+                
+            except ValueError as e:
+                print(f"Error: Invalid replication argument '{replication}'. {e}")
+                print("Usage: python3 ascec-v04.py input_file.in r<number>")
+                print("Example: python3 ascec-v04.py example.in r3")
+                sys.exit(1)
+        else:
+            print(f"Error: Invalid replication format '{replication}'.")
+            print("Usage: python3 ascec-v04.py input_file.in r<number>")
+            print("Example: python3 ascec-v04.py example.in r3")
+            sys.exit(1)
 
     # Initialize file handles and paths to None to prevent UnboundLocalError
     out_file_handle = None 
@@ -1837,7 +5048,7 @@ def main_ascec_integrated():
     tvse_filename = ""     # Initialize for error path
 
     # Determine the directory where the input file is located
-    input_file_path_full = os.path.abspath(args.input_file)
+    input_file_path_full = os.path.abspath(input_file)
     run_dir = os.path.dirname(input_file_path_full)
     if not run_dir:
         run_dir = os.getcwd()
@@ -1857,6 +5068,11 @@ def main_ascec_integrated():
         state.verbosity_level = 0 # Default minimal output
     
     state.use_standard_metropolis = args.standard # Set the flag in state
+    
+    # Handle --nobox flag to disable box XYZ file creation
+    global CREATE_BOX_XYZ_COPY
+    if args.nobox:
+        CREATE_BOX_XYZ_COPY = False
 
     # Check for Open Babel executable early
     if not shutil.which("obabel"):
@@ -1866,9 +5082,12 @@ def main_ascec_integrated():
     
     try:
         # Call read_input_file as early as possible to populate state
-        read_input_file(state, args.input_file)
+        read_input_file(state, input_file)
 
-        # --- Call for Box Length Advice ---
+        # Set output directory to the directory containing the input file
+        state.output_dir = run_dir
+
+        # --- Call for Box Length Advice (only for simulation mode, not box analysis) ---
         provide_box_length_advice(state) # This will print to stderr
 
         # Set QM program name based on QM_PROGRAM_DETAILS mapping
@@ -1885,7 +5104,7 @@ def main_ascec_integrated():
         random.seed(state.random_seed)
         np.random.seed(state.random_seed)
 
-        input_base_name = os.path.splitext(os.path.basename(args.input_file))[0]
+        input_base_name = os.path.splitext(os.path.basename(input_file))[0]
 
         # Define output filenames
         out_filename = f"{input_base_name}.out" 
@@ -1911,7 +5130,7 @@ def main_ascec_integrated():
 
         # For annealing mode, open a file for failed initial configurations
         if state.random_generate_config == 1: 
-            failed_configs_filename = os.path.splitext(os.path.basename(args.input_file))[0] + "_failed_initial_configs.xyz"
+            failed_configs_filename = os.path.splitext(os.path.basename(input_file))[0] + "_failed_initial_configs.xyz"
             failed_configs_path = os.path.join(run_dir, failed_configs_filename)
             try:
                 # Open in write mode if it needs to be created or overwritten
@@ -1968,7 +5187,6 @@ def main_ascec_integrated():
 
         # Annealing Mode (state.random_generate_config = 1)
         elif state.random_generate_config == 1: 
-            _print_verbose("Starting annealing simulation...\n", 0, state)
             
             # Set initial temperature
             state.current_temp = state.linear_temp_init if state.quenching_routine == 1 else state.geom_temp_init
@@ -2013,7 +5231,11 @@ def main_ascec_integrated():
                     state.lowest_energy_iznu = list(state.iznu) # Store initial lowest energy atomic numbers
                     state.lowest_energy_config_idx = 1 # Initial config is always config 1
                     
+                    # Preserve QM files from the initial accepted configuration for debugging
+                    preserve_last_qm_files(state, run_dir)
+                    
                     _print_verbose(f"  Calculation successful. Energy: {state.current_energy:.8f} a.u.\n", 0, state) # Modified print
+                    _print_verbose("\nStarting annealing simulation...\n", 0, state)
                     initial_qm_calculation_succeeded = True
                     state.total_accepted_configs += 1 # Increment for initial accepted config
                     break # Exit retry loop on success
@@ -2213,6 +5435,9 @@ def main_ascec_integrated():
                         state.current_energy = proposed_energy 
                         # state.rp and state.rcm are already the proposed (accepted) state
                         
+                        # Preserve QM files from this accepted configuration for debugging
+                        preserve_last_qm_files(state, run_dir)
+                        
                         # Update original_state_for_revert to the newly accepted state
                         original_rp_for_revert[:] = state.rp[:]
                         original_iznu_for_revert[:] = state.iznu[:]
@@ -2296,7 +5521,7 @@ def main_ascec_integrated():
                     pass # Nothing more to do here, the loop will naturally go to the next step_num
 
                 # Dynamic max_cycle reduction
-                state.maxstep = max(100, int(state.maxstep * 0.90)) # Reduce by 10% with floor of 100
+                state.maxstep = max(state.max_cycle_floor, int(state.maxstep * 0.90)) # Reduce by 10% with user-defined floor
                 _print_verbose(f"  Max QM evaluations for next temperature step reduced to: {state.maxstep}", 1, state)
 
             _print_verbose("\nAnnealing simulation finished.\n", 0, state)
@@ -2402,7 +5627,206 @@ def main_ascec_integrated():
         # Final cleanup of any lingering QM files (should be minimal with per-call cleanup)
         cleanup_qm_files(qm_files_to_clean, state) 
 
-# This ensures main_ascec_integrated() is called when the script is run
+
+def analyze_box_length_from_xyz(xyz_file: str, num_molecules: int = 1) -> None:
+    """
+    Standalone function to analyze optimal box lengths from an existing XYZ file.
+    Useful for testing the new volume-based approach.
+    
+    Args:
+        xyz_file (str): Path to XYZ file containing molecular structure
+        num_molecules (int): Number of copies of this molecule that will be simulated
+    """
+    import sys
+    
+    print(f"\nAnalyzing box length requirements for: {xyz_file}")
+    print(f"Number of molecule copies: {num_molecules}")
+    print("="*70)
+    
+    if not os.path.exists(xyz_file):
+        print(f"Error: File '{xyz_file}' not found!")
+        return
+    
+    try:
+        # Read the XYZ file
+        configurations = extract_configurations_from_xyz(xyz_file)
+        
+        if not configurations:
+            print("Error: No valid configurations found in XYZ file!")
+            return
+        
+        # Use the first configuration
+        config = configurations[0]
+        print(f"Using configuration {config['config_num']} with {len(config['atoms'])} atoms")
+        
+        # Convert to MoleculeData format
+        atoms_coords = []
+        for atom in config['atoms']:
+            if len(atom) >= 7:  # New format with string and float coordinates
+                symbol, x_str, y_str, z_str, x_float, y_float, z_float = atom
+                # Look up atomic number from symbol
+                atomic_num = ELEMENT_SYMBOLS.get(symbol)
+                
+                if atomic_num is None:
+                    print(f"Warning: Unknown element symbol '{symbol}', skipping atom")
+                    continue
+                
+                atoms_coords.append((atomic_num, x_float, y_float, z_float))
+            else:
+                print(f"Warning: Unexpected atom format: {atom}")
+                continue
+        
+        if not atoms_coords:
+            print("Error: No valid atoms found!")
+            return
+        
+        # Create a MoleculeData object
+        mol_data = MoleculeData("molecule", len(atoms_coords), atoms_coords)
+        
+        # Create a minimal SystemState for the analysis
+        state = SystemState()
+        state.num_molecules = num_molecules
+        state.all_molecule_definitions = [mol_data]
+        state.molecules_to_add = [0] * num_molecules  # All refer to the first (and only) molecule definition
+        state.verbosity_level = 1
+        
+        # Perform the analysis
+        results = calculate_optimal_box_length(state)
+        
+        if 'error' in results:
+            print(f"Error in analysis: {results['error']}")
+            return
+        
+        # Display results
+        total_volume = results['total_molecular_volume']
+        print(f"\nMOLECULAR VOLUME ANALYSIS:")
+        print(f"  Single molecule volume: {results['individual_molecular_volumes'][0]['volume_A3']:.2f} Å³")
+        print(f"  Total volume ({num_molecules} molecules): {total_volume:.2f} Å³")
+        
+        print(f"\nBOX LENGTH RECOMMENDATIONS:")
+        print("Packing    Box Length    Box Volume    Free Volume   Typical Use")
+        print("Fraction   (Å)          (Å³)         (Å³)") 
+        print("-" * 65)
+        
+        recommendations = results['box_length_recommendations']
+        contexts = {
+            '10.0%': 'Very dilute gas phase',
+            '20.0%': 'Dilute gas/vapor phase', 
+            '30.0%': 'Moderate density fluid',
+            '40.0%': 'Dense fluid phase',
+            '50.0%': 'Very dense/liquid-like'
+        }
+        
+        for key, rec in recommendations.items():
+            pf = rec['packing_fraction']
+            bl = rec['box_length_A']
+            bv = rec['box_volume_A3']
+            fv = rec['free_volume_A3']
+            context = contexts.get(key, 'Custom density')
+            print(f"{pf:6.1%}     {bl:8.2f}      {bv:8.0f}       {fv:8.0f}     {context}")
+        
+        # Calculate old method for comparison
+        coords_array = np.array([atom[1:4] for atom in atoms_coords])
+        min_coords = np.min(coords_array, axis=0)
+        max_coords = np.max(coords_array, axis=0)
+        extents = max_coords - min_coords
+        max_extent = np.max(extents)
+        old_method_box = max_extent + 16.0  # 8 Å on each side
+        
+        print(f"\nCOMPARISON WITH SIMPLE METHOD:")
+        print(f"  Largest molecular dimension: {max_extent:.2f} Å")
+        print(f"  Old method (8 Å rule): {old_method_box:.2f} Å")
+        
+        # Compare with 30% recommendation
+        rec_30 = recommendations.get('30.0%', {}).get('box_length_A', 0)
+        if rec_30 > 0:
+            ratio = old_method_box / rec_30
+            print(f"  Ratio (old/volume-based): {ratio:.2f}")
+            if ratio > 1.5:
+                print(f"  → Old method may be wastefully large")
+            elif ratio < 0.7:
+                print(f"  → Old method may be too small")
+            else:
+                print(f"  → Methods are reasonably consistent")
+        
+        print(f"\nRECOMMENDATIONS:")
+        rec_20 = recommendations.get('20.0%', {}).get('box_length_A', 0)
+        if rec_20 > 0 and rec_30 > 0:
+            print(f"  • For most applications: {rec_30:.1f} Å (30% packing)")
+            print(f"  • For gas phase studies: {rec_20:.1f} Å (20% packing)")
+        
+        print("\n" + "="*70)
+        
+    except Exception as e:
+        print(f"Error during analysis: {e}")
+        traceback.print_exc()
+
+
+# Example usage and testing function
+def test_box_length_analysis():
+    """
+    Test function to demonstrate the new volume-based box length calculation.
+    Creates a simple water molecule and analyzes it.
+    """
+    print("\n" + "="*70)
+    print("TESTING VOLUME-BASED BOX LENGTH CALCULATION")
+    print("="*70)
+    
+    # Create a simple water molecule for testing
+    # H2O coordinates (in Angstroms, approximate)
+    water_atoms = [
+        (8, 0.0, 0.0, 0.0),      # O at origin
+        (1, 0.757, 0.587, 0.0),  # H1
+        (1, -0.757, 0.587, 0.0)  # H2
+    ]
+    
+    water_mol = MoleculeData("H2O", 3, water_atoms)
+    
+    # Test with different numbers of molecules
+    test_cases = [1, 10, 50, 100]
+    
+    for num_mols in test_cases:
+        print(f"\nTesting {num_mols} water molecule(s):")
+        print("-" * 40)
+        
+        # Create test state
+        state = SystemState()
+        state.num_molecules = num_mols
+        state.all_molecule_definitions = [water_mol]
+        state.molecules_to_add = [0] * num_mols
+        state.verbosity_level = 0  # Suppress verbose output for testing
+        
+        results = calculate_optimal_box_length(state)
+        
+        if 'error' not in results:
+            total_vol = results['total_molecular_volume']
+            rec_20 = results['box_length_recommendations']['20.0%']['box_length_A']
+            rec_30 = results['box_length_recommendations']['30.0%']['box_length_A']
+            
+            print(f"  Total molecular volume: {total_vol:.2f} Å³")
+            print(f"  Recommended box (20% packing): {rec_20:.1f} Å")
+            print(f"  Recommended box (30% packing): {rec_30:.1f} Å")
+            
+            # Calculate density at 30% packing
+            box_vol_30 = rec_30**3
+            density_30 = (num_mols * 18.015) / (box_vol_30 * 6.022e23 * 1e-24)  # g/cm³
+            print(f"  Approximate density at 30%: {density_30:.3f} g/cm³")
+        else:
+            print(f"  Error: {results['error']}")
+
+
 if __name__ == "__main__":
-    main_ascec_integrated()
+    if len(sys.argv) > 1:
+        # Allow command-line usage for box length analysis
+        if sys.argv[1] == "analyze_box" and len(sys.argv) >= 3:
+            xyz_file = sys.argv[2]
+            num_molecules = int(sys.argv[3]) if len(sys.argv) > 3 else 1
+            analyze_box_length_from_xyz(xyz_file, num_molecules)
+        elif sys.argv[1] == "test_box":
+            test_box_length_analysis()
+        else:
+            main_ascec_integrated()
+    else:
+        # Run normal ASCEC if no special arguments
+        main_ascec_integrated()
 
