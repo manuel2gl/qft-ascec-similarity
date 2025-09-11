@@ -17,6 +17,7 @@ from scipy.spatial.transform import Rotation as R # Ensure R is imported like th
 BOLTZMANN_CONSTANT_HARTREE_PER_K = 3.1668114e-6 # Hartree/K (k_B in atomic units)
 DEFAULT_TEMPERATURE_K = 298.15 # K (Room temperature)
 
+version = "* Similarity-v01: Jun-2025 *"  # Version of the Similarity script
 
 ### Embedded element masses dictionary ###
 element_masses = {
@@ -1243,12 +1244,115 @@ def write_xyz_file(mol_data, filename):
         for i in range(len(atomnos)):
             f.write(f"{symbols[i]:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
 
-def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, openbabel_alias="obabel"):
+def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel"):
+    """
+    Creates a motifs folder containing the lowest energy representative structure from each cluster.
+    Also creates a combined XYZ file with all representatives and attempts to convert to MOL format.
+    
+    Args:
+        all_clusters_data (list): List of clusters, where each cluster is a list of molecule data dictionaries
+        output_base_dir (str): Base output directory where motifs folder will be created
+        openbabel_alias (str): Alias for OpenBabel command (default: "obabel")
+    """
+    if not all_clusters_data:
+        print("  No clusters found. Skipping motifs creation.")
+        return
+    
+    # Create motifs directory with number of motifs in the name
+    num_motifs = len(all_clusters_data)
+    motifs_dir = os.path.join(output_base_dir, f"motifs_{num_motifs:02d}")
+    os.makedirs(motifs_dir, exist_ok=True)
+    
+    print(f"\nCreating motifs folder with {num_motifs} representative structures...")
+    print(f"  Output directory: {motifs_dir}")
+    
+    representatives = []
+    
+    for cluster_idx, cluster_members in enumerate(all_clusters_data):
+        if not cluster_members:
+            continue
+            
+        # Find the lowest energy representative (same logic as used elsewhere)
+        representative = min(cluster_members,
+                           key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+        
+        representatives.append(representative)
+        
+        # Create individual XYZ file for this representative
+        base_name = os.path.splitext(representative['filename'])[0]
+        motif_filename = f"motif_{cluster_idx+1:02d}_{base_name}.xyz"
+        motif_path = os.path.join(motifs_dir, motif_filename)
+        
+        write_xyz_file(representative, motif_path)
+        
+        gibbs_str = f"{representative['gibbs_free_energy']:.6f}" if representative['gibbs_free_energy'] is not None else "N/A"
+        print(f"  Motif {cluster_idx+1:02d}: {base_name} (Gibbs Energy: {gibbs_str} Hartree)")
+    
+    # Create combined XYZ file with all representatives
+    combined_xyz_path = os.path.join(motifs_dir, "all_motifs_combined.xyz")
+    
+    # Sort representatives by Gibbs free energy
+    sorted_representatives = sorted(
+        representatives,
+        key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename'])
+    )
+    
+    with open(combined_xyz_path, "w", newline='\n') as outfile:
+        for rep_idx, rep_data in enumerate(sorted_representatives):
+            atomnos = rep_data.get('final_geometry_atomnos')
+            atomcoords = rep_data.get('final_geometry_coords')
+            gibbs_free_energy = rep_data.get('gibbs_free_energy')
+            
+            if atomnos is None or atomcoords is None or len(atomnos) == 0:
+                print(f"    WARNING: Skipping representative {rep_data['filename']} due to missing geometry data.")
+                continue
+            
+            base_name = os.path.splitext(rep_data['filename'])[0]
+            gibbs_str = f"{gibbs_free_energy:.6f} hartree" if gibbs_free_energy is not None else "N/A"
+            comment_line = f"Motif_{rep_idx+1:02d}_{base_name} (G = {gibbs_str})"
+            
+            outfile.write(f"{len(atomnos)}\n")
+            outfile.write(f"{comment_line}\n")
+            for i in range(len(atomnos)):
+                symbol = atomic_number_to_symbol(atomnos[i])
+                outfile.write(f"{symbol:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
+    
+    print(f"  Created combined XYZ file: {os.path.basename(combined_xyz_path)}")
+    
+    # Attempt to create MOL file using OpenBabel
+    mol_output_path = os.path.join(motifs_dir, "all_motifs_combined.mol")
+    openbabel_full_path = shutil.which(openbabel_alias)
+    
+    if openbabel_full_path:
+        try:
+            # Use the correct OpenBabel syntax: obabel -i<format> input_file -o<format> -O output_file
+            result = subprocess.run([openbabel_alias, "-ixyz", combined_xyz_path, "-omol", "-O", mol_output_path], 
+                                  capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                print(f"  Successfully created MOL file: {os.path.basename(mol_output_path)}")
+            else:
+                print(f"  WARNING: OpenBabel conversion to MOL failed. Error: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            print(f"  WARNING: OpenBabel conversion to MOL timed out after 30 seconds.")
+        except Exception as e:
+            print(f"  WARNING: Error during OpenBabel conversion to MOL: {e}")
+    else:
+        print(f"  WARNING: OpenBabel ({openbabel_alias}) not found. Skipping MOL conversion.")
+        print("  Please ensure OpenBabel is installed and added to your system's PATH.")
+    
+    print(f"\nMotifs creation complete. Output saved in: {motifs_dir}")
+
+
+def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, openbabel_alias="obabel", prefix_template=None, motif_numbers=None):
     """
     Combines relevant .xyz data from cluster members into a single multi-frame .xyz file
     and attempts to convert the resulting file (or the single original .xyz) to a .mol file.
     Each frame in the combined XYZ will include Gibbs Free Energy in its comment line.
     The frames in the combined XYZ will be sorted by Gibbs free energy (lowest to highest).
+    
+    Args:
+        prefix_template (str): Optional template for comment line prefix, e.g., "Motif_{:02d}_" for motifs
+        motif_numbers (list): Optional list of motif numbers corresponding to each member (for unique motifs)
     """
     final_xyz_source_path = None # This will be the path to the XYZ file used for MOL conversion
     
@@ -1275,13 +1379,25 @@ def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, op
         final_output_mol_name_base = output_base_name # Base name for the .mol file
 
         # Sort members by Gibbs free energy (lowest to highest), with filename as a tie-breaker
-        sorted_members_data = sorted(
-            cluster_members_data,
-            key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename'])
-        )
+        # Also sort the motif_numbers list in the same order if provided
+        if motif_numbers and len(motif_numbers) == len(cluster_members_data):
+            # Create pairs of (data, motif_number) and sort by energy
+            paired_data = list(zip(cluster_members_data, motif_numbers))
+            sorted_pairs = sorted(
+                paired_data,
+                key=lambda x: (x[0].get('gibbs_free_energy') if x[0].get('gibbs_free_energy') is not None else float('inf'), x[0]['filename'])
+            )
+            sorted_members_data = [pair[0] for pair in sorted_pairs]
+            sorted_motif_numbers = [pair[1] for pair in sorted_pairs]
+        else:
+            sorted_members_data = sorted(
+                cluster_members_data,
+                key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename'])
+            )
+            sorted_motif_numbers = None
 
         with open(full_combined_xyz_path, "w", newline='\n') as outfile:
-            for mol_data in sorted_members_data: # Iterate over sorted data
+            for frame_idx, mol_data in enumerate(sorted_members_data, 1): # Iterate over sorted data
                 atomnos = mol_data.get('final_geometry_atomnos')
                 atomcoords = mol_data.get('final_geometry_coords')
                 gibbs_free_energy = mol_data.get('gibbs_free_energy')
@@ -1292,7 +1408,15 @@ def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, op
                 
                 base_name_for_frame = os.path.splitext(mol_data['filename'])[0]
                 gibbs_str = f"{gibbs_free_energy:.6f} hartree" if gibbs_free_energy is not None else "N/A"
-                comment_line = f"{base_name_for_frame} (G = {gibbs_str})" # Updated comment format
+                
+                # Apply prefix template with actual motif number if provided
+                if prefix_template and sorted_motif_numbers:
+                    motif_num = sorted_motif_numbers[frame_idx - 1]  # frame_idx starts at 1
+                    comment_line = f"{prefix_template.format(motif_num)}{base_name_for_frame} (G = {gibbs_str})"
+                elif prefix_template:
+                    comment_line = f"{prefix_template.format(frame_idx)}{base_name_for_frame} (G = {gibbs_str})"
+                else:
+                    comment_line = f"{base_name_for_frame} (G = {gibbs_str})"
 
                 outfile.write(f"{len(atomnos)}\n")
                 outfile.write(f"{comment_line}\n")
@@ -1389,8 +1513,279 @@ def parse_abs_tolerance_argument(tolerance_str):
     return tolerances
 
 
+def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, threshold=1.0, min_std_threshold=1e-6, abs_tolerances=None):
+    """
+    Creates motif summary by re-clustering cluster representatives excluding hydrogen bond count.
+    Groups structures that are identical except for the number of hydrogen bonds.
+    Keeps H-bond quality features (distances, angles) but ignores H-bond quantity.
+    Creates truly unique motifs in unique_motifs_## directory with combined XYZ/MOL files.
+    
+    Args:
+        all_clusters_data (list): List of clusters from original clustering
+        output_base_dir (str): Base output directory
+        threshold (float): Clustering threshold for final motif grouping (default: 1.0)
+        min_std_threshold (float): Minimum standard deviation threshold
+        abs_tolerances (dict): Absolute tolerances for features
+    """
+    print(f"\n=== Creating Final Motif Summary (Excluding H-bond count) ===")
+    
+    # Get representatives from each cluster (lowest energy) and track original cluster numbers
+    cluster_representatives = []
+    cluster_original_indices = []  # Track which original cluster each representative came from
+    for cluster_idx, cluster in enumerate(all_clusters_data):
+        if cluster:
+            representative = min(cluster,
+                               key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+            cluster_representatives.append(representative)
+            cluster_original_indices.append(cluster_idx + 1)  # +1 for 1-based numbering
+    
+    if len(cluster_representatives) < 2:
+        print("  Not enough cluster representatives for motif analysis. Skipping.")
+        return
+    
+    print(f"  Re-clustering {len(cluster_representatives)} cluster representatives without H-bond count...")
+    
+    # Define features to exclude (only hydrogen bond count, not quality/geometry features)
+    excluded_features = {
+        'num_hydrogen_bonds'
+    }
+    
+    # Define features to include for motif clustering
+    motif_features = [
+        'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
+        'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
+        'average_hbond_angle', 'min_hbond_distance', 'max_hbond_distance',
+        'std_hbond_distance', 'min_hbond_angle', 'max_hbond_angle', 
+        'std_hbond_angle'
+    ]
+    rotational_constant_subfeatures = [
+        'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
+    ]
+    
+    # Check which features are globally available
+    globally_missing_features = []
+    for feature in motif_features:
+        if all(d.get(feature) is None for d in cluster_representatives):
+            globally_missing_features.append(feature)
+    
+    # Check rotational constants
+    is_rot_const_globally_missing = True
+    for d in cluster_representatives:
+        rot_consts = d.get('rotational_constants')
+        if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
+            is_rot_const_globally_missing = False
+            break
+    
+    if is_rot_const_globally_missing:
+        globally_missing_features.extend(rotational_constant_subfeatures)
+    
+    active_features = [f for f in motif_features if f not in globally_missing_features]
+    
+    if not active_features and is_rot_const_globally_missing:
+        print("  WARNING: No valid numerical features available for motif clustering. Skipping.")
+        return
+    
+    # Build feature matrix for clustering
+    features_for_scaling = []
+    
+    for d in cluster_representatives:
+        feature_vector = []
+        
+        for feature_name in active_features:
+            internal_key = FEATURE_MAPPING.get(feature_name, feature_name)
+            value = d.get(internal_key)
+            if value is None:
+                value = 0.0
+            feature_vector.append(value)
+        
+        # Add rotational constants if available
+        if not is_rot_const_globally_missing:
+            rc_temp = d.get('rotational_constants')
+            if rc_temp is not None and isinstance(rc_temp, np.ndarray) and len(rc_temp) == 3:
+                feature_vector.extend([rc_temp[0], rc_temp[1], rc_temp[2]])
+            else:
+                feature_vector.extend([0.0, 0.0, 0.0])
+        
+        features_for_scaling.append(feature_vector)
+    
+    if not features_for_scaling or not features_for_scaling[0]:
+        print("  WARNING: No valid feature vectors for motif clustering. Skipping.")
+        return
+    
+    features_matrix = np.array(features_for_scaling)
+    
+    # Apply absolute tolerances and scaling
+    if abs_tolerances:
+        feature_names_for_tolerances = active_features[:]
+        if not is_rot_const_globally_missing:
+            feature_names_for_tolerances.extend(rotational_constant_subfeatures)
+        
+        for col_idx, feature_name in enumerate(feature_names_for_tolerances):
+            if feature_name in abs_tolerances:
+                tolerance = abs_tolerances[feature_name]
+                column = features_matrix[:, col_idx]
+                if np.max(column) - np.min(column) <= tolerance:
+                    features_matrix[:, col_idx] = 0.0
+                    print(f"    Zeroed feature '{feature_name}' (max difference: {np.max(column) - np.min(column):.2e} <= tolerance: {tolerance:.2e})")
+    
+    # Scale features
+    scaler = StandardScaler()
+    try:
+        features_scaled = scaler.fit_transform(features_matrix)
+        
+        # Check for low std deviation features
+        feature_names_for_std_check = active_features[:]
+        if not is_rot_const_globally_missing:
+            feature_names_for_std_check.extend(rotational_constant_subfeatures)
+        
+        std_devs = scaler.scale_
+        for col_idx, (feature_name, std_dev) in enumerate(zip(feature_names_for_std_check, std_devs)):
+            if std_dev < min_std_threshold:
+                features_scaled[:, col_idx] = 0.0
+                print(f"    Zeroed low-variance feature '{feature_name}' (std dev: {std_dev:.2e} < threshold: {min_std_threshold:.2e})")
+        
+    except Exception as e:
+        print(f"  ERROR in feature scaling for motif clustering: {e}")
+        return
+    
+    # Perform hierarchical clustering
+    try:
+        linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
+        motif_labels = fcluster(linkage_matrix, t=threshold, criterion='distance')
+    except Exception as e:
+        print(f"  ERROR in motif clustering: {e}")
+        return
+    
+    # Group representatives by motif labels
+    motif_groups = {}
+    for i, label in enumerate(motif_labels):
+        motif_groups.setdefault(label, []).append(cluster_representatives[i])
+    
+    print(f"  Found {len(motif_groups)} unique final motifs")
+    
+    # Create unique motifs directory first
+    unique_motifs_dir = os.path.join(output_base_dir, f"unique_motifs_{len(motif_groups):02d}")
+    os.makedirs(unique_motifs_dir, exist_ok=True)
+    
+    # Sort motifs by lowest energy representative (needed for dendrogram labeling)
+    sorted_motifs = []
+    for motif_id, members in motif_groups.items():
+        representative = min(members,
+                           key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+        sorted_motifs.append((motif_id, members, representative))
+    
+    sorted_motifs.sort(key=lambda x: (x[2].get('gibbs_free_energy') if x[2].get('gibbs_free_energy') is not None else float('inf'), x[2]['filename']))
+    
+    # Create dendrogram for unique motifs clustering
+    try:
+        import matplotlib.pyplot as plt
+        
+        # Create labels for dendrogram using original cluster numbers
+        # We need to map each cluster representative to its original cluster number
+        # First, create a mapping from representative index to original cluster number
+        rep_to_original_num = {}
+        for i, rep in enumerate(cluster_representatives):
+            original_cluster_num = cluster_original_indices[i]
+            rep_to_original_num[i] = original_cluster_num
+        
+        # Create labels based on the original cluster numbers
+        motif_labels = [str(rep_to_original_num.get(i, i+1)) for i in range(len(cluster_representatives))]
+        
+        plt.figure(figsize=(12, 8))
+        dendrogram(linkage_matrix, labels=motif_labels, orientation='top', 
+                   distance_sort='descending', show_leaf_counts=True)
+        plt.title(f'Unique Motifs Dendrogram (Excluding H-bond Count)\nThreshold: {threshold}')
+        plt.xlabel('Original Cluster Numbers')
+        plt.ylabel('Distance')
+        plt.xticks(rotation=0)  # Keep numbers horizontal since they're short
+        plt.tight_layout()
+        
+        # Save dendrogram in the unique motifs directory
+        dendrogram_path = os.path.join(unique_motifs_dir, "unique_motifs_dendrogram.png")
+        plt.savefig(dendrogram_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"  Created unique motifs dendrogram: {os.path.basename(dendrogram_path)}")
+        
+    except ImportError:
+        print("  WARNING: matplotlib not available. Skipping unique motifs dendrogram creation.")
+    except Exception as e:
+        print(f"  WARNING: Error creating unique motifs dendrogram: {e}")
+    
+    # Create motif summary file in the unique motifs directory
+    summary_filename = os.path.join(unique_motifs_dir, "u_motif_summary.txt")
+    
+    with open(summary_filename, 'w') as f:
+        f.write("=" * 60 + "\n\n")
+        f.write("Final motif summary - excluding hydrogen bond count\n\n")
+        f.write("-" * 60 + "\n\n")
+        f.write(f"Original cluster representatives analyzed: {len(cluster_representatives)}\n")
+        f.write(f"Number of truly unique motifs: {len(motif_groups)}\n")
+        f.write(f"Clustering threshold: {threshold}\n\n")
+        f.write("=" * 60 + "\n\n")
+        
+        # Write motif details
+        for motif_idx, (motif_id, members, representative) in enumerate(sorted_motifs, 1):
+            f.write(f"Final motif {motif_idx} (Label: {motif_id}) - {len(members)} structure(s)\n")
+            f.write(f"Representative: {representative['filename']}\n")
+            
+            if representative.get('gibbs_free_energy') is not None:
+                f.write(f"Representative energy: {representative['gibbs_free_energy']:.6f} Hartree\n")
+            else:
+                f.write("Representative energy: N/A\n")
+
+            f.write("\nStructures grouped in this final motif:\n")
+            
+            # Sort members by energy
+            sorted_members = sorted(members,
+                                  key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+            
+            for member in sorted_members:
+                energy_str = f"{member['gibbs_free_energy']:.6f}" if member.get('gibbs_free_energy') is not None else "N/A"
+                hbond_count = member.get('num_hydrogen_bonds', 'N/A')
+                f.write(f"  - {member['filename']} (Energy: {energy_str} Hartree, H-bonds: {hbond_count})\n")
+            
+            # Show hydrogen bond range if multiple members
+            if len(members) > 1:
+                hbond_counts = [m.get('num_hydrogen_bonds') for m in members if m.get('num_hydrogen_bonds') is not None]
+                if min(hbond_counts) != max(hbond_counts):
+                    f.write(f"H-bond range: {min(hbond_counts)} - {max(hbond_counts)}\n")
+            
+            f.write("\n" + "-" * 60 + "\n\n")
+    
+    print(f"  Final motif summary written to: {os.path.basename(summary_filename)}")
+    
+    print(f"  Creating final motif representatives directory: {os.path.basename(unique_motifs_dir)}")
+    
+    # Create a mapping from representative filename to original cluster number
+    rep_to_original_cluster = {}
+    for i, rep in enumerate(cluster_representatives):
+        rep_to_original_cluster[rep['filename']] = cluster_original_indices[i]
+    
+    # Create individual XYZ files and collect for combined file
+    final_representatives = []
+    final_motif_numbers = []  # Track the original cluster numbers for each motif
+    for motif_idx, (motif_id, members, representative) in enumerate(sorted_motifs, 1):
+        base_name = os.path.splitext(representative['filename'])[0]
+        # Use original cluster number instead of new sequential motif number
+        original_cluster_num = rep_to_original_cluster[representative['filename']]
+        motif_filename = f"u_motif_{original_cluster_num:02d}_{base_name}.xyz"
+        motif_path = os.path.join(unique_motifs_dir, motif_filename)
+        
+        write_xyz_file(representative, motif_path)
+        final_representatives.append(representative)
+        final_motif_numbers.append(original_cluster_num)  # Store the original cluster number
+        
+        energy_str = f"{representative['gibbs_free_energy']:.6f}" if representative['gibbs_free_energy'] is not None else "N/A"
+        print(f"    Motif {original_cluster_num:02d}: {base_name} (Energy: {energy_str} Hartree)")
+    
+    # Create combined XYZ and MOL files for final motifs
+    print(f"  Creating combined files for {len(final_representatives)} final motifs...")
+    combine_xyz_files(final_representatives, unique_motifs_dir, output_base_name="all_unique_motifs_combined", prefix_template="u_motif_{:02d}_", motif_numbers=final_motif_numbers)
+
+
 # Modified to accept rmsd_threshold and output_base_dir
-def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None): # Added abs_tolerances
+def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, motif_threshold=1.0):
     """
     Performs hierarchical clustering and analysis on the extracted molecular properties,
     and saves .dat and .xyz files for each cluster.
@@ -1552,6 +1947,41 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     total_clusters_outputted = 0
     total_rmsd_outliers_first_pass = 0
 
+    # Helper function to center text within 75 characters
+    def center_text(text, width=75):
+        return text.center(width)
+    
+    # Add ASCII art header similar to ASCEC but for Similarity
+    summary_file_content_lines.append("=" * 75)
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append(center_text("***************************"))
+    summary_file_content_lines.append(center_text("* S I M I L A R I T Y *"))
+    summary_file_content_lines.append(center_text("***************************"))
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append("                             √≈≠==≈                                  ")
+    summary_file_content_lines.append("   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       ")
+    summary_file_content_lines.append("     ÷++÷       ÷++÷           =++=                     ÷×××××=      ")
+    summary_file_content_lines.append("     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      ")
+    summary_file_content_lines.append("     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     ")
+    summary_file_content_lines.append("     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    ")
+    summary_file_content_lines.append("     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    ")
+    summary_file_content_lines.append("     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   ")
+    summary_file_content_lines.append("      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   ")
+    summary_file_content_lines.append("       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- ")
+    summary_file_content_lines.append("          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ ")
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append(center_text("Universidad de Antioquia - Medellín - Colombia"))
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append(center_text("Clustering Analysis for Quantum Chemistry Calculations"))
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append(center_text(version))
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append(center_text("Química Física Teórica - QFT"))
+    summary_file_content_lines.append("")
+    summary_file_content_lines.append("")
     summary_file_content_lines.append("=" * 75 + "\n")
     if is_compare_mode:
         summary_file_content_lines.append(f"Comparison Results for: {', '.join([os.path.basename(f) for f in input_source])}")
@@ -1798,6 +2228,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     boltzmann_g_deg_data[cluster_id]['population'] = 0.0
     # --- End Boltzmann Population Calculation ---
 
+
+    # Collect all final clusters for unique motifs creation
+    all_final_clusters = []
 
     # Now iterate through the hbond_groups again to perform the clustering and write files
     # This loop is responsible for generating the actual clusters and writing their files.
@@ -2068,6 +2501,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         current_hbond_group_clusters_for_final_output.sort(key=lambda cluster: (min(m.get('gibbs_free_energy') if m.get('gibbs_free_energy') is not None else float('inf') for m in cluster),
                                                                                   min(m['filename'] for m in cluster))) 
 
+        # Add clusters from this hydrogen bond group to the global collection
+        all_final_clusters.extend(current_hbond_group_clusters_for_final_output)
+
         summary_file_content_lines.append(f"Number of clusters: {len(current_hbond_group_clusters_for_final_output)}\n\n")
 
         for members_data in current_hbond_group_clusters_for_final_output:
@@ -2176,6 +2612,17 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         summary_file_content_lines.append("\n" + "=" * 90 + "\n")
     # --- End Boltzmann Population Analysis ---
 
+    # Create unique motifs folder with representative structures from each cluster
+    create_unique_motifs_folder(all_final_clusters, output_base_dir)
+
+    # Always create motif summary excluding hydrogen bond features for final refinement
+    create_motif_summary_excluding_hbonds(
+        all_final_clusters, 
+        output_base_dir, 
+        threshold=motif_threshold, 
+        min_std_threshold=min_std_threshold, 
+        abs_tolerances=abs_tolerances
+    )
 
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
     with open(summary_file, "w", newline='\n') as f:
@@ -2202,6 +2649,8 @@ if __name__ == "__main__":
                         help="Minimum standard deviation for a feature to be scaled. Features with std dev below this are treated as constant (0.0). Default is 1e-6.")
     parser.add_argument("--abs-tolerance", type=str, default="",
                         help="Specify absolute tolerances for features as a string, e.g., '(electronic_energy=1e-5)(dipole_moment=1e-3)'. Features with max difference below tolerance are zeroed out for scaling.")
+    parser.add_argument("--motif", type=float, default=None,
+                        help="Threshold for final motif clustering (excluding H-bond count). If not specified, uses the same value as --threshold.")
 
 
     args = parser.parse_args()
@@ -2212,6 +2661,7 @@ if __name__ == "__main__":
     weights_dict = parse_weights_argument(args.weights)
     min_std_threshold_val = args.min_std_threshold 
     abs_tolerances_dict = parse_abs_tolerance_argument(args.abs_tolerance)
+    motif_threshold = args.motif if args.motif is not None else clustering_threshold
 
     # Set default absolute tolerances if not provided via command line
     if not abs_tolerances_dict:
@@ -2271,7 +2721,8 @@ if __name__ == "__main__":
             weights=weights_dict,
             is_compare_mode=True,
             min_std_threshold=min_std_threshold_val,
-            abs_tolerances=abs_tolerances_dict # Pass the new argument
+            abs_tolerances=abs_tolerances_dict, # Pass the new argument
+            motif_threshold=motif_threshold
         )
         print(f"\n--- Finished comparing files: {os.path.basename(file1_path)} and {os.path.basename(file2_path)} ---\n")
 
@@ -2362,7 +2813,7 @@ if __name__ == "__main__":
                 display_name = "./"
             print(f"\n--- Processing folder: {display_name} ---\n")
 
-            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict)
+            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, motif_threshold=motif_threshold)
 
             print(f"\n--- Finished processing folder: {display_name} ---\n")
 
