@@ -1030,7 +1030,12 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
 
         elif config_lines_parsed == 8: # Line 9: Hamiltonian & Basis Set (e.g., "pm3 zdo")
             state.qm_method = parts[0]      
-            state.qm_basis_set = parts[1]   
+            # Handle case where only method is provided (common for semi-empirical methods)
+            if len(parts) > 1:
+                state.qm_basis_set = parts[1]   
+            else:
+                # For semi-empirical methods, we can set a default or leave it empty
+                state.qm_basis_set = "zdo"  # Default for semi-empirical methods   
 
         elif config_lines_parsed == 9:      # Line 10: nprocs & maxmemory
             state.qm_nproc = int(parts[0])   
@@ -1321,7 +1326,22 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
             f"{input_basename}.pcgrad",
             f"{input_basename}.hess",
             f"{input_basename}.cis",
-            f"{input_basename}.uno"
+            f"{input_basename}.uno",
+            # ORCA temporary files (semi-empirical methods generate many .tmp files)
+            f"{input_basename}.1.tmp",
+            f"{input_basename}.2.tmp", 
+            f"{input_basename}.3.tmp",
+            f"{input_basename}.E.tmp",
+            f"{input_basename}.H.tmp",
+            f"{input_basename}.K.tmp",
+            f"{input_basename}.S.tmp",
+            f"{input_basename}.eht.tmp",
+            f"{input_basename}.fsv.tmp",
+            f"{input_basename}.ndopar.tmp",
+            f"{input_basename}.SM12.tmp",
+            f"{input_basename}.SP12.tmp",
+            f"{input_basename}.diis.tmp",
+            f"{input_basename}.en.tmp"
         ]
         for orca_file in orca_files:
             temp_files_to_clean.append(os.path.join(run_dir, orca_file))
@@ -1486,6 +1506,25 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     os.remove(fpath)
                 except OSError as e:
                     _print_verbose(f"  Error cleaning up {os.path.basename(fpath)}: {e}", 0, state)
+        
+        # Additional cleanup for ORCA temporary files using glob patterns
+        if state.qm_program == "orca":
+            import glob
+            input_basename = f"qm_input_{call_id}"
+            orca_patterns = [
+                f"{input_basename}*.tmp",  # All .tmp files
+                f"{input_basename}.*.tmp", # All numbered .tmp files like .1.tmp, .2.tmp
+                f"{input_basename}*.log",  # Any log files
+            ]
+            for pattern in orca_patterns:
+                pattern_path = os.path.join(run_dir, pattern)
+                for fpath in glob.glob(pattern_path):
+                    try:
+                        if os.path.exists(fpath):
+                            os.remove(fpath)
+                            _print_verbose(f"  Cleaned ORCA temp file: {os.path.basename(fpath)}", 2, state)
+                    except OSError as e:
+                        _print_verbose(f"  Error cleaning up ORCA temp file {os.path.basename(fpath)}: {e}", 1, state)
     return energy, status
 
 # Helper function to format and limit stream output (stdout/stderr)
