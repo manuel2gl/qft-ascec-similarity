@@ -2607,8 +2607,12 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
                 symbol, x, y, z = atom
                 coords_section += f"{symbol: <3} {x: 12.6f}  {y: 12.6f}  {z: 12.6f}\n"
         
-        # Replace the name placeholder with the configuration comment
-        content = template_content.replace("# name", f"# {config_data['comment']}")
+        # Replace name placeholders with the configuration comment (only if placeholders exist)
+        content = template_content
+        if "# name" in content:
+            content = content.replace("# name", f"# {config_data['comment']}")
+        if "#name" in content:
+            content = content.replace("#name", f"# {config_data['comment']}")
         
         if qm_program == 'orca':
             # For ORCA, replace the coordinate section between * xyz and *
@@ -2628,6 +2632,9 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
                 elif in_coords and line.strip() == "*":
                     new_lines.append(line)
                     in_coords = False
+                elif in_coords and line.strip() == "#":
+                    # Skip the placeholder line, coordinates are already added
+                    continue  
                 elif not in_coords:
                     new_lines.append(line)
             
@@ -3618,22 +3625,31 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
         
         # Write launcher script
         with open(launcher_path, 'w') as f:
-            # Process launcher template content to remove any existing example commands
+            # Process launcher template content to handle ### separator
             launcher_lines = launcher_content.rstrip().split('\n')
-            filtered_lines = []
+            separator_found = False
             
+            # Write everything up to the ### separator
             for line in launcher_lines:
-                # Skip lines that contain ORCA commands (example commands to be replaced)
-                if '$ORCA5_ROOT/orca' in line and '.inp' in line:
-                    continue
-                # Also skip lines that are just '&&' continuation from removed commands
-                if line.strip() == '&&' or line.strip() == '&& \\':
-                    continue
-                filtered_lines.append(line)
+                if line.strip() == '###':
+                    separator_found = True
+                    f.write(line + "\n")
+                    f.write("\n")  # Add blank line after separator
+                    f.write("# Run QM using the full path\n")  # Add the comment as requested
+                    break
+                else:
+                    # Skip existing ORCA commands (example commands to be replaced)
+                    if '$ORCA5_ROOT/orca' in line and '.inp' in line:
+                        continue
+                    # Also skip lines that are just '&&' continuation from removed commands
+                    if line.strip() == '&&' or line.strip() == '&& \\':
+                        continue
+                    f.write(line + "\n")
             
-            # Write the cleaned launcher template content
-            f.write('\n'.join(filtered_lines))
-            f.write("\n")
+            # If no ### separator found, add it
+            if not separator_found:
+                f.write("\n###\n\n")
+                f.write("# Run QM using the full path\n")
             
             # Write grouped commands with separators
             for i, run_num in enumerate(sorted_runs):

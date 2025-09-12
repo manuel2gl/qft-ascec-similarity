@@ -17,3 +17,5 @@ export PATH=$PATH:/home/manuel/software/xtb-dist/bin
 
 echo "ORCA 5.0.4 environment is now active via direct script setup."
 mpirun --version
+
+###
