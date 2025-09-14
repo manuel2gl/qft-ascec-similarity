@@ -1701,7 +1701,7 @@ def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, th
         plt.tight_layout()
         
         # Save dendrogram in the unique motifs directory
-        dendrogram_path = os.path.join(unique_motifs_dir, "unique_motifs_dendrogram.png")
+        dendrogram_path = os.path.join(unique_motifs_dir, "umotifs_dendrogram.png")
         plt.savefig(dendrogram_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -1713,7 +1713,7 @@ def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, th
         print(f"  WARNING: Error creating unique motifs dendrogram: {e}")
     
     # Create motif summary file in the unique motifs directory
-    summary_filename = os.path.join(unique_motifs_dir, "u_motif_summary.txt")
+    summary_filename = os.path.join(unique_motifs_dir, "umotif_summary.txt")
     
     with open(summary_filename, 'w') as f:
         f.write("=" * 60 + "\n\n")
@@ -1757,6 +1757,10 @@ def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, th
     
     print(f"  Creating final motif representatives directory: {os.path.basename(unique_motifs_dir)}")
     
+    # Create cluster_representatives directory
+    cluster_reps_dir = os.path.join(output_base_dir, "cluster_representatives")
+    os.makedirs(cluster_reps_dir, exist_ok=True)
+    
     # Create a mapping from representative filename to original cluster number
     rep_to_original_cluster = {}
     for i, rep in enumerate(cluster_representatives):
@@ -1765,11 +1769,56 @@ def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, th
     # Create individual XYZ files and collect for combined file
     final_representatives = []
     final_motif_numbers = []  # Track the original cluster numbers for each motif
+    
+    # Process each motif and create cluster subdirectories
     for motif_idx, (motif_id, members, representative) in enumerate(sorted_motifs, 1):
+        # Create subdirectory for this motif cluster
+        motif_subdir = os.path.join(cluster_reps_dir, f"umotif_{motif_idx:02d}")
+        os.makedirs(motif_subdir, exist_ok=True)
+        
+        # Create XYZ files for all members in this motif (not just representative)
+        motif_xyz_files = []
+        for member in members:
+            base_name = os.path.splitext(member['filename'])[0]
+            # Keep original naming convention (no u_motif prefix)
+            member_filename = f"motif_{rep_to_original_cluster[member['filename']]:02d}_{base_name}.xyz"
+            member_path = os.path.join(motif_subdir, member_filename)
+            
+            write_xyz_file(member, member_path)
+            motif_xyz_files.append(member_path)
+        
+        # Create combined XYZ and MOL files for this motif cluster
+        if motif_xyz_files:
+            combined_xyz = os.path.join(motif_subdir, f"umotif_{motif_idx:02d}_combined.xyz")
+            combined_mol = os.path.join(motif_subdir, f"umotif_{motif_idx:02d}_combined.mol")
+            
+            # Create combined XYZ file
+            with open(combined_xyz, 'w') as outfile:
+                for i, xyz_file in enumerate(motif_xyz_files):
+                    with open(xyz_file, 'r') as infile:
+                        content = infile.read()
+                        outfile.write(content)
+                        if i < len(motif_xyz_files) - 1:  # Add separator between structures
+                            outfile.write('\n')
+            
+            # Convert to MOL format using OpenBabel if available
+            try:
+                subprocess.run(["obabel", combined_xyz, '-O', combined_mol], 
+                              check=True, capture_output=True, text=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Try alternative obabel names
+                for obabel_cmd in ["babel", "openbabel"]:
+                    try:
+                        subprocess.run([obabel_cmd, combined_xyz, '-O', combined_mol], 
+                                      check=True, capture_output=True, text=True)
+                        break
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        continue
+        
+        # Keep track of representatives for the unique_motifs folder
         base_name = os.path.splitext(representative['filename'])[0]
-        # Use original cluster number instead of new sequential motif number
         original_cluster_num = rep_to_original_cluster[representative['filename']]
-        motif_filename = f"u_motif_{original_cluster_num:02d}_{base_name}.xyz"
+        motif_filename = f"motif_{original_cluster_num:02d}_{base_name}.xyz"
         motif_path = os.path.join(unique_motifs_dir, motif_filename)
         
         write_xyz_file(representative, motif_path)
@@ -1777,11 +1826,13 @@ def create_motif_summary_excluding_hbonds(all_clusters_data, output_base_dir, th
         final_motif_numbers.append(original_cluster_num)  # Store the original cluster number
         
         energy_str = f"{representative['gibbs_free_energy']:.6f}" if representative['gibbs_free_energy'] is not None else "N/A"
-        print(f"    Motif {original_cluster_num:02d}: {base_name} (Energy: {energy_str} Hartree)")
+        print(f"    Motif {motif_idx:02d}: {len(members)} structure(s), Representative: {base_name} (Energy: {energy_str} Hartree)")
     
-    # Create combined XYZ and MOL files for final motifs
+    print(f"  Created cluster representatives directory with {len(sorted_motifs)} motif subdirectories")
+    
+    # Create combined XYZ and MOL files for final motifs (in unique_motifs folder)
     print(f"  Creating combined files for {len(final_representatives)} final motifs...")
-    combine_xyz_files(final_representatives, unique_motifs_dir, output_base_name="all_unique_motifs_combined", prefix_template="u_motif_{:02d}_", motif_numbers=final_motif_numbers)
+    combine_xyz_files(final_representatives, unique_motifs_dir, output_base_name="all_unique_motifs_combined", prefix_template="motif_{:02d}_", motif_numbers=final_motif_numbers)
 
 
 # Modified to accept rmsd_threshold and output_base_dir
@@ -1914,7 +1965,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     hbond_groups = {}
     
     # NEW: Handle comparison mode's clustering logic
-    if is_compare_mode and len(clean_data_for_clustering) == 2:
+    if is_compare_mode and len(clean_data_for_clustering) >= 2:
         print("  Comparison mode: Running clustering to generate dendrogram, then forcing a single output cluster.")
         # For comparison, we will treat them as a single group for dendrogram generation
         # and then force them into one output cluster.
@@ -2398,7 +2449,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             plt.close()
             print(f"Dendrogram saved as '{os.path.basename(dendrogram_filename)}'")
 
-            if is_compare_mode and len(group_data) == 2:
+            if is_compare_mode and len(group_data) >= 2:
                 # For comparison mode, after generating the dendrogram,
                 # we force the two files into a single output cluster.
                 # The 'threshold' and 'fcluster' are not used to determine the output clusters here.
@@ -2612,17 +2663,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         summary_file_content_lines.append("\n" + "=" * 90 + "\n")
     # --- End Boltzmann Population Analysis ---
 
-    # Create unique motifs folder with representative structures from each cluster
+    # Create motifs folder with representative structures from each cluster
     create_unique_motifs_folder(all_final_clusters, output_base_dir)
-
-    # Always create motif summary excluding hydrogen bond features for final refinement
-    create_motif_summary_excluding_hbonds(
-        all_final_clusters, 
-        output_base_dir, 
-        threshold=motif_threshold, 
-        min_std_threshold=min_std_threshold, 
-        abs_tolerances=abs_tolerances
-    )
 
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
     with open(summary_file, "w", newline='\n') as f:
@@ -2641,8 +2683,8 @@ if __name__ == "__main__":
                         help="Specify the base directory for all output folders (dendrograms, extracted data, clusters). Defaults to the current working directory.")
     parser.add_argument("--reprocess-files", action="store_true",
                         help="Force re-extraction of data from log files, ignoring any existing cache.")
-    parser.add_argument("--compare", nargs=2, 
-                        help="Compare two specific log/out files (e.g., --compare file1.log file2.log).")
+    parser.add_argument("--compare", nargs='+', 
+                        help="Compare multiple specific log/out files (e.g., --compare file1.log file2.log file3.log). Minimum 2 files required.")
     parser.add_argument("--weights", type=str, default="", 
                         help="Specify feature weights as a string, e.g., '(electronic_energy=0.1)(homo_lumo_gap=0.2)'.")
     parser.add_argument("--min-std-threshold", type=float, default=1e-6, 
@@ -2685,34 +2727,35 @@ if __name__ == "__main__":
     current_dir = os.getcwd()
     
     if args.compare:
-        file1_path = args.compare[0]
-        file2_path = args.compare[1]
-
-        if not os.path.exists(file1_path):
-            print(f"Error: File not found: {file1_path}")
+        if len(args.compare) < 2:
+            print("Error: --compare requires at least 2 files.")
             exit(1)
-        if not os.path.exists(file2_path):
-            print(f"Error: File not found: {file2_path}")
-            exit(1)
-
-        # Determine file extension pattern from the provided files
-        ext1 = os.path.splitext(file1_path)[1].lower()
-        ext2 = os.path.splitext(file2_path)[1].lower()
-
-        if ext1 != ext2:
-            print(f"Warning: Comparing files with different extensions ({ext1} and {ext2}). Proceeding, but ensure they are compatible.")
         
-        # For comparison mode, the "input_source" is the list of files itself.
-        # The file_extension_pattern is not strictly used for globbing here, but passed for consistency.
-        # We can just use the extension of the first file, or assume both are valid.
-        file_extension_pattern_for_compare = ext1 if ext1 in ['.log', '.out'] else None
+        compare_files = args.compare
+        
+        # Check that all files exist
+        for file_path in compare_files:
+            if not os.path.exists(file_path):
+                print(f"Error: File not found: {file_path}")
+                exit(1)
+        
+        # Determine file extensions and check compatibility
+        extensions = [os.path.splitext(f)[1].lower() for f in compare_files]
+        unique_extensions = set(extensions)
+        
+        if len(unique_extensions) > 1:
+            print(f"Warning: Comparing files with different extensions ({', '.join(unique_extensions)}). Proceeding, but ensure they are compatible.")
+        
+        # Use the extension of the first file for pattern
+        file_extension_pattern_for_compare = extensions[0] if extensions[0] in ['.log', '.out'] else None
         if not file_extension_pattern_for_compare:
             print("Error: Provided files do not have .log or .out extensions.")
             exit(1)
 
-        print(f"\n--- Comparing files: {os.path.basename(file1_path)} and {os.path.basename(file2_path)} ---\n")
+        file_names = [os.path.basename(f) for f in compare_files]
+        print(f"\n--- Comparing {len(compare_files)} files: {', '.join(file_names)} ---\n")
         perform_clustering_and_analysis(
-            input_source=[file1_path, file2_path],
+            input_source=compare_files,
             threshold=clustering_threshold,
             file_extension_pattern=file_extension_pattern_for_compare, # Pass for consistency, though not used for glob
             rmsd_threshold=rmsd_validation_threshold,
@@ -2724,7 +2767,7 @@ if __name__ == "__main__":
             abs_tolerances=abs_tolerances_dict, # Pass the new argument
             motif_threshold=motif_threshold
         )
-        print(f"\n--- Finished comparing files: {os.path.basename(file1_path)} and {os.path.basename(file2_path)} ---\n")
+        print(f"\n--- Finished comparing {len(compare_files)} files: {', '.join(file_names)} ---\n")
 
     else: # Normal mode (folder processing)
         all_potential_folders = [current_dir] + [d for d in glob.glob(os.path.join(current_dir, '*')) if os.path.isdir(d)]

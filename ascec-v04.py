@@ -2540,6 +2540,32 @@ def extract_configurations_from_xyz(xyz_file_path: str) -> List[Dict]:
                             energy = float(energy_str)
                         except (ValueError, IndexError):
                             pass
+            else:
+                # Handle other formats like "Motif_01_opt_conf_4 (G = -55.537389 hartree)"
+                import re
+                # Try to extract configuration number from patterns like "conf_4" or "Motif_01"
+                conf_match = re.search(r'conf_(\d+)', comment_line)
+                if conf_match:
+                    try:
+                        config_num = int(conf_match.group(1))
+                    except ValueError:
+                        pass
+                else:
+                    # Try to extract from Motif_XX or motif_XX pattern
+                    motif_match = re.search(r'[Mm]otif_(\d+)', comment_line)
+                    if motif_match:
+                        try:
+                            config_num = int(motif_match.group(1))
+                        except ValueError:
+                            pass
+                
+                # Try to extract energy from patterns like "G = -55.537389" or "E = -55.537389"
+                energy_match = re.search(r'[GE]\s*=\s*([-\d.]+)', comment_line)
+                if energy_match:
+                    try:
+                        energy = float(energy_match.group(1))
+                    except ValueError:
+                        pass
             
             # Read atom coordinates (preserve original string format for precision)
             atoms = []
@@ -2566,11 +2592,13 @@ def extract_configurations_from_xyz(xyz_file_path: str) -> List[Dict]:
                             continue
             
             if len(atoms) == num_atoms:
+                # Convert Motif_ to motif_ in comment for consistency
+                processed_comment = comment_line.replace('Motif_', 'motif_')
                 configurations.append({
                     'config_num': config_num,
                     'energy': energy,
                     'atoms': atoms,
-                    'comment': comment_line
+                    'comment': processed_comment
                 })
             
             i += num_atoms + 2
@@ -2609,8 +2637,6 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
         
         # Replace name placeholders with the configuration comment (only if placeholders exist)
         content = template_content
-        if "# name" in content:
-            content = content.replace("# name", f"# {config_data['comment']}")
         if "#name" in content:
             content = content.replace("#name", f"# {config_data['comment']}")
         
@@ -2627,38 +2653,32 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
             for line in lines:
                 if xyz_pattern.match(line.strip()):
                     new_lines.append(line)
-                    new_lines.append(coords_section.rstrip())
                     in_coords = True
                 elif in_coords and line.strip() == "*":
                     new_lines.append(line)
                     in_coords = False
                 elif in_coords and line.strip() == "#":
-                    # Skip the placeholder line, coordinates are already added
-                    continue  
+                    # Replace the # placeholder with coordinates
+                    new_lines.append(coords_section.rstrip())
+                elif in_coords:
+                    # Skip other coordinate lines (they will be replaced by coords_section when we hit #)
+                    continue
                 elif not in_coords:
                     new_lines.append(line)
             
             content = '\n'.join(new_lines)
         
         elif qm_program == 'gaussian':
-            # For Gaussian, replace coordinate section after the charge/multiplicity line
+            # For Gaussian, replace # placeholder with coordinates
             lines = content.split('\n')
             new_lines = []
-            found_charge_mult = False
             
-            for i, line in enumerate(lines):
-                new_lines.append(line)
-                # Look for charge and multiplicity line (usually "0 1")
-                if not found_charge_mult and line.strip() and len(line.strip().split()) == 2:
-                    try:
-                        int(line.strip().split()[0])  # charge
-                        int(line.strip().split()[1])  # multiplicity
-                        new_lines.append("")  # blank line
-                        new_lines.append(coords_section.rstrip())
-                        new_lines.append("")  # blank line
-                        found_charge_mult = True
-                    except ValueError:
-                        pass
+            for line in lines:
+                if line.strip() == "#":
+                    # Replace the # placeholder with coordinates
+                    new_lines.append(coords_section.rstrip())
+                else:
+                    new_lines.append(line)
             
             content = '\n'.join(new_lines)
         
@@ -2976,9 +2996,12 @@ def update_existing_input_files(template_file: str, target_pattern: str = "") ->
     if template_file.endswith('.inp'):
         qm_program = 'orca'
         input_ext = '.inp'
-    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+    elif template_file.endswith('.com'):
         qm_program = 'gaussian'
         input_ext = '.com'
+    elif template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.gjf'
     else:
         return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
     
@@ -3212,9 +3235,9 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".") ->
         print("No XYZ files found.")
         return []
     
-    # Separate result_*.xyz files from combined_results.xyz
-    result_files = [f for f in xyz_files if not os.path.basename(f).startswith("combined_results")]
-    combined_files = [f for f in xyz_files if os.path.basename(f).startswith("combined_results")]
+    # Separate result_*.xyz files from combined_results.xyz and combined_r*.xyz
+    result_files = [f for f in xyz_files if not (os.path.basename(f).startswith("combined_results") or os.path.basename(f).startswith("combined_r"))]
+    combined_files = [f for f in xyz_files if (os.path.basename(f).startswith("combined_results") or os.path.basename(f).startswith("combined_r"))]
     
     # Display options
     print("\nAvailable XYZ files:")
@@ -3232,7 +3255,7 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".") ->
             print(f"{option_num}. {xyz_file}")
             option_num += 1
     
-    # Then show combined_results.xyz files
+    # Then show combined files
     if combined_files:
         print("\nCombined files:")
         for xyz_file in combined_files:
@@ -3246,7 +3269,7 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".") ->
         options["a"] = "All result files"
         print(f"a. Process all result_*.xyz files ({len(result_files)} files, excluding combined)")
         options["c"] = "Combine result files"
-        print(f"c. Combine all result_*.xyz files first, then process the combined file")
+        print(f"c. Combine all result_*.xyz files first, then process the combined file (combined_r{len(result_files)}.xyz)")
     
     print("q. Quit")
     
@@ -3266,7 +3289,7 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".") ->
             if choice.lower() == 'c' and len(result_files) > 1:
                 print(f"Combining {len(result_files)} result_*.xyz files...")
                 # Use merge_xyz_files to combine result files only
-                combined_filename = os.path.join(calc_dir, "combined_results.xyz")
+                combined_filename = os.path.join(calc_dir, f"combined_r{len(result_files)}.xyz")
                 success = merge_xyz_files(result_files, combined_filename)
                 if success:
                     print(f"Successfully created {os.path.basename(combined_filename)}")
@@ -3352,7 +3375,8 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
         print(f"a. All files: {len(xyz_files)} files total")
     
     options["c"] = "Combined results"
-    print("c. Create combined_results.xyz first, then process it")
+    num_result_files = len([f for f in xyz_files if 'result_' in os.path.basename(f)])
+    print(f"c. Combine all result_*.xyz files first, then process the combined file (combined_r{num_result_files}.xyz)")
     print()
     
     # Get user choice
@@ -3378,17 +3402,19 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
                 return []
             
             if choice == 'c':
-                # Create combined_results.xyz first
-                print("\nCreating combined_results.xyz...")
-                if combine_xyz_files():
-                    if os.path.exists("combined_results.xyz"):
-                        print("Successfully created combined_results.xyz")
-                        return ["combined_results.xyz"]
+                # Create combined_r{N}.xyz first where N is number of result files
+                num_result_files = len([f for f in xyz_files if 'result_' in os.path.basename(f)])
+                combined_filename = f"combined_r{num_result_files}.xyz"
+                print(f"\nCreating {combined_filename}...")
+                if combine_xyz_files(output_filename=combined_filename):
+                    if os.path.exists(combined_filename):
+                        print(f"Successfully created {combined_filename}")
+                        return [combined_filename]
                     else:
-                        print("Error: combined_results.xyz was not created.")
+                        print(f"Error: {combined_filename} was not created.")
                         return []
                 else:
-                    print("Failed to create combined_results.xyz")
+                    print(f"Failed to create {combined_filename}")
                     return []
             
             if choice == 'a':
@@ -3417,14 +3443,14 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
             return []
 
 
-def create_simple_calculation_system(template_file: str, launcher_template: str) -> str:
+def create_simple_calculation_system(template_file: str, launcher_template: str = None) -> str:
     """
-    Creates a calculation system by looking for result_*.xyz or combined_results.xyz files
-    and generating QM input files with launcher scripts.
+    Creates a calculation system by looking for result_*.xyz, combined_results.xyz, or combined_r*.xyz files
+    and generating QM input files with optional launcher scripts.
     
     Args:
         template_file (str): Template input file (e.g., example_input.inp)
-        launcher_template (str): Template launcher file (e.g., launcher_orca.sh)
+        launcher_template (str, optional): Template launcher file (e.g., launcher_orca.sh)
     
     Returns:
         str: Status message
@@ -3434,9 +3460,13 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
         qm_program = 'orca'
         input_ext = '.inp'
         output_ext = '.out'
-    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+    elif template_file.endswith('.com'):
         qm_program = 'gaussian'
         input_ext = '.com'
+        output_ext = '.log'
+    elif template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.gjf'
         output_ext = '.log'
     else:
         return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
@@ -3478,12 +3508,13 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
     calc_dir = get_next_calc_dir()
     os.makedirs(calc_dir, exist_ok=True)
     
-    # Look for XYZ files: result_*.xyz AND combined_results.xyz
+    # Look for XYZ files: result_*.xyz AND combined_results.xyz AND combined_r*.xyz
     xyz_files = []
     
-    # Check for combined_results.xyz in current directory
-    if os.path.exists("combined_results.xyz"):
-        xyz_files.append("combined_results.xyz")
+    # Check for combined files in current directory
+    for file in os.listdir("."):
+        if (file.startswith("combined_results") or file.startswith("combined_r")) and file.endswith(".xyz"):
+            xyz_files.append(file)
     
     # Look for result_*.xyz files recursively in subdirectories
     for root, dirs, files in os.walk("."):
@@ -3492,7 +3523,7 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
                 xyz_files.append(os.path.join(root, file))
     
     if not xyz_files:
-        return "No result_*.xyz or combined_results.xyz files found in the current directory or subdirectories."
+        return "No result_*.xyz, combined_results.xyz, or combined_r*.xyz files found in the current directory or subdirectories."
     
     # Sort XYZ files by annealing number (extracted from directory name)
     def get_annealing_number(file_path):
@@ -3532,11 +3563,11 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
             continue
         
         # Determine run number from filename and directory
-        if xyz_file == "combined_results.xyz":
+        filename = os.path.basename(xyz_file)
+        if filename.startswith("combined_results") or filename.startswith("combined_r"):
             run_num = 1
         else:
             # Extract seed from result_<seed>.xyz
-            filename = os.path.basename(xyz_file)
             try:
                 seed = filename.replace("result_", "").replace(".xyz", "")
                 run_num = int(seed) if seed.isdigit() else 1
@@ -3561,7 +3592,8 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
         # Create input files for each configuration
         for config in configurations:
             # Clean up the comment for result files to remove temperature and add source info
-            if xyz_file != "combined_results.xyz":
+            filename = os.path.basename(xyz_file)
+            if not (filename.startswith("combined_results") or filename.startswith("combined_r")):
                 # Extract energy from original comment
                 original_comment = config['comment']
                 energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
@@ -3571,13 +3603,13 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
                 config_num = config_match.group(1) if config_match else config['config_num']
                 
                 # Create new comment without temperature, with source info
-                source_name = os.path.basename(xyz_file).replace('.xyz', '')
+                source_name = filename.replace('.xyz', '')
                 if energy == "unknown":
                     config['comment'] = f"Configuration: {config_num} | {source_name}"
                 else:
                     config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
             
-            if os.path.basename(xyz_file) == "combined_results.xyz":
+            if filename.startswith("combined_results") or filename.startswith("combined_r"):
                 input_name = f"opt_conf_{config['config_num']}{input_ext}"
             else:
                 input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
@@ -3621,7 +3653,14 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
         # Sort run groups and commands within each group
         sorted_runs = sorted(run_groups.keys())
         for run_num in sorted_runs:
-            run_groups[run_num].sort()  # Sort commands within each run group
+            # Sort commands numerically by configuration number
+            def extract_conf_number(cmd):
+                import re
+                # Extract number from opt_conf_X.inp or optY_conf_X.inp
+                match = re.search(r'_conf_(\d+)\.inp', cmd)
+                return int(match.group(1)) if match else 0
+            
+            run_groups[run_num].sort(key=extract_conf_number)
         
         # Write launcher script
         with open(launcher_path, 'w') as f:
@@ -3688,6 +3727,310 @@ def create_simple_calculation_system(template_file: str, launcher_template: str)
         return f"Error creating launcher script: {e}"
 
 
+def create_optimization_system(template_file: str, launcher_template: str) -> str:
+    """
+    Creates an optimization system by looking for files with 'combined' in their name 
+    (like all_motifs_combined.xyz) and motif_*.xyz files.
+    
+    Args:
+        template_file (str): Path to the QM input template file
+        launcher_template (str): Path to the launcher script template
+    
+    Returns:
+        str: Status message indicating success or failure
+    """
+    if not os.path.exists(template_file):
+        return f"Error: Template file '{template_file}' not found."
+    
+    if not os.path.exists(launcher_template):
+        return f"Error: Launcher template '{launcher_template}' not found."
+    
+    # Determine calculation directory name
+    def get_next_optimization_dir():
+        base_name = "optimization"
+        if not os.path.exists(base_name):
+            return base_name
+        
+        counter = 2
+        while True:
+            opt_dir_name = f"{base_name}_{counter}"
+            if not os.path.exists(opt_dir_name):
+                return opt_dir_name
+            counter += 1
+    
+    opt_dir = get_next_optimization_dir()
+    os.makedirs(opt_dir, exist_ok=True)
+    
+    # Look for optimization files: files with 'combined' in name AND motif_*.xyz files
+    xyz_files = []
+    
+    # Check for combined files in current directory
+    for file in os.listdir("."):
+        if file.endswith(".xyz") and "combined" in file.lower():
+            xyz_files.append(file)
+    
+    # Look for motif_*.xyz files in current directory and subdirectories
+    for root, dirs, files in os.walk("."):
+        for file in files:
+            if (file.startswith("motif_") and file.endswith(".xyz")) or \
+               (file.endswith(".xyz") and "combined" in file.lower() and root != "."):
+                xyz_files.append(os.path.join(root, file))
+    
+    if not xyz_files:
+        return "No files with 'combined' in name or motif_*.xyz files found in the current directory or subdirectories."
+    
+    # Interactive file selection
+    selected_xyz_files = interactive_optimization_file_selection(xyz_files, opt_dir)
+    
+    if not selected_xyz_files:
+        # Clean up empty directory
+        try:
+            os.rmdir(opt_dir)
+        except:
+            pass
+        return "No files selected for optimization. Operation cancelled."
+    
+    # Determine QM program and file extension from template
+    if template_file.lower().endswith(('.inp', '.in')):
+        qm_program = "orca"
+        input_ext = ".inp"
+    elif template_file.lower().endswith('.com'):
+        qm_program = "gaussian"
+        input_ext = ".com"
+    elif template_file.lower().endswith('.gjf'):
+        qm_program = "gaussian"
+        input_ext = ".gjf"
+    else:
+        qm_program = "gaussian"  # Default fallback
+        input_ext = ".com"
+    
+    # Read template content
+    try:
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    except IOError as e:
+        return f"Error reading template file: {e}"
+    
+    # Process each selected XYZ file
+    all_input_files = []
+    
+    for xyz_file in selected_xyz_files:
+        # Extract configurations
+        configurations = extract_configurations_from_xyz(xyz_file)
+        if not configurations:
+            print(f"Warning: No configurations found in {xyz_file}")
+            continue
+        
+        # Create input files for each configuration
+        for config in configurations:
+            # Get base name for source info
+            base_name = os.path.basename(xyz_file).replace('.xyz', '')
+            
+            # Extract motif name from comment if available, otherwise use base filename
+            import re
+            comment = config['comment']
+            motif_match = re.search(r'[Mm]otif_(\d+)', comment)
+            
+            if motif_match:
+                # Use motif name from comment (convert to lowercase)
+                motif_num = motif_match.group(1)
+                input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
+                source_name = f"motif_{motif_num:0>2}"
+            else:
+                # Fallback to original logic for non-motif files
+                input_name = f"{base_name}_conf_{config['config_num']}{input_ext}"
+                source_name = base_name
+            
+            input_path = os.path.join(opt_dir, input_name)
+            
+            # Update config comment with source file info
+            config['comment'] = f"Configuration: {config['config_num']} | Source: {source_name}"
+            
+            # Create input file
+            if create_qm_input_file(config, template_content, input_path, qm_program):
+                all_input_files.append(input_name)
+                print(f"Created: {input_name}")
+            else:
+                print(f"Failed to create: {input_name}")
+    
+    if not all_input_files:
+        return "No input files were created successfully."
+    
+    # Create launcher script
+    launcher_path = os.path.join(opt_dir, f"launcher_{qm_program}.sh")
+    
+    try:
+        # Read launcher template
+        with open(launcher_template, 'r') as f:
+            launcher_content = f.read()
+        
+        # Process launcher template content to handle ### separator
+        launcher_lines = launcher_content.split('\n')
+        header_lines = []
+        found_separator = False
+        
+        # Write everything up to the ### separator
+        for line in launcher_lines:
+            if line.strip() == '###':
+                found_separator = True
+                break
+            header_lines.append(line)
+        
+        with open(launcher_path, 'w') as f:
+            # Write header
+            for line in header_lines:
+                f.write(line + '\n')
+            
+            # Add separator if it wasn't found in template
+            if not found_separator:
+                f.write("\n###\n\n")
+            
+            # Add commands for all input files
+            for i, input_file in enumerate(all_input_files):
+                # Create output filename by replacing extension
+                if qm_program == "gaussian":
+                    # Handle both .com and .gjf extensions
+                    if input_file.endswith('.com'):
+                        output_file = input_file.replace('.com', '.log')
+                    elif input_file.endswith('.gjf'):
+                        output_file = input_file.replace('.gjf', '.log')
+                    else:
+                        output_file = input_file + '.log'  # fallback
+                    command = f"g16 {input_file}"
+                else:
+                    output_file = input_file.replace('.inp', '.out')
+                    command = f"orca {input_file} > {output_file}"
+                
+                if i < len(all_input_files) - 1:
+                    f.write(f"{command} && \\\n")
+                else:
+                    f.write(f"{command}\n")
+        
+        # Make launcher executable
+        os.chmod(launcher_path, 0o755)
+        
+        return f"""Optimization system created successfully in '{opt_dir}':
+- Input files: {len(all_input_files)} files
+- Launcher script: {os.path.basename(launcher_path)}
+- Total configurations: {len(all_input_files)}
+
+To run the calculations:
+cd {opt_dir}
+./{os.path.basename(launcher_path)}
+"""
+        
+    except IOError as e:
+        return f"Error creating launcher script: {e}"
+
+
+def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
+    """
+    Provides interactive selection for optimization XYZ files.
+    
+    Args:
+        xyz_files (List[str]): List of available XYZ file paths
+        opt_dir (str): Directory where files will be processed
+    
+    Returns:
+        List[str]: List of selected XYZ file paths
+    """
+    print("\n" + "=" * 60)
+    print("Optimization XYZ file selection".center(60))
+    print("=" * 60)
+    
+    if not xyz_files:
+        print("No XYZ files found.")
+        return []
+    
+    # Separate combined files from motif files
+    combined_files = [f for f in xyz_files if "combined" in os.path.basename(f).lower()]
+    motif_files = [f for f in xyz_files if "motif_" in os.path.basename(f) and "combined" not in os.path.basename(f).lower()]
+    
+    # Sort motif files by motif number
+    def extract_motif_number(filepath):
+        import re
+        filename = os.path.basename(filepath)
+        match = re.search(r'motif_(\d+)', filename)
+        return int(match.group(1)) if match else 0
+    
+    motif_files.sort(key=extract_motif_number)
+    
+    # Display options
+    print("\nAvailable XYZ files:")
+    print("-" * 40)
+    
+    # Create numbered options
+    options = {}
+    option_num = 1
+    
+    # First show combined files
+    if combined_files:
+        print("\nCombined files:")
+        for xyz_file in combined_files:
+            options[str(option_num)] = xyz_file
+            print(f"{option_num}) {xyz_file}")
+            option_num += 1
+    
+    # Then show motif files
+    if motif_files:
+        print("\nMotif files:")
+        for xyz_file in motif_files:
+            options[str(option_num)] = xyz_file
+            print(f"{option_num}) {xyz_file}")
+            option_num += 1
+    
+    # Add special options
+    print("\nSpecial options:")
+    if len(xyz_files) > 1:
+        options["a"] = "All files"
+        print(f"a. Process all files ({len(xyz_files)} files total)")
+    
+    print("q. Quit")
+    
+    # Get user choice
+    while True:
+        try:
+            choice = input("\nSelect files (enter numbers separated by spaces, 'a' for all, or 'q' to quit): ").strip()
+            
+            if choice.lower() == 'q':
+                print("Optimization system creation cancelled.")
+                return []
+            
+            if choice.lower() == 'a':
+                print(f"Selected: All files ({len(xyz_files)} files)")
+                return xyz_files
+            
+            # Handle numbered selections (single or multiple)
+            try:
+                choices = choice.split()
+                selected_files = []
+                
+                for ch in choices:
+                    if ch in options and ch not in ['a', 'q']:
+                        selected_files.append(options[ch])
+                    else:
+                        print(f"Invalid choice: {ch}")
+                        break
+                else:
+                    if selected_files:
+                        print(f"Selected {len(selected_files)} file(s):")
+                        for f in selected_files:
+                            print(f"  - {f}")
+                        return selected_files
+                    else:
+                        print("No valid files selected.")
+                        
+            except ValueError:
+                print("Invalid input. Please enter numbers separated by spaces, or 'a' for all files.")
+                
+        except KeyboardInterrupt:
+            print("\nOptimization system creation cancelled by user.")
+            return []
+        except EOFError:
+            print("\nOptimization system creation cancelled.")
+            return []
+
+
 def execute_merge_command():
     """
     Execute the merge command functionality.
@@ -3703,7 +4046,8 @@ def execute_merge_command():
     # Check current directory
     current_xyz = []
     for file in os.listdir("."):
-        if file.endswith(".xyz") and not file.endswith("_trj.xyz") and not file.startswith("combined_results"):
+        if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
+            not file.startswith("combined_results") and not file.startswith("combined_r")):
             current_xyz.append(file)
     
     if current_xyz:
@@ -3716,14 +4060,15 @@ def execute_merge_command():
             
         xyz_files = []
         for file in files:
-            if file.endswith(".xyz") and not file.endswith("_trj.xyz") and not file.startswith("combined_results"):
+            if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
+                not file.startswith("combined_results") and not file.startswith("combined_r")):
                 xyz_files.append(os.path.join(root, file))
         
         if xyz_files:
             directories_with_xyz[root] = xyz_files
     
     if not directories_with_xyz:
-        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz and combined_results files).")
+        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz, combined_results, and combined_r files).")
         return
 
     # Display options
@@ -4148,9 +4493,13 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
         qm_program = 'orca'
         input_ext = '.inp'
         output_ext = '.out'
-    elif template_file.endswith('.com') or template_file.endswith('.gjf'):
+    elif template_file.endswith('.com'):
         qm_program = 'gaussian'
         input_ext = '.com'
+        output_ext = '.log'
+    elif template_file.endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.gjf'
         output_ext = '.log'
     else:
         return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
@@ -4300,7 +4649,14 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
         # Create commands
         all_commands = []
         for i, run_num in enumerate(sorted_runs):
-            run_files = sorted(run_groups[run_num])
+            # Sort files numerically by configuration number
+            def extract_conf_number(filename):
+                import re
+                # Extract number from opt_conf_X.inp or optY_conf_X.inp
+                match = re.search(r'_conf_(\d+)\.inp', filename)
+                return int(match.group(1)) if match else 0
+            
+            run_files = sorted(run_groups[run_num], key=extract_conf_number)
             for input_file in run_files:
                 output_file = input_file.replace(input_ext, output_ext)
                 if qm_program == 'orca':
@@ -4741,46 +5097,205 @@ def collect_out_files():
     print("Process complete. Original files remain untouched.")
     return True
 
+def capture_current_state(directory):
+    """Capture the current state of files and folders for potential revert."""
+    state = {
+        'files': {},  # filename -> full_path
+        'folders': set()
+    }
+    
+    for item in os.listdir(directory):
+        item_path = os.path.join(directory, item)
+        if os.path.isfile(item_path):
+            state['files'][item] = item_path
+        elif os.path.isdir(item_path):
+            state['folders'].add(item_path)
+    
+    return state
+
+
+def group_files_by_base_with_tracking(directory='.'):
+    """Group files by base name and track what was moved."""
+    files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    base_map = defaultdict(list)
+    
+    for file in files:
+        base = extract_base(file)
+        if base:
+            base_map[base].append(file)
+    
+    # Track moved files and created folders
+    tracking = {'folders': [], 'moved_files': {}}
+    moved_count = 0
+    
+    for base, grouped_files in base_map.items():
+        if len(grouped_files) > 1:
+            folder_path = os.path.join(directory, base)
+            os.makedirs(folder_path, exist_ok=True)
+            tracking['folders'].append(folder_path)
+            
+            for file in grouped_files:
+                src = os.path.join(directory, file)
+                dest = os.path.join(folder_path, file)
+                tracking['moved_files'][dest] = src  # destination -> original
+                shutil.move(src, dest)
+            
+            print(f"Moved {len(grouped_files)} files to folder: {base}")
+            moved_count += len(grouped_files)
+    
+    if moved_count == 0:
+        print("No files needed to be grouped.")
+    else:
+        print(f"Total files moved: {moved_count}")
+    
+    return tracking
+
+
+def create_summary_with_tracking(directory):
+    """Create summaries and return list of created files."""
+    created_files = []
+    try:
+        num_summaries = summarize_calculations(directory)
+        if num_summaries > 0:
+            # Common summary files that might be created
+            potential_files = ['calculation_summary.txt', 'results_summary.csv', 'energy_summary.dat']
+            for filename in potential_files:
+                if os.path.exists(filename):
+                    created_files.append(filename)
+    except:
+        pass
+    return created_files
+
+
+def collect_out_files_with_tracking():
+    """Collect .out files and return the created similarity folder path."""
+    try:
+        current_directory = os.getcwd()
+        all_out_files = find_out_files(current_directory)
+        
+        if not all_out_files:
+            return None
+        
+        num_files = len(all_out_files)
+        base_destination_folder_name = f"orca_out_{num_files}"
+        
+        parent_directory = os.path.dirname(current_directory)
+        similarity_path = os.path.join(parent_directory, "similarity")
+        os.makedirs(similarity_path, exist_ok=True)
+        
+        destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_path)
+        destination_path = os.path.join(similarity_path, destination_folder_name)
+        
+        os.makedirs(destination_path)
+        
+        for file_path in all_out_files:
+            shutil.copy2(file_path, destination_path)
+        
+        print(f"Copied {num_files} .out files to similarity/{destination_folder_name}")
+        return destination_path
+    except:
+        return None
+
+
+def revert_sort_changes(original_state, created_files, created_folders):
+    """Revert all changes made during the sort process."""
+    # Remove created files
+    for file_path in created_files:
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                print(f"  Removed: {file_path}")
+        except Exception as e:
+            print(f"  Warning: Could not remove {file_path}: {e}")
+    
+    # Move files back to original locations and remove created folders
+    for folder_path in created_folders:
+        try:
+            if os.path.exists(folder_path):
+                # If it's a local folder (created by grouping), move files back
+                if os.path.dirname(folder_path) == os.getcwd():
+                    for item in os.listdir(folder_path):
+                        src = os.path.join(folder_path, item)
+                        dest = os.path.join(os.getcwd(), item)
+                        if os.path.isfile(src):
+                            shutil.move(src, dest)
+                            print(f"  Moved back: {item}")
+                
+                # Remove the folder
+                shutil.rmtree(folder_path)
+                print(f"  Removed folder: {folder_path}")
+        except Exception as e:
+            print(f"  Warning: Could not revert folder {folder_path}: {e}")
+
+
 def execute_sort_command(include_summary=True):
-    """Execute the complete sort process."""
+    """Execute the complete sort process with option to revert."""
     print("=" * 50)
     print("ASCEC Sort Process Started")
     print("=" * 50)
     
-    # Step 1: Sort files by base names
-    print("\n1. Sorting files by base names...")
-    group_files_by_base(".")
+    # Store original state for potential revert
+    original_state = capture_current_state(".")
+    created_files = []
+    created_folders = []
     
-    # Step 2: Merge XYZ files
-    print("\n2. Merging XYZ files...")
-    if combine_xyz_files():
-        # Step 3: Create MOL file
-        print("\n3. Creating MOL file...")
-        create_combined_mol()
+    try:
+        # Step 1: Sort files by base names
+        print("\n1. Sorting files by base names...")
+        moved_files = group_files_by_base_with_tracking(".")
+        created_folders.extend(moved_files.get('folders', []))
+        
+        # Step 2: Merge XYZ files
+        print("\n2. Merging XYZ files...")
+        combined_file = "combined_results.xyz"
+        if combine_xyz_files():
+            created_files.append(combined_file)
+            # Step 3: Create MOL file
+            print("\n3. Creating MOL file...")
+            mol_file = "combined_results.mol"
+            if create_combined_mol():
+                created_files.append(mol_file)
+        
+        # Step 4: Create summary (if requested)
+        if include_summary:
+            print("\n4. Creating calculation summary...")
+            summary_files = create_summary_with_tracking(".")
+            created_files.extend(summary_files)
+        else:
+            print("\n4. Skipping summary creation (--nosum flag used)")
+        
+        # Step 5: Collect .out files
+        print("\n5. Collecting .out files...")
+        similarity_folder = collect_out_files_with_tracking()
+        if similarity_folder:
+            created_folders.append(similarity_folder)
+        
+        print("\n" + "=" * 50)
+        print("ASCEC Sort Process Completed")
+        print("=" * 50)
+        
+        # Interactive confirmation
+        print("\nPress ENTER to accept the sorting, or type 'r' to revert all changes:")
+        user_input = input().strip().lower()
+        
+        if user_input == 'r':
+            print("\nReverting all changes...")
+            revert_sort_changes(original_state, created_files, created_folders)
+            print("All changes have been reverted successfully.")
+        else:
+            print("Sorting accepted and finalized.")
+            # Suggest similarity analysis if .out files were collected
+            similarity_dir = os.path.join("..", "similarity")
+            if os.path.exists(similarity_dir):
+                print("\nSuggested next step:")
+                print("  python3 ascec-v04.py sim --threshold 0.9")
+                print("  Run similarity analysis on collected output files")
     
-    # Step 4: Create summary (if requested)
-    if include_summary:
-        print("\n4. Creating calculation summary...")
-        num_summaries = summarize_calculations(".")
-        if num_summaries == 0:
-            print("No ORCA output files found for summary.")
-    else:
-        print("\n4. Skipping summary creation (--nosum flag used)")
-    
-    # Step 5: Collect .out files
-    print("\n5. Collecting .out files...")
-    collect_out_files()
-    
-    print("\n" + "=" * 50)
-    print("ASCEC Sort Process Completed")
-    print("=" * 50)
-    
-    # Suggest similarity analysis if .out files were collected
-    similarity_dir = os.path.join("..", "similarity")
-    if os.path.exists(similarity_dir):
-        print("\nSuggested next step:")
-        print("  python3 ascec-v04.py sim --threshold 0.9")
-        print("  Run similarity analysis on collected output files")
+    except Exception as e:
+        print(f"\nError during sort process: {e}")
+        print("Attempting to revert changes...")
+        revert_sort_changes(original_state, created_files, created_folders)
+        print("Changes reverted due to error.")
 
 
 def execute_similarity_analysis(*args):
@@ -4882,6 +5397,10 @@ def print_all_commands():
     print("    python3 ascec-v04.py calc template.inp launcher.sh     # Uses result_*.xyz or combined_results.xyz")
     print("    python3 ascec-v04.py calc template.com launcher.sh     # Gaussian version")
     print("  ")
+    print("  Create optimization input files from combined/motif files:")
+    print("    python3 ascec-v04.py opt template.inp launcher.sh      # Uses *combined*.xyz and motif_*.xyz files")
+    print("    python3 ascec-v04.py opt template.com launcher.sh      # Gaussian version, creates optimization/ folder")
+    print("  ")
     print("  Merge XYZ files:")
     print("    python3 ascec-v04.py merge                             # Interactive selection (all .xyz files)")
     print("    python3 ascec-v04.py merge result                      # Interactive selection (result_*.xyz files only)")
@@ -4963,7 +5482,7 @@ def print_all_commands():
 def main_ascec_integrated():
     # Setup argument parser - use parse_known_args to handle shell expansion
     parser = argparse.ArgumentParser(description="ASCEC: Annealing Simulation")
-    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'calc' to create calculation system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
+    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'calc' to create calculation system, 'opt' to create optimization system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
     parser.add_argument("arg1", nargs='?', default=None, 
                        help="Second argument: replication mode (e.g., 'r3'), template file for calc, etc.")
     parser.add_argument("arg2", nargs='?', default=None,
@@ -5010,13 +5529,27 @@ def main_ascec_integrated():
     
     # Check if calculation mode is requested
     if args.command.lower() == "calc":
-        if not args.arg1 or not args.arg2:
-            print("Error: calc command requires both template file and launcher template.")
-            print("Usage: python3 ascec-v04.py calc template_file launcher_template")
+        if not args.arg1:
+            print("Error: calc command requires a template file.")
+            print("Usage: python3 ascec-v04.py calc template_file [launcher_template]")
             print("Example: python3 ascec-v04.py calc example_input.inp launcher_orca.sh")
+            print("         python3 ascec-v04.py calc example_input.inp  # Creates inputs only")
             sys.exit(1)
         
         result = create_simple_calculation_system(args.arg1, args.arg2)
+        print(result)
+        return
+
+    # Check if optimization mode is requested
+    if args.command.lower() == "opt":
+        if not args.arg1:
+            print("Error: opt command requires a template file.")
+            print("Usage: python3 ascec-v04.py opt template_file [launcher_template]")
+            print("Example: python3 ascec-v04.py opt example_input.inp launcher_orca.sh")
+            print("         python3 ascec-v04.py opt example_input.inp  # Creates inputs only")
+            sys.exit(1)
+        
+        result = create_optimization_system(args.arg1, args.arg2)
         print(result)
         return
     
