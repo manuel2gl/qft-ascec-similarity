@@ -683,6 +683,41 @@ def get_element_symbol(atomic_number: int) -> str:
     """Retrieves the element symbol for a given atomic number."""
     return ATOMIC_NUMBER_TO_SYMBOL.get(atomic_number, 'X') # Default to 'X' for unknown/dummy
 
+
+def get_molecular_formula(mol_def) -> str:
+    """Generate molecular formula from molecule definition."""
+    if not mol_def.atoms_coords:
+        return "Unknown"
+    
+    # Count atoms by element
+    element_counts = {}
+    for atomic_num, x, y, z in mol_def.atoms_coords:
+        element = get_element_symbol(atomic_num)
+        element_counts[element] = element_counts.get(element, 0) + 1
+    
+    # Sort elements: C, H, then alphabetically
+    sorted_elements = []
+    if 'C' in element_counts:
+        sorted_elements.append('C')
+    if 'H' in element_counts:
+        sorted_elements.append('H')
+    
+    # Add remaining elements alphabetically
+    for element in sorted(element_counts.keys()):
+        if element not in ['C', 'H']:
+            sorted_elements.append(element)
+    
+    # Build formula string
+    formula = ""
+    for element in sorted_elements:
+        count = element_counts[element]
+        if count == 1:
+            formula += element
+        else:
+            formula += f"{element}{count}"
+    
+    return formula if formula else "Unknown"
+
 # 4. Initialize element weights
 def initialize_element_weights(state: SystemState):
     """
@@ -2049,6 +2084,61 @@ def calculate_molecular_volume(mol_def, method='covalent_spheres') -> float:
         return calculate_molecular_volume(mol_def, 'covalent_spheres')
 
 
+def calculate_hydrogen_bond_potential(mol_def) -> Dict:
+    """
+    Calculate the potential hydrogen bonding volume based on donor/acceptor counts.
+    
+    Args:
+        mol_def: MoleculeData object containing atomic coordinates and numbers
+    
+    Returns:
+        Dictionary with hydrogen bond analysis and volume estimation
+    """
+    # Average hydrogen bond length in organic clusters
+    avg_hb_length = 2.5  # Angstroms
+    
+    # Volume estimation: cylindrical volume around H-bond
+    # Using radius of ~1.2 Å (approximate H-bond interaction zone)
+    hb_interaction_radius = 1.2
+    hb_volume_per_bond = math.pi * (hb_interaction_radius ** 2) * avg_hb_length
+    
+    # Count potential donors and acceptors
+    donors = 0
+    acceptors = 0
+    
+    for atomic_num, x, y, z in mol_def.atoms_coords:
+        element = get_element_symbol(atomic_num)
+        
+        # Hydrogen bond donors (H attached to N, O, F)
+        if element == 'H':
+            donors += 1
+        
+        # Hydrogen bond acceptors (N, O, F with lone pairs)
+        elif element in ['N', 'O', 'F']:
+            acceptors += 1
+        
+        # Special cases for other elements that can participate
+        elif element == 'S':
+            acceptors += 0.5  # Weaker acceptor
+        elif element == 'Cl':
+            acceptors += 0.3  # Weak acceptor
+    
+    # Estimate potential hydrogen bonds (limited by the smaller of donors/acceptors)
+    potential_hb_bonds = min(donors, acceptors)
+    
+    # Total volume needed for hydrogen bonding network
+    hb_network_volume = potential_hb_bonds * hb_volume_per_bond
+    
+    return {
+        'donors': int(donors),
+        'acceptors': int(acceptors),
+        'potential_bonds': potential_hb_bonds,
+        'avg_bond_length': avg_hb_length,
+        'hb_volume_per_bond': hb_volume_per_bond,
+        'total_hb_volume': hb_network_volume
+    }
+
+
 def calculate_optimal_box_length(state: SystemState, target_packing_fractions: List[float] = None) -> Dict:
     """
     Calculates optimal box lengths based on molecular volumes and target packing densities.
@@ -2075,32 +2165,52 @@ def calculate_optimal_box_length(state: SystemState, target_packing_fractions: L
         'packing_analysis': {}
     }
     
-    # Calculate volume for each unique molecule definition
+    # Calculate volume and hydrogen bond potential for each unique molecule definition
     unique_molecular_volumes = []
+    unique_hb_analyses = []
+    total_hb_volume = 0.0
+    
     for mol_def in state.all_molecule_definitions:
         volume = calculate_molecular_volume(mol_def, method='covalent_spheres')
+        hb_analysis = calculate_hydrogen_bond_potential(mol_def)
+        
         unique_molecular_volumes.append(volume)
+        unique_hb_analyses.append(hb_analysis)
+        
         results['individual_molecular_volumes'].append({
             'molecule_label': mol_def.label,
             'num_atoms': mol_def.num_atoms,
-            'volume_A3': volume
+            'volume_A3': volume,
+            'hb_donors': hb_analysis['donors'],
+            'hb_acceptors': hb_analysis['acceptors'],
+            'potential_hb_bonds': hb_analysis['potential_bonds'],
+            'hb_network_volume_A3': hb_analysis['total_hb_volume']
         })
     
     # Calculate total volume of all molecules that will be placed
     total_molecular_volume = 0.0
+    total_hb_network_volume = 0.0
+    
     for i, mol_def_idx in enumerate(state.molecules_to_add):
         if mol_def_idx < len(unique_molecular_volumes):
             total_molecular_volume += unique_molecular_volumes[mol_def_idx]
+            total_hb_network_volume += unique_hb_analyses[mol_def_idx]['total_hb_volume']
+    
+    # Total effective volume includes both molecular and hydrogen bonding network volumes
+    total_effective_volume = total_molecular_volume + total_hb_network_volume
     
     results['total_molecular_volume'] = total_molecular_volume
+    results['total_hb_network_volume'] = total_hb_network_volume
+    results['total_effective_volume'] = total_effective_volume
     
-    if total_molecular_volume <= 0:
-        return {'error': 'Total molecular volume is zero or negative'}
+    if total_effective_volume <= 0:
+        return {'error': 'Total effective volume is zero or negative'}
     
     # Calculate box lengths for different packing fractions
+    # For hydrogen-bonded systems, use more conservative packing fractions
     for packing_fraction in target_packing_fractions:
-        # Box volume = total_molecular_volume / packing_fraction
-        required_box_volume = total_molecular_volume / packing_fraction
+        # Box volume = total_effective_volume / packing_fraction
+        required_box_volume = total_effective_volume / packing_fraction
         
         # For a cubic box: L^3 = required_box_volume
         box_length = required_box_volume ** (1.0/3.0)
@@ -2109,21 +2219,25 @@ def calculate_optimal_box_length(state: SystemState, target_packing_fractions: L
             'packing_fraction': packing_fraction,
             'box_length_A': box_length,
             'box_volume_A3': required_box_volume,
-            'free_volume_A3': required_box_volume - total_molecular_volume,
-            'free_volume_fraction': 1.0 - packing_fraction
+            'free_volume_A3': required_box_volume - total_effective_volume,
+            'free_volume_fraction': 1.0 - packing_fraction,
+            'molecular_volume_fraction': total_molecular_volume / required_box_volume,
+            'hb_network_volume_fraction': total_hb_network_volume / required_box_volume
         }
     
     # Add analysis for current box length if available
     if hasattr(state, 'cube_length') and state.cube_length > 0:
         current_box_volume = state.cube_length ** 3
-        current_packing_fraction = total_molecular_volume / current_box_volume
+        current_packing_fraction = total_effective_volume / current_box_volume
         
         results['current_box_analysis'] = {
             'current_box_length_A': state.cube_length,
             'current_box_volume_A3': current_box_volume,
             'current_packing_fraction': current_packing_fraction,
-            'current_free_volume_A3': current_box_volume - total_molecular_volume,
-            'current_free_volume_fraction': 1.0 - current_packing_fraction
+            'current_free_volume_A3': current_box_volume - total_effective_volume,
+            'current_free_volume_fraction': 1.0 - current_packing_fraction,
+            'molecular_packing_fraction': total_molecular_volume / current_box_volume,
+            'hb_network_fraction': total_hb_network_volume / current_box_volume
         }
     
     # Calculate largest molecular dimension for comparison with old method
@@ -2169,65 +2283,71 @@ def provide_box_length_advice(state: SystemState):
         return
     
     # Display molecular volume analysis
-    _print_verbose("1. Molecular volume analysis:", 1, state)
-    _print_verbose("-" * 35, 1, state)
+    _print_verbose("1. Molecular volume and hydrogen bonding analysis:", 1, state)
+    _print_verbose("-" * 50, 1, state)
     
-    total_volume = results['total_molecular_volume']
+    total_molecular_volume = results['total_molecular_volume']
+    total_hb_volume = results['total_hb_network_volume']
+    total_effective_volume = results['total_effective_volume']
+    
     _print_verbose(f"Number of molecules to place: {results['num_molecules']}", 1, state)
-    _print_verbose(f"Total molecular volume: {total_volume:.2f} Å³", 1, state)
+    _print_verbose(f"  Total molecular volume: {total_molecular_volume:.2f} Å³", 1, state)
+    _print_verbose(f"  Total H-bond network volume: {total_hb_volume:.2f} Å³", 1, state)
+    _print_verbose(f"  Total effective volume: {total_effective_volume:.2f} Å³", 1, state)
     
-    _print_verbose("\nIndividual molecule volumes:", 1, state)
-    for mol_info in results['individual_molecular_volumes']:
-        _print_verbose(f"  • {mol_info['molecule_label']}: {mol_info['volume_A3']:.2f} Å³ "
-                      f"({mol_info['num_atoms']} atoms)", 1, state)
+    _print_verbose("\nIndividual molecule analysis:", 1, state)
+    for i, mol_info in enumerate(results['individual_molecular_volumes']):
+        # Get the molecular formula from the corresponding molecule definition
+        if i < len(state.all_molecule_definitions):
+            mol_def = state.all_molecule_definitions[i]
+            molecular_formula = get_molecular_formula(mol_def)
+            _print_verbose(f"  • {mol_info['molecule_label']}: {molecular_formula} {mol_info['volume_A3']:.2f} Å³", 1, state)
+        else:
+            _print_verbose(f"  • {mol_info['molecule_label']}: {mol_info['volume_A3']:.2f} Å³", 1, state)
     
     # Display box length recommendations
-    _print_verbose("\n2. BoxBOX LENGTH RECOMMENDATIONS (Volume-Based):", 1, state)
-    _print_verbose("-" * 79, 1, state)
+    _print_verbose("\n2. Box length recommendations (H-Bond Network Aware):", 1, state)
+    _print_verbose("-" * 70, 1, state)
     
     recommendations = results['box_length_recommendations']
-    _print_verbose("Packing Fraction (%)     Box Length (Å)     Box Volume (Å³)    Free Volume (%)", 1, state)
-    _print_verbose("-" * 79, 1, state)
+    _print_verbose("Packing (%)    Box Length (Å)     Box Volume (Å³)       Free (%)", 1, state)
+    _print_verbose("-" * 70, 1, state)
 
     for key, rec in recommendations.items():
         pf = rec['packing_fraction']
         bl = rec['box_length_A']
         bv = rec['box_volume_A3']
-        fv = rec['free_volume_A3']
-        total_bv = rec['box_volume_A3']
-        free_volume_pct = (fv / total_bv) * 100  # Calculate percentage
-        _print_verbose(f"         {pf*100:4.1f}                 {bl:5.2f}               {bv:3.0f}               {free_volume_pct:4.1f}", 1, state)
+        free_pct = rec['free_volume_fraction'] * 100
+        _print_verbose(f"    {pf*100:4.1f}          {bl:6.2f}             {bv:6.0f}               {free_pct:4.1f}", 1, state)
     
     # Current box analysis - show current cube length and largest molecular extent
     if 'current_box_analysis' in results:
-        _print_verbose("\n3. CURRENT BOX ANALYSIS:", 1, state)
+        _print_verbose("\n3. Current box analysis:", 1, state)
         _print_verbose("-" * 26, 1, state)
         current = results['current_box_analysis']
         _print_verbose(f"Cube's length = {current['current_box_length_A']:.2f} Å", 1, state)
-        _print_verbose(f"Current packing fraction: {current['current_packing_fraction']:.1%}", 1, state)
-        _print_verbose(f"Current free volume: {current['current_free_volume_A3']:.0f} Å³ "
+        _print_verbose(f"  Current effective packing: {current['current_packing_fraction']:.1%}", 1, state)
+        _print_verbose(f"    └ Molecular: {current['molecular_packing_fraction']:.1%}, H-bond network: {current['hb_network_fraction']:.1%}", 1, state)
+        _print_verbose(f"  Current free volume: {current['current_free_volume_A3']:.0f} Å³ "
                       f"({current['current_free_volume_fraction']:.1%})", 1, state)
+        _print_verbose(f"  Largest molecular extent: {results['max_molecular_extent_A']:.2f} Å", 1, state)
         
-        # Show largest molecular extent
-        max_extent = results['max_molecular_extent_A']
-        _print_verbose(f"Largest molecular extent: {max_extent:.2f} Å", 1, state)
-        
-        # Provide assessment of current box size
+        # Provide assessment of current box size for H-bonded systems
         pf = current['current_packing_fraction']
         if pf < 0.05:
-            assessment = "Extremely dilute - may be unnecessarily large"
+            assessment = "Very dilute - good for isolated cluster studies"
         elif pf < 0.15:
-            assessment = "Very dilute - good for gas phase simulations"
+            assessment = "Dilute - appropriate for H-bonded cluster formation"
         elif pf < 0.25:
-            assessment = "Dilute - suitable for most applications"
+            assessment = "Moderate - suitable for network formation studies"
         elif pf < 0.35:
-            assessment = "Moderate density - good for fluid studies"
+            assessment = "Dense - good for condensed phase simulations"
         elif pf < 0.45:
-            assessment = "Dense - approaching liquid-like density"
+            assessment = "Very dense - may constrain H-bond network flexibility"
         else:
-            assessment = "Very dense - may lead to steric clashes"
+            assessment = "Extremely dense - may prevent proper H-bond formation"
         
-        _print_verbose(f"{assessment}", 1, state)
+        _print_verbose(f"  {assessment}", 1, state)
     
     # Store results in state for potential use elsewhere
     max_extent = results['max_molecular_extent_A']
@@ -2235,22 +2355,25 @@ def provide_box_length_advice(state: SystemState):
     state.volume_based_recommendations = recommendations
     
     # Final recommendations
-    _print_verbose("\n4. RECOMMENDATIONS:", 1, state)
-    _print_verbose("-" * 18, 1, state)
+    _print_verbose("\n4. Recommendations for H-bonded systems:", 1, state)
+    _print_verbose("-" * 40, 1, state)
     
-    # Get the 10% and 15% recommendations as reasonable defaults for H-bonded systems
+    # Get recommendations as reasonable defaults for H-bonded systems
+    rec_5 = recommendations.get('5.0%', {}).get('box_length_A', 0)
     rec_10 = recommendations.get('10.0%', {}).get('box_length_A', 0)
     rec_15 = recommendations.get('15.0%', {}).get('box_length_A', 0)
     
-    if rec_10 > 0 and rec_15 > 0:
-        _print_verbose(f"• For gas phase studies: {rec_10:.1f} Å (10% packing)", 1, state)
-        _print_verbose(f"• For cluster formation: {rec_15:.1f} Å (15% packing)", 1, state)
-        _print_verbose(f"• Choose based on your simulation goals and computational resources", 1, state)
+    if rec_5 > 0 and rec_10 > 0 and rec_15 > 0:
+        _print_verbose(f"• For isolated clusters: {rec_5:.1f} Å (5% effective packing)", 1, state)
+        _print_verbose(f"• For cluster formation: {rec_10:.1f} Å (10% effective packing)", 1, state)
+        _print_verbose(f"• For network studies: {rec_15:.1f} Å (15% effective packing)", 1, state)
+        _print_verbose(f"• Includes space for H-bond network (avg. bond length: 2.5 Å)", 1, state)
     
     _print_verbose("\n" + "="*78, 1, state)
-    _print_verbose("Note: This analysis is based on molecular volume calculations.", 1, state)
+    _print_verbose("Note: This analysis accounts for hydrogen bonding networks in molecular clusters.", 1, state)
+    _print_verbose("H-bond volume estimated using 2.5 Å average bond length and 1.2 Å interaction radius.", 1, state)
     _print_verbose("Run the full simulation to validate these recommendations.", 1, state)
-    _print_verbose("="*78 + "\n", 1, state)
+    _print_verbose("="*78, 1, state)
 
 def format_time_difference(seconds: float) -> str:
     """Formats a time difference in seconds into days, hours, minutes, seconds, milliseconds."""
