@@ -337,7 +337,7 @@ class SystemState:
         
         # Additional QM related attributes
         self.qm_call_count: int = 0 # Counter for QM calculation calls (cumulative global count)
-        self.initial_qm_retries: int = 20 # Number of retries for initial QM calculation, default to 20
+        self.initial_qm_retries: int = 100 # Number of retries for initial QM calculation, default to 100
         self.verbosity_level: int = 0 # 0: default, 1: --v (every 10 steps), 2: --va (all steps)
         self.use_standard_metropolis: bool = False # Flag for Metropolis criterion
 
@@ -630,9 +630,12 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
     print(f"There are a total of {state.natom:>2} nuclei", file=output_file_handle)
     # Changed spacing to one space
     print(f"\nCube's length = {state.cube_length:.2f} A", file=output_file_handle) 
+    
+    # Write hydrogen bond-aware box analysis to output file
+    write_box_analysis_to_file(state, output_file_handle)
+    
     if hasattr(state, 'max_molecular_extent') and state.max_molecular_extent > 0:
         print(f"Largest molecular extent: {state.max_molecular_extent:.2f} A", file=output_file_handle) 
-        print(f"Suggested length = {state.max_molecular_extent + 2 * 8.0:.1f} A", file=output_file_handle) 
     
     print("\nNumber of molecules:", state.num_molecules, file=output_file_handle)
     print("\nMolecular composition", file=output_file_handle)
@@ -1323,6 +1326,32 @@ def preserve_last_qm_files_debug(state: SystemState, run_dir: str, call_id: int,
     except Exception as e:
         _print_verbose(f"  Warning: Could not preserve QM files for debugging: {e}", 1, state)
 
+def preserve_failed_initial_qm_files(state: SystemState, run_dir: str, attempt_num: int):
+    """
+    Simply notify that the anneal.* files contain the last failed attempt.
+    The files are already preserved by preserve_last_qm_files_debug.
+    """
+    _print_verbose(f"", 0, state)
+    _print_verbose(f"DEBUG: Final failed attempt files preserved as:", 0, state)
+    
+    input_file = os.path.join(run_dir, "anneal.inp" if state.qm_program == "orca" else "anneal.com")
+    output_file = os.path.join(run_dir, "anneal.out")
+    
+    if os.path.exists(input_file):
+        _print_verbose(f"  ✓ {os.path.basename(input_file)} (QM input file - check this for problematic geometry)", 0, state)
+    else:
+        _print_verbose(f"  ✗ {os.path.basename(input_file)} (NOT FOUND)", 0, state)
+        
+    if os.path.exists(output_file):
+        _print_verbose(f"  ✓ anneal.out (QM output file - check for error messages)", 0, state)
+    else:
+        _print_verbose(f"  ✗ anneal.out (NOT FOUND - QM program failed to start or crashed immediately)", 0, state)
+        _print_verbose(f"      This usually indicates:", 0, state)
+        _print_verbose(f"      - QM program not found in PATH", 0, state)
+        _print_verbose(f"      - Severe geometry problems (atoms too close)", 0, state)
+        _print_verbose(f"      - Invalid basis set for these atoms", 0, state)
+        _print_verbose(f"      - Memory/resource issues", 0, state)
+
 # 13. Calculate energy function
 def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: SystemState, run_dir: str) -> Tuple[float, int]:
     """
@@ -1454,33 +1483,39 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     try:
         # First, check if the QM executable is available
         if state.qm_program == "orca":
-            # Test if ORCA is available
+            # Test if ORCA is available using a simple version check
             try:
-                test_process = subprocess.run([qm_exe, "--help"], capture_output=True, text=True, timeout=5)
-                if test_process.returncode != 0:
-                    _print_verbose(f"Warning: ORCA executable '{qm_exe}' may not be properly installed or accessible.", 1, state)
+                test_process = subprocess.run([qm_exe, "--version"], capture_output=True, text=True, timeout=10)
+                # ORCA might return non-zero even for version check, so just check if it ran
+                _print_verbose(f"ORCA test command executed: {qm_exe} --version", 2, state)
             except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-                _print_verbose(f"Error: ORCA executable '{qm_exe}' not found or not working: {e}", 1, state)
+                _print_verbose(f"Error: ORCA executable '{qm_exe}' not found or not working: {e}", 0, state)
                 return 0.0, 0
         
         if state.qm_program == "orca":
             # Special handling for ORCA to capture output properly
+            _print_verbose(f"Executing ORCA command: {' '.join(qm_command)} in directory: {run_dir}", 2, state)
             with open(qm_output_path, 'w') as output_file:
                 process = subprocess.run(qm_command, cwd=run_dir, stdout=output_file, stderr=subprocess.PIPE, text=True, check=False)
+            _print_verbose(f"ORCA process completed with return code: {process.returncode}", 2, state)
         else:
             # For Gaussian and other programs
             process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
         
         # Check for non-zero exit code first
         if process.returncode != 0:
-            _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 1, state)
+            _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 0, state)
             if state.qm_program == "orca":
-                _print_verbose(f"  Command executed: {' '.join(qm_command)}", 1, state)
-                _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 1, state)
+                _print_verbose(f"  Command executed: {' '.join(qm_command)}", 0, state)
+                _print_verbose(f"  Working directory: {run_dir}", 0, state)
+                _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 0, state)
+                # Also check if output file was created despite non-zero exit
+                if os.path.exists(qm_output_path):
+                    _print_verbose(f"  Output file was created, checking content...", 0, state)
             else:
-                _print_verbose(f"  Command executed: {qm_command}", 1, state)
-                _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 1, state)
-                _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 1, state)
+                _print_verbose(f"  Command executed: {qm_command}", 0, state)
+                _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 0, state)
+                _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 0, state)
             status = 0 
         elif not os.path.exists(qm_output_path):
             _print_verbose(f"QM output file '{qm_output_path}' was not generated.", 1, state)
@@ -2258,6 +2293,36 @@ def calculate_optimal_box_length(state: SystemState, target_packing_fractions: L
     
     return results
 
+
+def write_box_analysis_to_file(state: SystemState, output_file_handle):
+    """
+    Writes box length analysis results to the output file.
+    """
+    if not state.all_molecule_definitions:
+        return
+    
+    # Calculate optimal box lengths using volume-based approach
+    results = calculate_optimal_box_length(state)
+    
+    if 'error' in results:
+        return
+    
+    # Get recommendations for output file
+    recommendations = results['box_length_recommendations']
+    rec_5 = recommendations.get('5.0%', {}).get('box_length_A', 0)
+    rec_10 = recommendations.get('10.0%', {}).get('box_length_A', 0)
+    rec_15 = recommendations.get('15.0%', {}).get('box_length_A', 0)
+    
+    # Write to output file
+    if rec_5 > 0 and rec_10 > 0 and rec_15 > 0:
+        print(f"H-bond aware suggestions:", file=output_file_handle)
+        print(f"  • Isolated clusters: {rec_5:.1f} A (5% effective packing)", file=output_file_handle)
+        print(f"  • Cluster formation: {rec_10:.1f} A (10% effective packing)", file=output_file_handle)
+        print(f"  • Network studies: {rec_15:.1f} A (15% effective packing)", file=output_file_handle)
+    
+    # Store results in state for potential use elsewhere
+    state.max_molecular_extent = results['max_molecular_extent_A']
+    state.volume_based_recommendations = recommendations
 
 def provide_box_length_advice(state: SystemState):
     """
@@ -5562,8 +5627,9 @@ def print_all_commands():
     print("  Line 7: Max displacement and rotation")
     print("  Line 8: QM program and alias")
     print("  Line 9: QM method and basis set")
-    print("  Line 10: Charge and multiplicity")
-    print("  Line 11+: Molecule definitions")
+    print("  Line 10: nprocs [memory] (used for QM calculations and ASCEC parallel evaluation)")
+    print("  Line 11: Charge and multiplicity")
+    print("  Line 12+: Molecule definitions")
     print()
     
     print("6. TEMPLATE FILE FORMAT (for update command):")
@@ -5953,9 +6019,12 @@ def main_ascec_integrated():
 
                 except RuntimeError as e:
                     _print_verbose(f"  Initial QM calculation attempt {attempt + 1} failed: {e}", 0, state)
+                    
                     if attempt < state.initial_qm_retries - 1:
                         _print_verbose("  Generating new initial configuration and retrying...\n", 0, state)
                     else:
+                        # Preserve failed QM files from the last attempt only
+                        preserve_failed_initial_qm_files(state, run_dir, attempt + 1)
                         raise RuntimeError(
                             f"All {state.initial_qm_retries} attempts to perform the initial QM energy calculation failed. "
                             "Please verify your QM input parameters (method, basis set, memory, processors) "
