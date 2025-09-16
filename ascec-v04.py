@@ -923,31 +923,42 @@ def initialize_molecular_coords_in_box(state: SystemState) -> Tuple[np.ndarray, 
         _print_verbose("Please ensure the 'Molecule Definition' section in your input file is correct and parsed by read_input_file.", 0, state)
         raise ValueError("Cannot initialize coordinates: Molecular definition is missing or invalid.")
 
-    total_atoms = state.num_molecules * state.natom_per_molecule
-    state.natom = total_atoms 
+    # Use the already calculated total_atoms from read_input_file which correctly handles different molecule sizes
+    total_atoms = state.natom
 
     rp = np.zeros((total_atoms, 3), dtype=np.float64)
     iznu = [0] * total_atoms
 
-    template_coords = state.coords_per_molecule
-    template_atomic_numbers = state.atomic_numbers_per_molecule
-
-    template_min_coords = np.min(template_coords, axis=0)
-    template_max_coords = np.max(template_coords, axis=0)
-    
-    template_geometric_center = (template_min_coords + template_max_coords) / 2.0
-
     box_center = state.cube_length / 2.0 * np.ones(3) 
 
-    initial_centering_offset = box_center - template_geometric_center
-
-    for i in range(state.num_molecules):
-        start_idx = i * state.natom_per_molecule
-        end_idx = start_idx + state.natom_per_molecule
-
-        rp[start_idx:end_idx, :] = template_coords + initial_centering_offset
-
-        iznu[start_idx:end_idx] = template_atomic_numbers
+    # Initialize coordinates and atomic numbers for each molecule separately
+    # since molecules can have different numbers of atoms
+    current_atom_idx = 0
+    for mol_idx in range(state.num_molecules):
+        mol_def = state.all_molecule_definitions[mol_idx]
+        
+        # Extract coordinates and atomic numbers for this specific molecule
+        coords_list = [[atom[1], atom[2], atom[3]] for atom in mol_def.atoms_coords]
+        molecule_coords = np.array(coords_list, dtype=np.float64)
+        atomic_numbers = [atom[0] for atom in mol_def.atoms_coords]
+        
+        # Calculate geometric center for this molecule
+        mol_min_coords = np.min(molecule_coords, axis=0)
+        mol_max_coords = np.max(molecule_coords, axis=0)
+        mol_geometric_center = (mol_min_coords + mol_max_coords) / 2.0
+        
+        # Center this molecule in the box
+        initial_centering_offset = box_center - mol_geometric_center
+        centered_coords = molecule_coords + initial_centering_offset
+        
+        # Place atoms for this molecule
+        num_atoms_this_mol = len(atomic_numbers)
+        end_idx = current_atom_idx + num_atoms_this_mol
+        
+        rp[current_atom_idx:end_idx, :] = centered_coords
+        iznu[current_atom_idx:end_idx] = atomic_numbers
+        
+        current_atom_idx = end_idx
     
     # Populate the initial iznu array for the state object
     state.iznu = iznu 
