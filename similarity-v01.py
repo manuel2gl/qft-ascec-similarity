@@ -1244,7 +1244,7 @@ def write_xyz_file(mol_data, filename):
         for i in range(len(atomnos)):
             f.write(f"{symbols[i]:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
 
-def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel"):
+def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel", cluster_id_mapping=None):
     """
     Creates a motifs folder containing the lowest energy representative structure from each cluster.
     Also creates a combined XYZ file with all representatives and attempts to convert to MOL format.
@@ -1253,6 +1253,7 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         all_clusters_data (list): List of clusters, where each cluster is a list of molecule data dictionaries
         output_base_dir (str): Base output directory where motifs folder will be created
         openbabel_alias (str): Alias for OpenBabel command (default: "obabel")
+        cluster_id_mapping (dict): Optional mapping from cluster index to original cluster ID
     """
     if not all_clusters_data:
         print("  No clusters found. Skipping motifs creation.")
@@ -1267,6 +1268,7 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
     print(f"  Output directory: {motifs_dir}")
     
     representatives = []
+    representative_cluster_ids = []
     
     for cluster_idx, cluster_members in enumerate(all_clusters_data):
         if not cluster_members:
@@ -1276,29 +1278,35 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         representative = min(cluster_members,
                            key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
         
-        representatives.append(representative)
+        # Get the cluster ID for this representative
+        cluster_id = cluster_id_mapping[cluster_idx] if cluster_id_mapping else cluster_idx + 1
         
-        # Create individual XYZ file for this representative
+        representatives.append(representative)
+        representative_cluster_ids.append(cluster_id)
+    
+    # Sort representatives by Gibbs free energy, keeping track of their original cluster IDs
+    representatives_with_ids = list(zip(representatives, representative_cluster_ids))
+    sorted_representatives_with_ids = sorted(
+        representatives_with_ids,
+        key=lambda x: (x[0].get('gibbs_free_energy') if x[0].get('gibbs_free_energy') is not None else float('inf'), x[0]['filename'])
+    )
+    
+    # Create individual XYZ files for representatives in energy order
+    for motif_idx, (representative, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
         base_name = os.path.splitext(representative['filename'])[0]
-        motif_filename = f"motif_{cluster_idx+1:02d}_{base_name}.xyz"
+        motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
         motif_path = os.path.join(motifs_dir, motif_filename)
         
         write_xyz_file(representative, motif_path)
         
         gibbs_str = f"{representative['gibbs_free_energy']:.6f}" if representative['gibbs_free_energy'] is not None else "N/A"
-        print(f"  Motif {cluster_idx+1:02d}: {base_name} (Gibbs Energy: {gibbs_str} Hartree)")
+        print(f"  Motif {motif_idx:02d}: {base_name} (Gibbs Energy: {gibbs_str} Hartree, Cluster ID: {cluster_id})")
     
-    # Create combined XYZ file with all representatives
+    # Create combined XYZ file with all representatives (already sorted above)
     combined_xyz_path = os.path.join(motifs_dir, "all_motifs_combined.xyz")
     
-    # Sort representatives by Gibbs free energy
-    sorted_representatives = sorted(
-        representatives,
-        key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename'])
-    )
-    
     with open(combined_xyz_path, "w", newline='\n') as outfile:
-        for rep_idx, rep_data in enumerate(sorted_representatives):
+        for motif_idx, (rep_data, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
             atomnos = rep_data.get('final_geometry_atomnos')
             atomcoords = rep_data.get('final_geometry_coords')
             gibbs_free_energy = rep_data.get('gibbs_free_energy')
@@ -1309,13 +1317,18 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
             
             base_name = os.path.splitext(rep_data['filename'])[0]
             gibbs_str = f"{gibbs_free_energy:.6f} hartree" if gibbs_free_energy is not None else "N/A"
-            comment_line = f"Motif_{rep_idx+1:02d}_{base_name} (G = {gibbs_str})"
+            comment_line = f"motif_{motif_idx:02d}_{base_name} (G = {gibbs_str})"
             
             outfile.write(f"{len(atomnos)}\n")
             outfile.write(f"{comment_line}\n")
             for i in range(len(atomnos)):
                 symbol = atomic_number_to_symbol(atomnos[i])
                 outfile.write(f"{symbol:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
+    
+    # Return the mapping from motif number to cluster ID for use in Boltzmann analysis
+    motif_to_cluster_mapping = {}
+    for motif_idx, (rep_data, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
+        motif_to_cluster_mapping[motif_idx] = cluster_id
     
     print(f"  Created combined XYZ file: {os.path.basename(combined_xyz_path)}")
     
@@ -1341,6 +1354,8 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         print("  Please ensure OpenBabel is installed and added to your system's PATH.")
     
     print(f"\nMotifs creation complete. Output saved in: {motifs_dir}")
+    
+    return motif_to_cluster_mapping
 
 
 def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, openbabel_alias="obabel", prefix_template=None, motif_numbers=None):
@@ -2282,6 +2297,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
     # Collect all final clusters for unique motifs creation
     all_final_clusters = []
+    cluster_id_mapping = {}  # Maps cluster index to cluster ID for motifs
 
     # Now iterate through the hbond_groups again to perform the clustering and write files
     # This loop is responsible for generating the actual clusters and writing their files.
@@ -2596,7 +2612,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             os.makedirs(cluster_xyz_subfolder, exist_ok=True)
             print(f"  Saving .xyz files to '{cluster_xyz_subfolder}'")
 
+            # Store cluster ID in each member for later motif mapping
             for m_data in members_data:
+                m_data['_cluster_global_id'] = current_global_cluster_id
                 xyz_filename = os.path.join(cluster_xyz_subfolder, os.path.splitext(m_data['filename'])[0] + ".xyz")
                 write_xyz_file(m_data, xyz_filename) 
             
@@ -2633,6 +2651,17 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 comparison_specific_summary_lines.append(f"    - {key}: {formatted_value}")
         summary_file_content_lines.extend(comparison_specific_summary_lines)
 
+    # Create cluster ID mapping for motifs BEFORE Boltzmann analysis
+    for cluster_idx, cluster_members in enumerate(all_final_clusters):
+        if cluster_members:
+            # Get the cluster ID from the first member (all members have the same cluster ID)
+            cluster_id = cluster_members[0].get('_cluster_global_id', cluster_idx + 1)
+            cluster_id_mapping[cluster_idx] = cluster_id
+
+    # Create motifs folder with representative structures from each cluster
+    motif_to_cluster_mapping = create_unique_motifs_folder(all_final_clusters, output_base_dir, 
+                                                          cluster_id_mapping=cluster_id_mapping)
+
     # --- Append Boltzmann Population Analysis to clustering_summary.txt ---
     if global_min_gibbs_energy is not None:
         summary_file_content_lines.append("\n" + "=" * 90 + "\n\n")
@@ -2645,7 +2674,19 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # Sort by population percentage descending for better readability
         sorted_g1_data = sorted(boltzmann_g1_data.items(), key=lambda item: item[1]['population'], reverse=True)
         for cluster_id, data in sorted_g1_data:
-            summary_file_content_lines.append(f"    cluster_{cluster_id}")
+            # Find corresponding motif number
+            motif_num = None
+            if motif_to_cluster_mapping:
+                for motif_idx, mapped_cluster_id in motif_to_cluster_mapping.items():
+                    if mapped_cluster_id == cluster_id:
+                        motif_num = motif_idx
+                        break
+            
+            cluster_line = f"    cluster_{cluster_id}"
+            if motif_num is not None:
+                cluster_line += f" (motif_{motif_num:02d})"
+                
+            summary_file_content_lines.append(cluster_line)
             summary_file_content_lines.append(f"    Lowest Energy ({os.path.splitext(data['filename'])[0]}): {data['energy']:.6f} Hartree")
             summary_file_content_lines.append(f"    Population: {data['population']:.2f} %\n")
 
@@ -2655,16 +2696,25 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # Sort by population percentage descending
         sorted_g_deg_data = sorted(boltzmann_g_deg_data.items(), key=lambda item: item[1]['population'], reverse=True)
         for cluster_id, data in sorted_g_deg_data:
-            summary_file_content_lines.append(f"    cluster_{cluster_id}")
+            # Find corresponding motif number
+            motif_num = None
+            if motif_to_cluster_mapping:
+                for motif_idx, mapped_cluster_id in motif_to_cluster_mapping.items():
+                    if mapped_cluster_id == cluster_id:
+                        motif_num = motif_idx
+                        break
+            
+            cluster_line = f"    cluster_{cluster_id}"
+            if motif_num is not None:
+                cluster_line += f" (motif_{motif_num:02d})"
+                
+            summary_file_content_lines.append(cluster_line)
             summary_file_content_lines.append(f"    Lowest Energy ({os.path.splitext(data['filename'])[0]}): {data['energy']:.6f} Hartree")
             summary_file_content_lines.append(f"    Number of structures = {data['cluster_size']}")
             summary_file_content_lines.append(f"    Population: {data['population']:.2f} %\n")
 
         summary_file_content_lines.append("\n" + "=" * 90 + "\n")
     # --- End Boltzmann Population Analysis ---
-
-    # Create motifs folder with representative structures from each cluster
-    create_unique_motifs_folder(all_final_clusters, output_base_dir)
 
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
     with open(summary_file, "w", newline='\n') as f:
