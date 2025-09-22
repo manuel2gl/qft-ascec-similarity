@@ -1001,15 +1001,15 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
 
     lines_iterator = iter(lines) 
 
-    # PHASE 1: Read Fixed Configuration Parameters (Lines 1-12)
+    # PHASE 1: Read Fixed Configuration Parameters (Lines 1-13)
     config_lines_parsed = 0 
 
-    # We expect 12 lines for fixed configuration parameters (no alpha)
-    while config_lines_parsed < 12: # Changed from 13 to 12
+    # We expect 13 lines for fixed configuration parameters (including conformational sampling)
+    while config_lines_parsed < 13:
         try:
             raw_line = next(lines_iterator)
         except StopIteration:
-            raise EOFError(f"Unexpected end of input while reading configuration parameters. Expected 12 lines, but found only {config_lines_parsed}.")
+            raise EOFError(f"Unexpected end of input while reading configuration parameters. Expected 13 lines, but found only {config_lines_parsed}.")
         
         line_num = lines.index(raw_line) + 1 
         line = clean_line(raw_line)
@@ -1119,7 +1119,7 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                 state.num_molecules = int(parts[0])
             except ValueError:
                 raise ValueError(f"Error parsing 'Number of Molecules' on line {line_num}: Expected an integer, but found '{parts[0]}'. "
-                                 "Please ensure line 12 of your input file contains the total number of molecules.")
+                                 "Please ensure line 13 of your input file contains the total number of molecules.")
             state.nmo = state.num_molecules
         else:
             _print_verbose(f"Warning: Unexpected configuration line at index {config_lines_parsed}. Line: {line}", 1, state)
