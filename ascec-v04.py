@@ -261,8 +261,8 @@ class SystemState:
         self.max_cycle_floor: int = 10            # Floor value for maxstep reduction (default: 10)
         self.max_displacement_a: float = 0.0      # Maximum Displacement of each mass center (ds)
         self.max_rotation_angle_rad: float = 0.0  # Maximum Rotation angle in radians (dphi)
-        self.conformational_move_prob: float = 0.3  # Probability of conformational move vs rigid-body move
-        self.max_dihedral_angle_rad: float = np.pi / 3  # Maximum dihedral rotation angle (60 degrees)
+        self.conformational_move_prob: float = 0.0  # Probability of conformational move vs rigid-body move (read from input)
+        self.max_dihedral_angle_rad: float = 0.0  # Maximum dihedral rotation angle in radians (read from input)
         self.ia: int = 0                          # QM program type (1: Gaussian, 2: ORCA, etc.)
         self.alias: str = ""                      # Program alias/executable name (e.g., "g09")
         self.qm_method: Optional[str] = None      # (e.g., "pm3", "hf") - Renamed from hamiltonian for clarity
@@ -1073,13 +1073,26 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
             state.ds = state.max_displacement_a
             state.dphi = state.max_rotation_angle_rad
 
-        elif config_lines_parsed == 7: # Line 8: QM Program Index & Alias (e.g., "1 g09")
+        elif config_lines_parsed == 7: # Line 8: Conformational sampling (%) & Maximum dihedral rotation (degrees)
+            # Parse conformational move probability as percentage (0-100)
+            conformational_percent = float(parts[0])
+            if not (0.0 <= conformational_percent <= 100.0):
+                raise ValueError(f"Error parsing conformational move percentage on line {line_num}: Expected a value between 0 and 100, got '{parts[0]}'.")
+            state.conformational_move_prob = conformational_percent / 100.0  # Convert to 0.0-1.0 range
+            
+            # Parse maximum dihedral rotation angle in degrees
+            max_dihedral_degrees = float(parts[1])
+            if not (0.0 <= max_dihedral_degrees <= 180.0):
+                raise ValueError(f"Error parsing maximum dihedral angle on line {line_num}: Expected a value between 0 and 180 degrees, got '{parts[1]}'.")
+            state.max_dihedral_angle_rad = np.radians(max_dihedral_degrees)  # Convert to radians
+
+        elif config_lines_parsed == 8: # Line 9: QM Program Index & Alias (e.g., "1 g09")
             state.ia = int(parts[0])      
             state.qm_program = parts[1]   
             state.alias = parts[1]        
             state.jdum = state.alias      
 
-        elif config_lines_parsed == 8: # Line 9: Hamiltonian & Basis Set (e.g., "pm3 zdo")
+        elif config_lines_parsed == 9: # Line 10: Hamiltonian & Basis Set (e.g., "pm3 zdo")
             state.qm_method = parts[0]      
             # Handle case where only method is provided (common for semi-empirical methods)
             if len(parts) > 1:
@@ -1088,7 +1101,7 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                 # For semi-empirical methods, we can set a default or leave it empty
                 state.qm_basis_set = "zdo"  # Default for semi-empirical methods   
 
-        elif config_lines_parsed == 9:      # Line 10: nprocs & maxmemory
+        elif config_lines_parsed == 10:      # Line 11: nprocs & maxmemory
             state.qm_nproc = int(parts[0])   
             # Only set qm_memory if a second part is explicitly provided in the input file.
             # Otherwise, it remains None, and the QM program will decide.
@@ -1097,11 +1110,11 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
             else:
                  state.qm_memory = None # Ensure it's None if not provided
 
-        elif config_lines_parsed == 10:     # Line 11: Charge & Spin Multiplicity
+        elif config_lines_parsed == 11:     # Line 12: Charge & Spin Multiplicity
             state.charge = int(parts[0])
             state.multiplicity = int(parts[1]) 
 
-        elif config_lines_parsed == 11:     # Line 12: Number of Molecules (was Line 13)
+        elif config_lines_parsed == 12:     # Line 13: Number of Molecules
             try:
                 state.num_molecules = int(parts[0])
             except ValueError:
@@ -5915,10 +5928,10 @@ def main_ascec_integrated():
     parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
     parser.add_argument("--nosum", action="store_true", help="Skip summary creation in sort command.")
     parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
-    parser.add_argument("--conformational", type=float, default=0.3, 
-                       help="Probability of conformational moves (0.0-1.0). Default: 0.3 (30%% of moves will be conformational)")
-    parser.add_argument("--maxdihedral", type=float, default=60.0,
-                       help="Maximum dihedral rotation angle in degrees for conformational moves. Default: 60.0")
+    parser.add_argument("--conformational", type=float, default=None, 
+                       help="Override conformational move probability from input file (0.0-1.0)")
+    parser.add_argument("--maxdihedral", type=float, default=None,
+                       help="Override maximum dihedral rotation angle from input file (degrees)")
     
     # Use parse_known_args to handle shell expansion gracefully
     args, unknown_args = parser.parse_known_args()
@@ -6084,10 +6097,6 @@ def main_ascec_integrated():
     
     state.use_standard_metropolis = args.standard # Set the flag in state
     
-    # Handle conformational sampling parameters
-    state.conformational_move_prob = max(0.0, min(1.0, args.conformational))  # Clamp to [0,1]
-    state.max_dihedral_angle_rad = np.radians(args.maxdihedral)  # Convert degrees to radians
-    
     # Handle --nobox flag to disable box XYZ file creation
     global CREATE_BOX_XYZ_COPY
     if args.nobox:
@@ -6102,6 +6111,14 @@ def main_ascec_integrated():
     try:
         # Call read_input_file as early as possible to populate state
         read_input_file(state, input_file)
+        
+        # Apply command-line overrides for conformational parameters (if provided)
+        if args.conformational is not None:
+            state.conformational_move_prob = max(0.0, min(1.0, args.conformational))  # Clamp to [0,1]
+            _print_verbose(f"Command-line override: Conformational move probability set to {state.conformational_move_prob*100:.1f}%", 1, state)
+        if args.maxdihedral is not None:
+            state.max_dihedral_angle_rad = np.radians(args.maxdihedral)  # Convert degrees to radians
+            _print_verbose(f"Command-line override: Maximum dihedral angle set to {args.maxdihedral:.1f} degrees", 1, state)
 
         # Set output directory to the directory containing the input file
         state.output_dir = run_dir
