@@ -261,6 +261,8 @@ class SystemState:
         self.max_cycle_floor: int = 10            # Floor value for maxstep reduction (default: 10)
         self.max_displacement_a: float = 0.0      # Maximum Displacement of each mass center (ds)
         self.max_rotation_angle_rad: float = 0.0  # Maximum Rotation angle in radians (dphi)
+        self.conformational_move_prob: float = 0.3  # Probability of conformational move vs rigid-body move
+        self.max_dihedral_angle_rad: float = np.pi / 3  # Maximum dihedral rotation angle (60 degrees)
         self.ia: int = 0                          # QM program type (1: Gaussian, 2: ORCA, etc.)
         self.alias: str = ""                      # Program alias/executable name (e.g., "g09")
         self.qm_method: Optional[str] = None      # (e.g., "pm3", "hf") - Renamed from hamiltonian for clarity
@@ -1738,6 +1740,191 @@ def write_accepted_xyz(prefix: str, config_number: int, energy: float, temp: flo
                 state=state 
             )
 
+# 14.5. Dihedral Rotation Functions for Conformational Sampling
+def rotate_around_bond(coords: np.ndarray, atom1_idx: int, atom2_idx: int, 
+                      moving_atoms: List[int], angle_rad: float) -> np.ndarray:
+    """
+    Rotates a set of atoms around a bond defined by atom1_idx and atom2_idx.
+    
+    Args:
+        coords: Atomic coordinates array (N x 3)
+        atom1_idx: Index of first atom defining the rotation axis
+        atom2_idx: Index of second atom defining the rotation axis  
+        moving_atoms: List of atom indices that will be rotated
+        angle_rad: Rotation angle in radians
+    
+    Returns:
+        Modified coordinates array
+    """
+    new_coords = np.copy(coords)
+    
+    # Define rotation axis vector
+    axis_vector = coords[atom2_idx] - coords[atom1_idx]
+    axis_length = np.linalg.norm(axis_vector)
+    
+    if axis_length < 1e-6:
+        # Atoms are too close, skip rotation
+        return new_coords
+    
+    # Normalize axis vector
+    axis_unit = axis_vector / axis_length
+    
+    # Rotation point (we'll use atom1 as the rotation center)
+    rotation_center = coords[atom1_idx]
+    
+    # Rodrigues' rotation formula
+    cos_angle = np.cos(angle_rad)
+    sin_angle = np.sin(angle_rad)
+    
+    for atom_idx in moving_atoms:
+        if atom_idx == atom1_idx or atom_idx == atom2_idx:
+            continue  # Don't rotate the atoms defining the axis
+            
+        # Vector from rotation center to atom
+        point_vector = coords[atom_idx] - rotation_center
+        
+        # Apply Rodrigues' rotation formula
+        rotated_vector = (point_vector * cos_angle + 
+                         np.cross(axis_unit, point_vector) * sin_angle +
+                         axis_unit * np.dot(axis_unit, point_vector) * (1 - cos_angle))
+        
+        new_coords[atom_idx] = rotation_center + rotated_vector
+    
+    return new_coords
+
+def find_rotatable_bonds(mol_coords: np.ndarray, mol_atomic_numbers: List[int], 
+                        state: SystemState) -> List[Tuple[int, int, List[int]]]:
+    """
+    Identifies rotatable bonds in a molecule and determines which atoms move with each rotation.
+    
+    Returns:
+        List of tuples: (atom1_idx, atom2_idx, [moving_atom_indices])
+    """
+    rotatable_bonds = []
+    n_atoms = len(mol_atomic_numbers)
+    
+    # Simple bond detection based on distance (could be improved with connectivity)
+    for i in range(n_atoms):
+        for j in range(i + 1, n_atoms):
+            distance = np.linalg.norm(mol_coords[j] - mol_coords[i])
+            
+            # Get atomic radii for bond length estimation
+            radius_i = state.R_ATOM.get(mol_atomic_numbers[i], 1.5)
+            radius_j = state.R_ATOM.get(mol_atomic_numbers[j], 1.5)
+            max_bond_length = (radius_i + radius_j) * 1.3  # 30% tolerance
+            
+            if distance < max_bond_length:
+                # This looks like a bond
+                # For single bonds (excluding terminal bonds), consider as rotatable
+                if (mol_atomic_numbers[i] != 1 and mol_atomic_numbers[j] != 1):  # Not H-X bonds
+                    # Find which atoms would move if we rotate around this bond
+                    # Simple approach: atoms connected to atom j (and beyond) move
+                    moving_atoms = find_connected_atoms(j, i, mol_coords, mol_atomic_numbers, state)
+                    
+                    if len(moving_atoms) > 0 and len(moving_atoms) < n_atoms - 2:
+                        # Valid rotatable bond (not terminal, not all atoms)
+                        rotatable_bonds.append((i, j, moving_atoms))
+    
+    return rotatable_bonds
+
+def find_connected_atoms(start_atom: int, exclude_atom: int, mol_coords: np.ndarray, 
+                        mol_atomic_numbers: List[int], state: SystemState) -> List[int]:
+    """
+    Find all atoms connected to start_atom, excluding the path through exclude_atom.
+    Uses depth-first search to find the molecular fragment.
+    """
+    n_atoms = len(mol_atomic_numbers)
+    visited = set([exclude_atom])  # Don't cross back through the bond
+    to_visit = [start_atom]
+    connected = []
+    
+    while to_visit:
+        current = to_visit.pop()
+        if current in visited:
+            continue
+            
+        visited.add(current)
+        connected.append(current)
+        
+        # Find neighbors of current atom
+        for neighbor in range(n_atoms):
+            if neighbor in visited:
+                continue
+                
+            distance = np.linalg.norm(mol_coords[neighbor] - mol_coords[current])
+            radius_curr = state.R_ATOM.get(mol_atomic_numbers[current], 1.5)
+            radius_neigh = state.R_ATOM.get(mol_atomic_numbers[neighbor], 1.5)
+            max_bond_length = (radius_curr + radius_neigh) * 1.3
+            
+            if distance < max_bond_length:
+                to_visit.append(neighbor)
+    
+    # Remove the start_atom itself from the moving atoms list
+    if start_atom in connected:
+        connected.remove(start_atom)
+    
+    return connected
+
+def propose_conformational_move(state: SystemState, current_rp: np.ndarray, 
+                               current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
+    """
+    Proposes a conformational change by rotating around a randomly selected rotatable bond.
+    Returns the new full system coordinates, the coordinates of the moved molecule,
+    the index of the moved molecule, and the move type.
+    """
+    # Randomly select a molecule
+    molecule_idx = np.random.randint(0, state.num_molecules)
+    
+    start_atom_idx = current_imolec[molecule_idx] 
+    end_atom_idx = current_imolec[molecule_idx + 1]
+    
+    # Get molecule coordinates and atomic numbers
+    mol_coords = current_rp[start_atom_idx:end_atom_idx, :]
+    mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
+    
+    # Find rotatable bonds in this molecule
+    rotatable_bonds = find_rotatable_bonds(mol_coords, mol_atomic_numbers, state)
+    
+    if not rotatable_bonds:
+        # No rotatable bonds found, fall back to rigid-body move
+        return propose_move(state, current_rp, current_imolec)
+    
+    # Randomly select a rotatable bond
+    bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
+    
+    # Generate random rotation angle (e.g., ±60 degrees max)
+    max_rotation = np.pi / 3  # 60 degrees
+    rotation_angle = (np.random.rand() - 0.5) * 2.0 * max_rotation
+    
+    # Apply rotation to molecule coordinates
+    new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
+                                       moving_atoms, rotation_angle)
+    
+    # Create new full system coordinates
+    proposed_rp_full_system = np.copy(current_rp)
+    proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = new_mol_coords
+    
+    return proposed_rp_full_system, new_mol_coords, molecule_idx, "conformational"
+
+def propose_unified_move(state: SystemState, current_rp: np.ndarray, 
+                        current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
+    """
+    Proposes either a conformational move or a rigid-body move based on probability.
+    This function provides the enhanced Monte Carlo sampling that includes 
+    intramolecular conformational changes.
+    """
+    if np.random.rand() < state.conformational_move_prob:
+        # Attempt conformational move
+        try:
+            return propose_conformational_move(state, current_rp, current_imolec)
+        except Exception as e:
+            # Fall back to rigid-body move if conformational move fails
+            _print_verbose(f"Conformational move failed, falling back to rigid-body: {e}", 2, state)
+            return propose_move(state, current_rp, current_imolec)
+    else:
+        # Rigid-body move (translation + rotation)
+        return propose_move(state, current_rp, current_imolec)
+
 # 15. Propose Move Function (No longer used for full system randomization in annealing)
 # Keeping this function definition for reference if a future iterative single-molecule
 # movement strategy is desired.
@@ -1977,11 +2164,47 @@ def config_move(state: SystemState):
             # Create a temporary array for relative coordinates of the *current molecule*
             mol_rel_coords_temp = proposed_rp[mol_start_idx:mol_end_idx, :] - current_mol_rcm
             
-            # Apply translation and rotation to this molecule within the proposed_rp/rcm
-            # Note: trans and rotac modify proposed_rp (for the selected molecule's atoms)
-            # and proposed_rcm (for the selected molecule's CM) in place.
-            trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
-            rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state) 
+            # Decide whether to apply conformational move or rigid-body move
+            if np.random.rand() < state.conformational_move_prob:
+                # Apply conformational move (dihedral rotation)
+                try:
+                    mol_coords = proposed_rp[mol_start_idx:mol_end_idx, :]
+                    rotatable_bonds = find_rotatable_bonds(mol_coords, mol_atomic_numbers, state)
+                    
+                    if rotatable_bonds:
+                        # Randomly select a rotatable bond
+                        bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
+                        
+                        # Generate random rotation angle
+                        rotation_angle = (np.random.rand() - 0.5) * 2.0 * state.max_dihedral_angle_rad
+                        
+                        # Apply rotation to molecule coordinates
+                        new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
+                                                           moving_atoms, rotation_angle)
+                        
+                        # Update proposed coordinates
+                        proposed_rp[mol_start_idx:mol_end_idx, :] = new_mol_coords
+                        
+                        # Recalculate center of mass after conformational change
+                        proposed_rcm[imo, :] = calculate_mass_center(new_mol_coords, mol_masses)
+                        
+                        _print_verbose(f"  Applied conformational move to molecule {imo+1}", 2, state)
+                    else:
+                        # No rotatable bonds, apply rigid-body move instead
+                        trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
+                        rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state)
+                        
+                except Exception as e:
+                    # If conformational move fails, fall back to rigid-body move
+                    _print_verbose(f"  Conformational move failed for molecule {imo+1}, using rigid-body: {e}", 2, state)
+                    trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
+                    rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state)
+            else:
+                # Apply traditional rigid-body move (translation and rotation)
+                # Note: trans and rotac modify proposed_rp (for the selected molecule's atoms)
+                # and proposed_rcm (for the selected molecule's CM) in place.
+                trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
+                rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state) 
 
         # Now, check for collisions in the *entire proposed configuration*
         collision_detected = False
@@ -5692,6 +5915,10 @@ def main_ascec_integrated():
     parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
     parser.add_argument("--nosum", action="store_true", help="Skip summary creation in sort command.")
     parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
+    parser.add_argument("--conformational", type=float, default=0.3, 
+                       help="Probability of conformational moves (0.0-1.0). Default: 0.3 (30%% of moves will be conformational)")
+    parser.add_argument("--maxdihedral", type=float, default=60.0,
+                       help="Maximum dihedral rotation angle in degrees for conformational moves. Default: 60.0")
     
     # Use parse_known_args to handle shell expansion gracefully
     args, unknown_args = parser.parse_known_args()
@@ -5856,6 +6083,10 @@ def main_ascec_integrated():
         state.verbosity_level = 0 # Default minimal output
     
     state.use_standard_metropolis = args.standard # Set the flag in state
+    
+    # Handle conformational sampling parameters
+    state.conformational_move_prob = max(0.0, min(1.0, args.conformational))  # Clamp to [0,1]
+    state.max_dihedral_angle_rad = np.radians(args.maxdihedral)  # Convert degrees to radians
     
     # Handle --nobox flag to disable box XYZ file creation
     global CREATE_BOX_XYZ_COPY
@@ -6023,6 +6254,14 @@ def main_ascec_integrated():
                     preserve_last_qm_files(state, run_dir)
                     
                     _print_verbose(f"  Calculation successful. Energy: {state.current_energy:.8f} a.u.\n", 0, state) # Modified print
+                    
+                    # Print conformational sampling information
+                    if state.conformational_move_prob > 0.0:
+                        _print_verbose(f"Conformational sampling enabled: {state.conformational_move_prob*100:.1f}% of moves will be conformational", 0, state)
+                        _print_verbose(f"Maximum dihedral rotation angle: {np.degrees(state.max_dihedral_angle_rad):.1f} degrees", 0, state)
+                    else:
+                        _print_verbose("Conformational sampling disabled (only rigid-body moves)", 0, state)
+                    
                     _print_verbose("\nStarting annealing simulation...\n", 0, state)
                     initial_qm_calculation_succeeded = True
                     state.total_accepted_configs += 1 # Increment for initial accepted config
