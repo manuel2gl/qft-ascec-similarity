@@ -3878,6 +3878,110 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
             return []
 
 
+def extract_qm_executable_from_launcher(launcher_content: str, qm_program: str) -> str:
+    """
+    Extract the QM executable path from the launcher template.
+    
+    Args:
+        launcher_content (str): Content of the launcher template
+        qm_program (str): QM program name ('orca' or 'gaussian')
+    
+    Returns:
+        str: The executable path or command to use
+    """
+    if not launcher_content:
+        # Fallback to bare commands if no launcher content provided
+        if qm_program == 'orca':
+            return "orca"
+        else:  # gaussian
+            return "g16"
+    
+    lines = launcher_content.split('\n')
+    
+    if qm_program == 'orca':
+        # Look for ORCA root definitions - enhanced patterns to catch custom variable names
+        orca_root_patterns = [
+            r'export\s+(ORCA\d*_ROOT)\s*=\s*(.+)',  # ORCA5_ROOT, ORCA66_ROOT, etc.
+            r'export\s+(ORCA_ROOT)\s*=\s*(.+)',     # Standard ORCA_ROOT
+            r'(ORCA\d*_ROOT)\s*=\s*(.+)',           # Without export
+            r'(ORCA_ROOT)\s*=\s*(.+)',              # Without export
+        ]
+        
+        orca_root_var = None
+        orca_in_path = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Check if ORCA is added to PATH
+            if 'PATH=' in line and 'ORCA' in line:
+                orca_in_path = True
+            
+            # Look for ORCA root variable definitions
+            for pattern in orca_root_patterns:
+                import re
+                match = re.search(pattern, line)
+                if match:
+                    var_name = match.group(1)  # e.g., ORCA66_ROOT, ORCA5_ROOT
+                    orca_root = match.group(2).strip().strip('"\'')
+                    
+                    # Handle variable expansion like $ORCA_BASE/orca_5_0_4
+                    if '$' in orca_root:
+                        # For complex paths, use the variable as-is and let shell expand
+                        orca_root_var = f"${var_name}/orca"
+                    else:
+                        # Direct path
+                        orca_root_var = f"{orca_root}/orca"
+                    break
+        
+        # Return the found root variable, or use 'orca' if it's in PATH
+        if orca_root_var:
+            return orca_root_var
+        elif orca_in_path:
+            return "orca"
+        else:
+            # Default fallback
+            return "orca"
+        
+    else:  # gaussian
+        # Look for Gaussian root definitions
+        gaussian_root_patterns = [
+            r'export\s+G16_ROOT\s*=\s*(.+)',
+            r'export\s+G09_ROOT\s*=\s*(.+)',
+            r'export\s+GAUSS_EXEDIR\s*=\s*(.+)',
+            r'G16_ROOT\s*=\s*(.+)',
+            r'G09_ROOT\s*=\s*(.+)',
+        ]
+        
+        gaussian_in_path = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            # Check if Gaussian is in PATH
+            if 'PATH=' in line and ('G16' in line or 'G09' in line or 'gaussian' in line.lower()):
+                gaussian_in_path = True
+            
+            # Look for Gaussian root variable definitions
+            for pattern in gaussian_root_patterns:
+                import re
+                match = re.search(pattern, line)
+                if match:
+                    gauss_root = match.group(1).strip().strip('"\'')
+                    if '$' in gauss_root:
+                        if 'G16_ROOT' in line:
+                            return "$G16_ROOT/g16"
+                        elif 'G09_ROOT' in line:
+                            return "$G09_ROOT/g09"
+                        else:
+                            return "$GAUSS_EXEDIR/g16"
+                    else:
+                        return f"{gauss_root}/g16"
+        
+        # If Gaussian appears to be in PATH or no specific root found, use bare command
+        return "g16"
+
+
 def create_simple_calculation_system(template_file: str, launcher_template: str = None) -> str:
     """
     Creates a calculation system by looking for result_*.xyz, combined_results.xyz, or combined_r*.xyz files
@@ -3910,7 +4014,7 @@ def create_simple_calculation_system(template_file: str, launcher_template: str 
     if not os.path.exists(template_file):
         return f"Error: Template file '{template_file}' not found."
     
-    if not os.path.exists(launcher_template):
+    if launcher_template and not os.path.exists(launcher_template):
         return f"Error: Launcher template '{launcher_template}' not found."
     
     # Read template content
@@ -3920,11 +4024,14 @@ def create_simple_calculation_system(template_file: str, launcher_template: str 
     except IOError as e:
         return f"Error reading template file '{template_file}': {e}"
     
-    try:
-        with open(launcher_template, 'r') as f:
-            launcher_content = f.read()
-    except IOError as e:
-        return f"Error reading launcher template '{launcher_template}': {e}"
+    # Read launcher template if provided
+    launcher_content = None
+    if launcher_template:
+        try:
+            with open(launcher_template, 'r') as f:
+                launcher_content = f.read()
+        except IOError as e:
+            return f"Error reading launcher template '{launcher_template}': {e}"
     
     # Create calculation directory with incremental numbering
     def get_next_calc_dir():
@@ -4060,109 +4167,123 @@ def create_simple_calculation_system(template_file: str, launcher_template: str 
     if not all_input_files:
         return "No input files were created successfully."
     
-    # Create launcher script
-    launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
-    
-    try:
-        # Group commands by run number
-        run_groups = {}
-        for input_file in all_input_files:
-            # Extract run number from filename
-            if input_file.startswith("opt_conf_"):
-                run_num = 0  # For combined_results files (opt_conf_X.inp)
-            elif input_file.startswith("opt") and "_conf_" in input_file:
-                run_num = int(input_file.split("_")[0][3:])  # Extract number from "optX_conf_Y.inp"
-            else:
-                run_num = 0  # Default fallback
-            
-            if run_num not in run_groups:
-                run_groups[run_num] = []
-            
-            output_file = input_file.replace(input_ext, output_ext)
-            if qm_program == 'orca':
-                cmd = f"$ORCA5_ROOT/orca {input_file} > {output_file}"
-            else:  # gaussian
-                cmd = f"$G16_ROOT/g16 {input_file} {output_file}"
-            run_groups[run_num].append(cmd)
+    # Create launcher script only if template is provided
+    if launcher_template and launcher_content:
+        launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
         
-        # Sort run groups and commands within each group
-        sorted_runs = sorted(run_groups.keys())
-        for run_num in sorted_runs:
-            # Sort commands numerically by configuration number
-            def extract_conf_number(cmd):
-                import re
-                # Extract number from opt_conf_X.inp or optY_conf_X.inp
-                match = re.search(r'_conf_(\d+)\.inp', cmd)
-                return int(match.group(1)) if match else 0
+        try:
+            # Group commands by run number
+            run_groups = {}
             
-            run_groups[run_num].sort(key=extract_conf_number)
-        
-        # Write launcher script
-        with open(launcher_path, 'w') as f:
-            # Process launcher template content to handle ### separator
-            launcher_lines = launcher_content.rstrip().split('\n')
-            separator_found = False
+            # Extract QM executable path from launcher template
+            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program)
+            print(f"Using QM executable: {qm_executable}")
             
-            # Write everything up to the ### separator
-            for line in launcher_lines:
-                if line.strip() == '###':
-                    separator_found = True
-                    f.write(line + "\n")
-                    f.write("\n")  # Add blank line after separator
-                    f.write("# Run QM using the full path\n")  # Add the comment as requested
-                    break
+            for input_file in all_input_files:
+                # Extract run number from filename
+                if input_file.startswith("opt_conf_"):
+                    run_num = 0  # For combined_results files (opt_conf_X.inp)
+                elif input_file.startswith("opt") and "_conf_" in input_file:
+                    run_num = int(input_file.split("_")[0][3:])  # Extract number from "optX_conf_Y.inp"
                 else:
-                    # Skip existing ORCA commands (example commands to be replaced)
-                    if '$ORCA5_ROOT/orca' in line and '.inp' in line:
-                        continue
-                    # Also skip lines that are just '&&' continuation from removed commands
-                    if line.strip() == '&&' or line.strip() == '&& \\':
-                        continue
-                    f.write(line + "\n")
-            
-            # If no ### separator found, add it
-            if not separator_found:
-                f.write("\n###\n\n")
-                f.write("# Run QM using the full path\n")
-            
-            # Write grouped commands with separators
-            for i, run_num in enumerate(sorted_runs):
-                commands = run_groups[run_num]
+                    run_num = 0  # Default fallback
                 
-                # Write commands for this run
-                for j, cmd in enumerate(commands):
-                    f.write(cmd)
-                    if j < len(commands) - 1:
-                        f.write(" && \\\n")
+                if run_num not in run_groups:
+                    run_groups[run_num] = []
+                
+                output_file = input_file.replace(input_ext, output_ext)
+                if qm_program == 'orca':
+                    cmd = f"{qm_executable} {input_file} > {output_file}"
+                else:  # gaussian
+                    cmd = f"{qm_executable} {input_file} {output_file}"
+                run_groups[run_num].append(cmd)
+            
+            # Sort run groups and commands within each group
+            sorted_runs = sorted(run_groups.keys())
+            for run_num in sorted_runs:
+                # Sort commands numerically by configuration number
+                def extract_conf_number(cmd):
+                    import re
+                    # Extract number from opt_conf_X.inp or optY_conf_X.inp
+                    match = re.search(r'_conf_(\d+)\.inp', cmd)
+                    return int(match.group(1)) if match else 0
+                
+                run_groups[run_num].sort(key=extract_conf_number)
+            
+            # Write launcher script
+            with open(launcher_path, 'w') as f:
+                # Process launcher template content to handle ### separator
+                launcher_lines = launcher_content.rstrip().split('\n')
+                separator_found = False
+                
+                # Write everything up to the ### separator
+                for line in launcher_lines:
+                    if line.strip() == '###':
+                        separator_found = True
+                        f.write(line + "\n")
+                        f.write("\n")  # Add blank line after separator
+                        f.write("# Run QM using the full path\n")  # Add the comment as requested
+                        break
                     else:
-                        f.write(" && \\\n")  # End this run group with &&
+                        # Skip existing ORCA commands (example commands to be replaced)
+                        if '$ORCA5_ROOT/orca' in line and '.inp' in line:
+                            continue
+                        # Also skip lines that are just '&&' continuation from removed commands
+                        if line.strip() == '&&' or line.strip() == '&& \\':
+                            continue
+                        f.write(line + "\n")
                 
-                # Add separator between run groups (except after the last group)
-                if i < len(sorted_runs) - 1:
-                    f.write("###\n")
+                # If no ### separator found, add it
+                if not separator_found:
+                    f.write("\n###\n\n")
+                    f.write("# Run QM using the full path\n")
+                
+                # Write grouped commands with separators
+                for i, run_num in enumerate(sorted_runs):
+                    commands = run_groups[run_num]
+                    
+                    # Write commands for this run
+                    for j, cmd in enumerate(commands):
+                        f.write(cmd)
+                        if j < len(commands) - 1:
+                            f.write(" && \\\n")
+                        else:
+                            f.write(" && \\\n")  # End this run group with &&
+                    
+                    # Add separator between run groups (except after the last group)
+                    if i < len(sorted_runs) - 1:
+                        f.write("###\n")
+                
+                # Remove the trailing " && \" from the last command and add final newline
+                f.seek(f.tell() - 5)  # Go back to remove " && \"
+                f.write("\n")
+                f.truncate()  # Remove any content after the current position
             
-            # Remove the trailing " && \" from the last command and add final newline
-            f.seek(f.tell() - 5)  # Go back to remove " && \"
-            f.write("\n")
-            f.truncate()  # Remove any content after the current position
-        
-        # Make launcher executable
-        os.chmod(launcher_path, 0o755)
-        
+            # Make launcher executable
+            os.chmod(launcher_path, 0o755)
+            
+            print(f"\nCreated calculation system in '{calc_dir}' directory:")
+            print(f"  Input files: {len(all_input_files)}")
+            print(f"  Launcher script: launcher_{qm_program}.sh")
+            print(f"\nTo run all calculations, use:")
+            print(f"  cd {calc_dir}")
+            print(f"  ./launcher_{qm_program}.sh")
+            
+            return f"Successfully created calculation system with {len(all_input_files)} input files."
+            
+        except IOError as e:
+            return f"Error creating launcher script: {e}"
+    else:
+        # No launcher template provided - just create input files
         print(f"\nCreated calculation system in '{calc_dir}' directory:")
         print(f"  Input files: {len(all_input_files)}")
-        print(f"  Launcher script: launcher_{qm_program}.sh")
-        print(f"\nTo run all calculations, use:")
-        print(f"  cd {calc_dir}")
-        print(f"  ./launcher_{qm_program}.sh")
+        print("\nInput files created without launcher script.")
+        print("To run calculations manually, use appropriate QM program commands in the calculation directory.")
         
-        return f"Successfully created calculation system with {len(all_input_files)} input files."
-        
-    except IOError as e:
-        return f"Error creating launcher script: {e}"
+        return f"Successfully created calculation system with {len(all_input_files)} input files (input files only)."
 
 
-def create_optimization_system(template_file: str, launcher_template: str) -> str:
+def create_optimization_system(template_file: str, launcher_template: str = None) -> str:
     """
     Creates an optimization system by looking for files with 'combined' in their name 
     (like all_motifs_combined.xyz) and motif_*.xyz files.
@@ -4177,7 +4298,7 @@ def create_optimization_system(template_file: str, launcher_template: str) -> st
     if not os.path.exists(template_file):
         return f"Error: Template file '{template_file}' not found."
     
-    if not os.path.exists(launcher_template):
+    if launcher_template and not os.path.exists(launcher_template):
         return f"Error: Launcher template '{launcher_template}' not found."
     
     # Determine calculation directory name
@@ -4226,7 +4347,7 @@ def create_optimization_system(template_file: str, launcher_template: str) -> st
         return "No files selected for optimization. Operation cancelled."
     
     # Determine QM program and file extension from template
-    if template_file.lower().endswith(('.inp', '.in')):
+    if template_file.lower().endswith('.inp'):
         qm_program = "orca"
         input_ext = ".inp"
     elif template_file.lower().endswith('.com'):
@@ -4266,14 +4387,18 @@ def create_optimization_system(template_file: str, launcher_template: str) -> st
             comment = config['comment']
             motif_match = re.search(r'[Mm]otif_(\d+)', comment)
             
+            # If not found in comment, try to extract from filename
+            if not motif_match:
+                motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
+            
             if motif_match:
-                # Use motif name from comment (convert to lowercase)
-                motif_num = motif_match.group(1)
+                # Use motif name from comment or filename
+                motif_num = int(motif_match.group(1))
                 input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
                 source_name = f"motif_{motif_num:0>2}"
             else:
-                # Fallback to original logic for non-motif files
-                input_name = f"{base_name}_conf_{config['config_num']}{input_ext}"
+                # For non-motif files, use simple opt_conf_X naming
+                input_name = f"opt_conf_{config['config_num']}{input_ext}"
                 source_name = base_name
             
             input_path = os.path.join(opt_dir, input_name)
@@ -4291,60 +4416,65 @@ def create_optimization_system(template_file: str, launcher_template: str) -> st
     if not all_input_files:
         return "No input files were created successfully."
     
-    # Create launcher script
-    launcher_path = os.path.join(opt_dir, f"launcher_{qm_program}.sh")
-    
-    try:
-        # Read launcher template
-        with open(launcher_template, 'r') as f:
-            launcher_content = f.read()
+    # Create launcher script only if template is provided
+    if launcher_template:
+        launcher_path = os.path.join(opt_dir, f"launcher_{qm_program}.sh")
         
-        # Process launcher template content to handle ### separator
-        launcher_lines = launcher_content.split('\n')
-        header_lines = []
-        found_separator = False
-        
-        # Write everything up to the ### separator
-        for line in launcher_lines:
-            if line.strip() == '###':
-                found_separator = True
-                break
-            header_lines.append(line)
-        
-        with open(launcher_path, 'w') as f:
-            # Write header
-            for line in header_lines:
-                f.write(line + '\n')
+        try:
+            # Read launcher template
+            with open(launcher_template, 'r') as f:
+                launcher_content = f.read()
             
-            # Add separator if it wasn't found in template
-            if not found_separator:
-                f.write("\n###\n\n")
+            # Process launcher template content to handle ### separator
+            launcher_lines = launcher_content.split('\n')
+            header_lines = []
+            found_separator = False
             
-            # Add commands for all input files
-            for i, input_file in enumerate(all_input_files):
-                # Create output filename by replacing extension
-                if qm_program == "gaussian":
-                    # Handle both .com and .gjf extensions
-                    if input_file.endswith('.com'):
-                        output_file = input_file.replace('.com', '.log')
-                    elif input_file.endswith('.gjf'):
-                        output_file = input_file.replace('.gjf', '.log')
-                    else:
-                        output_file = input_file + '.log'  # fallback
-                    command = f"g16 {input_file}"
-                else:
-                    output_file = input_file.replace('.inp', '.out')
-                    command = f"orca {input_file} > {output_file}"
+            # Write everything up to the ### separator
+            for line in launcher_lines:
+                if line.strip() == '###':
+                    found_separator = True
+                    break
+                header_lines.append(line)
+            
+            # Extract QM executable path from launcher template
+            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program)
+            print(f"Using QM executable: {qm_executable}")
+            
+            with open(launcher_path, 'w') as f:
+                # Write header
+                for line in header_lines:
+                    f.write(line + '\n')
                 
-                if i < len(all_input_files) - 1:
-                    f.write(f"{command} && \\\n")
-                else:
-                    f.write(f"{command}\n")
-        
-        # Make launcher executable
-        os.chmod(launcher_path, 0o755)
-        
-        return f"""Optimization system created successfully in '{opt_dir}':
+                # Always add separator and comment line
+                f.write("\n###\n\n")
+                f.write("# Run QM using the full path \n\n")
+                
+                # Add commands for all input files
+                for i, input_file in enumerate(all_input_files):
+                    # Create output filename by replacing extension
+                    if qm_program == "gaussian":
+                        # Handle both .com and .gjf extensions
+                        if input_file.endswith('.com'):
+                            output_file = input_file.replace('.com', '.log')
+                        elif input_file.endswith('.gjf'):
+                            output_file = input_file.replace('.gjf', '.log')
+                        else:
+                            output_file = input_file + '.log'  # fallback
+                        command = f"{qm_executable} {input_file} {output_file}"
+                    else:
+                        output_file = input_file.replace('.inp', '.out')
+                        command = f"{qm_executable} {input_file} > {output_file}"
+                    
+                    if i < len(all_input_files) - 1:
+                        f.write(f"{command} && \\\n")
+                    else:
+                        f.write(f"{command}\n")
+            
+            # Make launcher executable
+            os.chmod(launcher_path, 0o755)
+            
+            return f"""Optimization system created successfully in '{opt_dir}':
 - Input files: {len(all_input_files)} files
 - Launcher script: {os.path.basename(launcher_path)}
 - Total configurations: {len(all_input_files)}
@@ -4353,9 +4483,18 @@ To run the calculations:
 cd {opt_dir}
 ./{os.path.basename(launcher_path)}
 """
-        
-    except IOError as e:
-        return f"Error creating launcher script: {e}"
+            
+        except IOError as e:
+            return f"Error creating launcher script: {e}"
+    else:
+        # No launcher template provided - just create input files
+        return f"""Optimization system created successfully in '{opt_dir}':
+- Input files: {len(all_input_files)} files
+- Total configurations: {len(all_input_files)}
+
+Input files created without launcher script.
+To run calculations manually, use appropriate QM program commands in the {opt_dir} directory.
+"""
 
 
 def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
