@@ -311,6 +311,7 @@ class SystemState:
         self.dphi: float = 0.0                    # Max rotation angle (synced with max_rotation_angle_rad)
         self.last_accepted_qm_call_count: int = 0 # Stores qm_call_count at last accepted configuration for history
         self.total_accepted_configs: int = 0      # Counter for total accepted configurations written to XYZ
+        self.lower_energy_configs: int = 0        # Counter for configurations with lower energy than previous lowest
         self.consecutive_na_steps: int = 0        # Counter for consecutive N/A steps in annealing
         
         # New variable to track the global QM call count at the last history line written
@@ -6405,6 +6406,7 @@ def main_ascec_integrated():
                     state.lowest_energy_rp = np.copy(state.rp) # Store initial lowest energy coords
                     state.lowest_energy_iznu = list(state.iznu) # Store initial lowest energy atomic numbers
                     state.lowest_energy_config_idx = 1 # Initial config is always config 1
+                    state.lower_energy_configs = 1 # Initial config counts as the first lower energy config
                     
                     # Preserve QM files from the initial accepted configuration for debugging
                     preserve_last_qm_files(state, run_dir)
@@ -6593,6 +6595,7 @@ def main_ascec_integrated():
                     if delta_e <= 0.0: # If proposed energy is lower or equal, always accept
                         accept_move = True
                         criterion_str = "LwE" 
+                        state.lower_energy_configs += 1  # Increment counter for lower energy configs 
                     else: # If proposed energy is higher, apply Metropolis criterion
                         # Ensure temperature is not zero for division
                         if state.current_temp < 1e-6: 
@@ -6604,6 +6607,7 @@ def main_ascec_integrated():
                             if random.random() < pE:
                                 accept_move = True
                                 criterion_str = "Mpol"
+                                state.iboltz += 1
                         else: # Modified Metropolis (default)
                             # Handle division by zero for crt (if proposed_energy is zero)
                             if abs(proposed_energy) < 1e-12: # Avoid division by near-zero energy
@@ -6637,7 +6641,7 @@ def main_ascec_integrated():
                             state.lowest_energy = state.current_energy
                             state.lowest_energy_rp = np.copy(state.rp) 
                             state.lowest_energy_iznu = list(state.iznu) 
-                            state.lowest_energy_config_idx = state.qm_call_count 
+                            state.lowest_energy_config_idx = state.total_accepted_configs + 1 # Will be the number of this accepted config
                             _print_verbose(f"  New lowest energy found: {state.lowest_energy:.8f} a.u. (Config {state.lowest_energy_config_idx})", 1, state)
                         
                         # Calculate n-eval for .out history: QM calls since last history entry
@@ -6731,6 +6735,7 @@ def main_ascec_integrated():
                 out_file_handle_local.write(f"  Energy was evaluated {state.qm_call_count} times\n\n")
                 out_file_handle_local.write(f"Energy evolution in {tvse_filename}\n")
                 out_file_handle_local.write(f"Configurations accepted by Max.-Boltz. statistics = {state.iboltz}\n")
+                out_file_handle_local.write(f"Accepted lower energy configurations = {state.lower_energy_configs}\n")
                 # Updated to include total accepted configurations
                 out_file_handle_local.write(f"Accepted configurations in {xyz_filename_base}.xyz = {state.total_accepted_configs}\n") 
                 out_file_handle_local.write(f"Lowest energy configuration in {rless_filename}\n")
