@@ -1724,43 +1724,57 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 with open(cache_file_path, 'rb') as f:
                     cached_data = pickle.load(f)
                 
+                # Handle both old format (list) and new format (dict with 'successful' and 'skipped')
+                if isinstance(cached_data, list):
+                    # Old format - assume all were successful, no skipped info
+                    successful_data = cached_data
+                    skipped_files = set()
+                elif isinstance(cached_data, dict) and 'successful' in cached_data:
+                    # New format with skipped file tracking
+                    successful_data = cached_data['successful']
+                    skipped_files = set(cached_data.get('skipped', []))
+                else:
+                    # Unknown format
+                    raise ValueError("Unknown cache format")
+                
                 current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(input_source, file_extension_pattern))}
-                retained_cached_data = [d for d in cached_data if d['filename'] in current_files_in_folder]
+                retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
                 
-                vprint(f"  Cache contains {len(cached_data)} entries")
+                # Files that were processed (either successfully or skipped)
+                processed_files = {d['filename'] for d in successful_data} | skipped_files
+                unprocessed_files = current_files_in_folder - processed_files
+                
+                vprint(f"  Cache contains {len(successful_data)} successful entries and {len(skipped_files)} skipped files")
                 vprint(f"  Current folder has {len(current_files_in_folder)} files")
-                vprint(f"  Retained cache entries: {len(retained_cached_data)}")
+                vprint(f"  Unprocessed files: {len(unprocessed_files)}")
                 
-                if len(retained_cached_data) == len(current_files_in_folder):
+                if len(unprocessed_files) == 0:
+                    # All files have been processed before
                     all_extracted_data = retained_cached_data
                     vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
                     print_step("Using cached data")
                 else:
-                    # Check if the difference might be due to skipped files with imaginary frequencies
-                    # Instead of immediately invalidating cache, try to use what we have if it seems reasonable
-                    if len(retained_cached_data) > 0 and len(retained_cached_data) <= len(current_files_in_folder):
-                        # Use cached data but also check for new files that might need processing
-                        cached_filenames = {d['filename'] for d in retained_cached_data}
-                        missing_files = current_files_in_folder - cached_filenames
-                        
-                        if missing_files:
-                            vprint(f"  Cache incomplete: missing {len(missing_files)} files. Will process missing files only.")
-                            all_extracted_data = retained_cached_data.copy()
-                        else:
-                            vprint("  Cache appears complete (some files may have been skipped due to imaginary frequencies)")
-                            all_extracted_data = retained_cached_data
-                            print_step("Using cached data")
+                    # Some files haven't been processed yet
+                    if len(retained_cached_data) > 0:
+                        vprint(f"  Cache partial: {len(unprocessed_files)} files need processing")
+                        all_extracted_data = retained_cached_data.copy()
                     else:
                         vprint("Cache data incomplete or outdated. Re-extracting all files.")
                         all_extracted_data = []
+                        skipped_files = set()
                         if os.path.exists(cache_file_path):
                             os.remove(cache_file_path)
 
             except Exception as e:
                 vprint(f"Error loading data from cache: {e}. Re-extracting all files.")
                 all_extracted_data = []
+                skipped_files = set()
                 if os.path.exists(cache_file_path):
                     os.remove(cache_file_path)
+        else:
+            # No cache file exists
+            all_extracted_data = []
+            skipped_files = set()
 
         files_to_process = glob.glob(os.path.join(input_source, file_extension_pattern))
         if not files_to_process:
@@ -1768,21 +1782,24 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             return
 
         # Determine if we need to process any files
-        if not all_extracted_data:
+        cached_filenames = {d['filename'] for d in all_extracted_data}
+        current_filenames = {os.path.basename(f) for f in files_to_process}
+        
+        # Files that have been processed (either successfully extracted or skipped)
+        processed_files = cached_filenames | skipped_files
+        unprocessed_files = current_filenames - processed_files
+        
+        if len(unprocessed_files) == 0:
+            # All files have been processed before
+            files_to_actually_process = []
+        elif not all_extracted_data:
             # No cached data, process all files
             print_step(f"\nExtracting data from {len(files_to_process)} files...")
             files_to_actually_process = files_to_process
         else:
-            # We have some cached data, check if we need to process additional files
-            cached_filenames = {d['filename'] for d in all_extracted_data}
-            current_filenames = {os.path.basename(f) for f in files_to_process}
-            missing_files = current_filenames - cached_filenames
-            
-            if missing_files:
-                print_step(f"\nProcessing {len(missing_files)} new/missing files...")
-                files_to_actually_process = [f for f in files_to_process if os.path.basename(f) in missing_files]
-            else:
-                files_to_actually_process = []
+            # We have some cached data, only process unprocessed files
+            print_step(f"\nProcessing {len(unprocessed_files)} new/unprocessed files...")
+            files_to_actually_process = [f for f in files_to_process if os.path.basename(f) in unprocessed_files]
 
         # Process files if needed
         if files_to_actually_process:
@@ -1791,13 +1808,20 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 extracted_props = extract_properties_from_logfile(file_path)
                 if extracted_props:
                     all_extracted_data.append(extracted_props)
+                else:
+                    # File was skipped (likely due to imaginary frequencies)
+                    skipped_files.add(os.path.basename(file_path))
             
-            # Save updated cache (both existing and new data)
-            if all_extracted_data and not is_compare_mode:
-                vprint(f"Updating cache with {len(all_extracted_data)} total entries: '{os.path.basename(cache_file_path)}'")
+            # Save updated cache with both successful and skipped files
+            if not is_compare_mode:
+                cache_data = {
+                    'successful': all_extracted_data,
+                    'skipped': list(skipped_files)
+                }
+                vprint(f"Updating cache with {len(all_extracted_data)} successful and {len(skipped_files)} skipped entries: '{os.path.basename(cache_file_path)}'")
                 try:
                     with open(cache_file_path, 'wb') as f:
-                        pickle.dump(all_extracted_data, f)
+                        pickle.dump(cache_data, f)
                     vprint("Cache updated successfully.")
                 except Exception as e:
                     vprint(f"  Error updating cache: {e}")
