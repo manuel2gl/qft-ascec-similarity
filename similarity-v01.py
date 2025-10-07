@@ -1949,6 +1949,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     #     summary_file_content_lines.append(f"Applied Absolute Tolerances: {abs_tolerances}")
 
     summary_file_content_lines.append(f"Total configurations processed: {len(clean_data_for_clustering)}")
+    summary_file_content_lines.append(f"Total files skipped: {len(skipped_files)}")
     summary_file_content_lines.append(f"Total number of final clusters: <TOTAL_CLUSTERS_PLACEHOLDER>")
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"Total RMSD moved configurations: <TOTAL_RMSD_OUTLIERS_PLACEHOLDER>")
