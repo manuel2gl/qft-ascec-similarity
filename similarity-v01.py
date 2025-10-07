@@ -1666,8 +1666,20 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     `abs_tolerances` (dict): Dictionary of feature_name: absolute_tolerance. If the max difference
                              for a feature within a group is less than its tolerance, it's zeroed out.
     """
+    # Default weights with reduced vibrational frequency weights
+    default_weights = {
+        'first_vib_freq': 0.0,  # Reduced to 0.0 (0% weight) due to high sensitivity
+        'last_vib_freq': 0.1,   # Reduced to 0.1 (10% weight) due to high sensitivity
+    }
+    
     if weights is None:
-        weights = {} # Ensure weights is a dict even if not provided
+        weights = default_weights.copy() # Use default weights if none provided
+    else:
+        # Merge user weights with defaults, user weights take priority
+        merged_weights = default_weights.copy()
+        merged_weights.update(weights)
+        weights = merged_weights
+    
     if abs_tolerances is None:
         abs_tolerances = {} # Ensure abs_tolerances is a dict if not provided
 
@@ -1715,15 +1727,34 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(input_source, file_extension_pattern))}
                 retained_cached_data = [d for d in cached_data if d['filename'] in current_files_in_folder]
                 
+                vprint(f"  Cache contains {len(cached_data)} entries")
+                vprint(f"  Current folder has {len(current_files_in_folder)} files")
+                vprint(f"  Retained cache entries: {len(retained_cached_data)}")
+                
                 if len(retained_cached_data) == len(current_files_in_folder):
                     all_extracted_data = retained_cached_data
                     vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
                     print_step("Using cached data")
                 else:
-                    vprint("Cache data incomplete or outdated. Re-extracting all files.")
-                    all_extracted_data = []
-                    if os.path.exists(cache_file_path):
-                        os.remove(cache_file_path)
+                    # Check if the difference might be due to skipped files with imaginary frequencies
+                    # Instead of immediately invalidating cache, try to use what we have if it seems reasonable
+                    if len(retained_cached_data) > 0 and len(retained_cached_data) <= len(current_files_in_folder):
+                        # Use cached data but also check for new files that might need processing
+                        cached_filenames = {d['filename'] for d in retained_cached_data}
+                        missing_files = current_files_in_folder - cached_filenames
+                        
+                        if missing_files:
+                            vprint(f"  Cache incomplete: missing {len(missing_files)} files. Will process missing files only.")
+                            all_extracted_data = retained_cached_data.copy()
+                        else:
+                            vprint("  Cache appears complete (some files may have been skipped due to imaginary frequencies)")
+                            all_extracted_data = retained_cached_data
+                            print_step("Using cached data")
+                    else:
+                        vprint("Cache data incomplete or outdated. Re-extracting all files.")
+                        all_extracted_data = []
+                        if os.path.exists(cache_file_path):
+                            os.remove(cache_file_path)
 
             except Exception as e:
                 vprint(f"Error loading data from cache: {e}. Re-extracting all files.")
@@ -1736,22 +1767,40 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             print(f"No files matching '{file_extension_pattern}' found in '{input_source}'. Skipping this folder.")
             return
 
+        # Determine if we need to process any files
         if not all_extracted_data:
+            # No cached data, process all files
             print_step(f"\nExtracting data from {len(files_to_process)} files...")
-            for file_path in sorted(files_to_process):
+            files_to_actually_process = files_to_process
+        else:
+            # We have some cached data, check if we need to process additional files
+            cached_filenames = {d['filename'] for d in all_extracted_data}
+            current_filenames = {os.path.basename(f) for f in files_to_process}
+            missing_files = current_filenames - cached_filenames
+            
+            if missing_files:
+                print_step(f"\nProcessing {len(missing_files)} new/missing files...")
+                files_to_actually_process = [f for f in files_to_process if os.path.basename(f) in missing_files]
+            else:
+                files_to_actually_process = []
+
+        # Process files if needed
+        if files_to_actually_process:
+            for file_path in sorted(files_to_actually_process):
                 vprint(f"  Extracting from: {os.path.basename(file_path)}...")
                 extracted_props = extract_properties_from_logfile(file_path)
                 if extracted_props:
                     all_extracted_data.append(extracted_props)
             
-            if all_extracted_data and not is_compare_mode: # Only save to cache in normal mode
-                vprint(f"Saving extracted data to cache: '{os.path.basename(cache_file_path)}'")
+            # Save updated cache (both existing and new data)
+            if all_extracted_data and not is_compare_mode:
+                vprint(f"Updating cache with {len(all_extracted_data)} total entries: '{os.path.basename(cache_file_path)}'")
                 try:
                     with open(cache_file_path, 'wb') as f:
                         pickle.dump(all_extracted_data, f)
-                    vprint("Data saved to cache successfully.")
+                    vprint("Cache updated successfully.")
                 except Exception as e:
-                    vprint(f"  Error saving data to cache: {e}")
+                    vprint(f"  Error updating cache: {e}")
 
     if not all_extracted_data:
         print_step("No data was successfully extracted from files. Skipping clustering.")
@@ -2219,6 +2268,13 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             
             # Announce clustering start for this group
             print_step(f"\nH-bond group {hbond_count}: Clustering {len(group_data)} configurations...")
+            
+            # Show information about reduced vibrational frequency weights (only once)
+            vib_freq_features = ['first_vib_freq', 'last_vib_freq']
+            reduced_weights = [f for f in vib_freq_features if f in ordered_feature_names_for_scaling and weights.get(f, 1.0) < 1.0]
+            if reduced_weights and hbond_count == sorted(hbond_groups.keys())[0]:  # Only show for first group
+                weight_info = ", ".join([f"{f}: {weights.get(f, 1.0)}" for f in reduced_weights])
+                vprint(f"  NOTE: Using reduced weights for vibrational frequencies ({weight_info}) due to computational sensitivity")
 
             # Convert to numpy array for easier column-wise operations
             features_for_scaling_raw_np = np.array(features_for_scaling_raw, dtype=float)
