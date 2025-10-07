@@ -631,7 +631,13 @@ def extract_properties_from_logfile(logfile_path):
                 if len(data.vibfreqs) > 0 and isinstance(data.vibfreqs[0], (int, float, np.number)):
                     imag_freqs = [freq for freq in data.vibfreqs if freq < 0]
                     real_freqs = [freq for freq in data.vibfreqs if freq > 0]
-                    extracted_props['num_imaginary_freqs'] = len(imag_freqs)
+                    
+                    # Skip files with any imaginary frequencies
+                    if len(imag_freqs) > 0:
+                        print(f"  WARNING: Skipping {os.path.basename(logfile_path)} - contains {len(imag_freqs)} imaginary frequency(ies)")
+                        return None
+                    
+                    extracted_props['num_imaginary_freqs'] = len(imag_freqs)  # Will always be 0 here
                     if real_freqs:
                         extracted_props['first_vib_freq'] = min(real_freqs)
                         extracted_props['last_vib_freq'] = max(real_freqs)
