@@ -4536,7 +4536,7 @@ def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str =
     
     # Create numbered options
     options = {}
-    option_num = 1
+    option_num = 0
     
     # First show combined files
     if combined_files:
