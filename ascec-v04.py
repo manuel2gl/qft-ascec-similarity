@@ -343,6 +343,44 @@ class SystemState:
         self.initial_qm_retries: int = 100 # Number of retries for initial QM calculation, default to 100
         self.verbosity_level: int = 0 # 0: default, 1: --v (every 10 steps), 2: --va (all steps)
         self.use_standard_metropolis: bool = False # Flag for Metropolis criterion
+        
+        # Additional attributes for proper type checking
+        self.input_file_path: str = ""            # Path to the input file
+        self.max_molecular_extent: float = 0.0    # Maximum molecular extent
+        self.num_elements_defined: int = 0        # Number of unique elements defined
+        self.element_types: List[Tuple[int, int]] = []  # List of (atomic_number, count) tuples
+        self.iz_types: List[int] = []             # List of atomic numbers
+        self.nnu_types: List[int] = []            # List of atom counts per element type
+        self.volume_based_recommendations: Dict = {}  # Volume-based box recommendations
+        
+        # Default weights for parameters (can be adjusted manually)
+        # These weights can be modified to change the influence of different parameters
+        # Use command line flags to override specific parameters:
+        # --conformational <value>  : Set conformational move probability (0.0-1.0)
+        # --maxdihedral <degrees>   : Set maximum dihedral rotation angle
+        # --standard               : Use standard Metropolis criterion instead of modified
+        self.default_weights: Dict[str, float] = {
+            'energy_weight': 1.0,                    # Weight for energy evaluation in optimization
+            'geometry_weight': 1.0,                  # Weight for geometric constraints
+            'conformational_weight': 1.0,            # Weight for conformational moves
+            'translation_weight': 1.0,               # Weight for translational moves
+            'rotation_weight': 1.0,                  # Weight for rotational moves
+            'temperature_weight': 1.0,               # Weight for temperature scaling
+            'volume_weight': 1.0,                    # Weight for volume calculations
+            'interaction_weight': 1.0,               # Weight for intermolecular interactions
+            'bond_weight': 1.0,                      # Weight for bond parameters
+            'angle_weight': 1.0,                     # Weight for angle parameters
+            'dihedral_weight': 1.0,                  # Weight for dihedral parameters
+            'vdw_weight': 1.0,                       # Weight for van der Waals interactions
+            'electrostatic_weight': 1.0,             # Weight for electrostatic interactions
+            'solvation_weight': 1.0,                 # Weight for solvation effects
+            'entropy_weight': 1.0,                   # Weight for entropy contributions
+            'pressure_weight': 1.0,                  # Weight for pressure effects
+            'density_weight': 1.0,                   # Weight for density calculations
+            'packing_weight': 1.0,                   # Weight for packing efficiency
+            'symmetry_weight': 1.0,                  # Weight for symmetry considerations
+            'dispersion_weight': 1.0,                # Weight for dispersion corrections
+        }
 
     def ran0_method(self) -> float:
         """
@@ -412,14 +450,14 @@ class SystemState:
         return "Unknown"
 
 # Helper for verbose printing
-def _print_verbose(message: str, level: int, state: SystemState, file=sys.stderr):
+def _print_verbose(message: str, level: int, state: Optional[SystemState], file=sys.stderr):
     """
     Prints a message to stderr if the state's verbosity level meets or exceeds the required level.
     level 0: always print (critical errors, final summary, accepted configs, and key annealing steps)
     level 1: --v (every 10 steps), plus level 0)
     level 2: --va (all steps, plus level 0 and 1)
     """
-    if state.verbosity_level >= level:
+    if state is None or state.verbosity_level >= level:
         print(message, file=file)
         file.flush()
 
@@ -485,7 +523,7 @@ def _post_process_mol_file(mol_filepath: str, state: SystemState):
         _print_verbose(f"    Warning: Could not post-process .mol file '{os.path.basename(mol_filepath)}': {e}", 0, state)
 
 
-def convert_xyz_to_mol(xyz_filepath: str, openbabel_alias: str = "obabel", state: SystemState = None) -> bool:
+def convert_xyz_to_mol(xyz_filepath: str, openbabel_alias: str = "obabel", state: Optional[SystemState] = None) -> bool:
     """
     Converts a single .xyz file to a .mol file using Open Babel.
     Prints verbose messages indicating success or failure to sys.stderr.
@@ -508,7 +546,7 @@ def convert_xyz_to_mol(xyz_filepath: str, openbabel_alias: str = "obabel", state
         if process.returncode != 0:
             _print_verbose(f"  Open Babel conversion failed for '{os.path.basename(xyz_filepath)}'.", 1, state)
             # Only print detailed stdout/stderr if verbosity is high
-            if state.verbosity_level >= 2:
+            if state and state.verbosity_level >= 2:
                 _print_verbose(f"  STDOUT (first 5 lines):\n{_format_stream_output(process.stdout, max_lines=5, prefix='    ')}", 2, state)
                 _print_verbose(f"  STDERR (first 5 lines):\n{_format_stream_output(process.stderr, max_lines=5, prefix='    ')}", 2, state)
             return False
@@ -650,9 +688,10 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
     print(f"Maximum rotation angle = {state.max_rotation_angle_rad:.2f} radians\n", file=output_file_handle) 
     
     # QM program details - formatted as requested
-    print(f"Energy calculated with {state.qm_program.capitalize()}", file=output_file_handle)
-    print(f" Hamiltonian: {state.qm_method}", file=output_file_handle)
-    print(f" Basis set: {state.qm_basis_set}", file=output_file_handle)
+    qm_program_name = state.qm_program.capitalize() if state.qm_program else "Unknown"
+    print(f"Energy calculated with {qm_program_name}", file=output_file_handle)
+    print(f" Hamiltonian: {state.qm_method or 'Not specified'}", file=output_file_handle)
+    print(f" Basis set: {state.qm_basis_set or 'Not specified'}", file=output_file_handle)
     print(f" Charge = {state.charge}   Multiplicity = {state.multiplicity}", file=output_file_handle)
     
     print(f"\nSeed = {state.random_seed:>6}\n", file=output_file_handle)
@@ -809,6 +848,7 @@ def config_molecules(natom: int, nmo: int, r_coords: np.ndarray, state: SystemSt
 
         overlap_found = True
         attempts = 0
+        proposed_mol_atoms = []  # Initialize to prevent unbound variable warning
         
         # Reset local scales and the next increase threshold for each new molecule
         local_translation_range_factor = 1.0
@@ -1311,7 +1351,7 @@ def preserve_last_qm_files(state: SystemState, run_dir: str):
             shutil.copy2(source_output, dest_output)
             _print_verbose(f"  Preserved QM output file: {os.path.basename(dest_output)}", 2, state)
             
-        if source_chk and os.path.exists(source_chk):
+        if source_chk and dest_chk and os.path.exists(source_chk):
             import shutil
             shutil.copy2(source_chk, dest_chk)
             _print_verbose(f"  Preserved QM checkpoint file: {os.path.basename(dest_chk)}", 2, state)
@@ -1346,7 +1386,7 @@ def preserve_last_qm_files_debug(state: SystemState, run_dir: str, call_id: int,
             shutil.copy2(source_output, dest_output)
             _print_verbose(f"  Preserved QM output file for debugging: {os.path.basename(dest_output)}", 2, state)
             
-        if source_chk and os.path.exists(source_chk):
+        if source_chk and dest_chk and os.path.exists(source_chk):
             import shutil
             shutil.copy2(source_chk, dest_chk)
             _print_verbose(f"  Preserved QM checkpoint file for debugging: {os.path.basename(dest_chk)}", 2, state)
@@ -1461,12 +1501,12 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 # For semi-empirical methods like PM3, AM1, MNDO, we don't include basis sets
                 semi_empirical_methods = ['pm3', 'am1', 'mndo', 'pm6', 'pm7']
                 
-                if state.qm_method.lower() in semi_empirical_methods:
+                if state.qm_method and state.qm_method.lower() in semi_empirical_methods:
                     # Semi-empirical methods don't need basis sets
                     f.write(f"! {state.qm_method}\n")
                 else:
                     # Ab initio or DFT methods need basis sets
-                    f.write(f"! {state.qm_method} {state.qm_basis_set}\n")
+                    f.write(f"! {state.qm_method or 'HF'} {state.qm_basis_set or 'STO-3G'}\n")
                 
                 if state.qm_additional_keywords: f.write(f"! {state.qm_additional_keywords}\n")
                 
@@ -1477,9 +1517,9 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 
                 # Only use parallel processing for non-semi-empirical methods
                 # Semi-empirical methods (NDO methods) in ORCA don't support parallel execution
-                if state.qm_nproc and state.qm_method.lower() not in semi_empirical_methods:
+                if state.qm_nproc and state.qm_method and state.qm_method.lower() not in semi_empirical_methods:
                     f.write(f"%pal nprocs {state.qm_nproc} end\n")
-                elif state.qm_nproc and state.qm_method.lower() in semi_empirical_methods:
+                elif state.qm_nproc and state.qm_method and state.qm_method.lower() in semi_empirical_methods:
                     _print_verbose(f"Note: Parallel processing disabled for semi-empirical method {state.qm_method} (ORCA limitation)", 1, state)
                 
                 f.write(f"* xyz {state.charge} {state.multiplicity}\n")
@@ -1687,7 +1727,7 @@ def write_single_xyz_configuration(file_handle, natom, rp, iznu, energy, config_
     if include_dummy_atoms:
         if L > 0: 
             base_comment_line += f" | BoxL={L:.1f} A ({DUMMY_ATOM_SYMBOL} box markers)" 
-    elif random_generate_config_mode == 1: # Only add T for annealing mode, not for random mode
+    elif random_generate_config_mode == 1 and state and hasattr(state, 'current_temp'): # Only add T for annealing mode, not for random mode
         base_comment_line += f" | T = {state.current_temp:.1f} K" 
 
     file_handle.write(f"{base_comment_line}\n")
@@ -2422,7 +2462,7 @@ def calculate_hydrogen_bond_potential(mol_def) -> Dict:
     }
 
 
-def calculate_optimal_box_length(state: SystemState, target_packing_fractions: List[float] = None) -> Dict:
+def calculate_optimal_box_length(state: SystemState, target_packing_fractions: Optional[List[float]] = None) -> Dict:
     """
     Calculates optimal box lengths based on molecular volumes and target packing densities.
     
@@ -3983,7 +4023,7 @@ def extract_qm_executable_from_launcher(launcher_content: str, qm_program: str) 
         return "g16"
 
 
-def create_simple_calculation_system(template_file: str, launcher_template: str = None) -> str:
+def create_simple_calculation_system(template_file: str, launcher_template: Optional[str] = None) -> str:
     """
     Creates a calculation system by looking for result_*.xyz, combined_results.xyz, or combined_r*.xyz files
     and generating QM input files with optional launcher scripts.
@@ -4284,7 +4324,7 @@ def create_simple_calculation_system(template_file: str, launcher_template: str 
         return f"Successfully created calculation system with {len(all_input_files)} input files (input files only)."
 
 
-def create_optimization_system(template_file: str, launcher_template: str = None) -> str:
+def create_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
     """
     Creates an optimization system by looking for files with 'combined' in their name 
     (like all_motifs_combined.xyz) and motif_*.xyz files.
@@ -4304,6 +4344,7 @@ def create_optimization_system(template_file: str, launcher_template: str = None
     
     # Determine calculation directory name
     def get_next_optimization_dir():
+        """Find the next available optimization directory (optimization, optimization_2, etc.)"""
         base_name = "optimization"
         if not os.path.exists(base_name):
             return base_name
@@ -4836,98 +4877,6 @@ def execute_merge_result_command():
                 if success:
                     print(f"✓ Successfully created {output_file}")
                     print(f"  Combined {len(files_to_merge)} result XYZ files")
-                    
-                    # Check if .mol file was also created
-                    mol_file = output_file.replace('.xyz', '.mol')
-                    if os.path.exists(mol_file):
-                        print(f"  Also created {mol_file}")
-                else:
-                    print(f"✗ Failed to create {output_file}")
-                
-                return
-            else:
-                print(f"Invalid option. Please select 1-{len(directories_with_xyz)}, 'a', or 'q'.")
-                
-        except KeyboardInterrupt:
-            print("\nMerge operation cancelled by user.")
-            return
-        except EOFError:
-            print("\nMerge operation cancelled.")
-            return
-        
-        if xyz_files:
-            directories_with_xyz[root] = xyz_files
-    
-    if not directories_with_xyz:
-        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz and combined_results files).")
-        return
-    
-    # Display options
-    print("\nDirectories with XYZ files:")
-    print("-" * 40)
-    
-    options = {}
-    option_num = 1
-    
-    total_files = 0
-    for dir_path, xyz_files in directories_with_xyz.items():
-        dir_display = "Current directory" if dir_path == "." else dir_path
-        options[str(option_num)] = (dir_path, xyz_files)
-        file_count = len(xyz_files)
-        total_files += file_count
-        
-        print(f"{option_num}. {dir_display}: {file_count} files")
-        
-        # Show first few files as examples
-        examples = xyz_files[:3]
-        for example in examples:
-            filename = os.path.basename(example)
-            print(f"   - {filename}")
-        if len(xyz_files) > 3:
-            print(f"   ... and {len(xyz_files) - 3} more")
-        print()
-        option_num += 1
-    
-    # Add "all" option if there are multiple directories
-    if len(directories_with_xyz) > 1:
-        all_files = []
-        for files in directories_with_xyz.values():
-            all_files.extend(files)
-        options["a"] = ("All directories", all_files)
-        print(f"a. All directories: {total_files} files total")
-        print()
-    
-    # Get user choice
-    while True:
-        try:
-            valid_options = list(options.keys()) + ['q']
-            choice = input(f"Select option (1-{len(directories_with_xyz)}, 'a' for all, or 'q' to quit): ").strip().lower()
-            
-            if choice == 'q':
-                print("Merge operation cancelled.")
-                return
-            
-            if choice in options:
-                dir_path, files_to_merge = options[choice]
-                
-                if choice == "a":
-                    output_file = "combined_results.xyz"
-                    print(f"\nMerging {len(files_to_merge)} files from all directories...")
-                else:
-                    if dir_path == ".":
-                        output_file = "combined_results.xyz"
-                        print(f"\nMerging {len(files_to_merge)} files from current directory...")
-                    else:
-                        dir_name = os.path.basename(dir_path)
-                        output_file = f"combined_results_{dir_name}.xyz"
-                        print(f"\nMerging {len(files_to_merge)} files from {dir_path}...")
-                
-                # Perform the merge
-                success = merge_xyz_files(files_to_merge, output_file)
-                
-                if success:
-                    print(f"✓ Successfully created {output_file}")
-                    print(f"  Combined {len(files_to_merge)} XYZ files")
                     
                     # Check if .mol file was also created
                     mol_file = output_file.replace('.xyz', '.mol')
@@ -5752,22 +5701,29 @@ def collect_out_files_with_tracking():
             return None
         
         num_files = len(all_out_files)
-        base_destination_folder_name = f"orca_out_{num_files}"
         
-        parent_directory = os.path.dirname(current_directory)
-        similarity_path = os.path.join(parent_directory, "similarity")
-        os.makedirs(similarity_path, exist_ok=True)
+        # Create similarity folder with incremental numbering
+        def get_next_similarity_dir():
+            """Find the next available similarity directory (similarity, similarity_2, etc.)"""
+            base_name = "similarity"
+            if not os.path.exists(base_name):
+                return base_name
+            
+            counter = 2
+            while True:
+                similarity_dir_name = f"{base_name}_{counter}"
+                if not os.path.exists(similarity_dir_name):
+                    return similarity_dir_name
+                counter += 1
         
-        destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_path)
-        destination_path = os.path.join(similarity_path, destination_folder_name)
-        
-        os.makedirs(destination_path)
+        similarity_dir = get_next_similarity_dir()
+        os.makedirs(similarity_dir, exist_ok=True)
         
         for file_path in all_out_files:
-            shutil.copy2(file_path, destination_path)
+            shutil.copy2(file_path, similarity_dir)
         
-        print(f"Copied {num_files} .out files to similarity/{destination_folder_name}")
-        return destination_path
+        print(f"Copied {num_files} .out files to {similarity_dir}")
+        return similarity_dir
     except:
         return None
 
@@ -6204,18 +6160,17 @@ def main_ascec_integrated():
             print("Example: python3 ascec-v04.py example.in r3")
             sys.exit(1)
 
-    # Initialize file handles and paths to None to prevent UnboundLocalError
-    out_file_handle = None 
-    failed_initial_configs_xyz_handle = None 
-    failed_configs_path = None 
-    
-    rless_file_path = None 
-    tvse_file_path = None  
-    xyz_filename_base = "" # Initialize for error path
-    rless_filename = ""    # Initialize for error path
-    tvse_filename = ""     # Initialize for error path
-
-    # Determine the directory where the input file is located
+        # Initialize file handles and paths to None to prevent UnboundLocalError
+        out_file_handle = None 
+        failed_initial_configs_xyz_handle = None 
+        failed_configs_path = None 
+        
+        rless_file_path = None 
+        tvse_file_path = None  
+        xyz_filename_base = "" # Initialize for error path
+        rless_filename = ""    # Initialize for error path
+        tvse_filename = ""     # Initialize for error path
+        initial_failed_config_idx = 0  # Initialize for failed config tracking    # Determine the directory where the input file is located
     input_file_path_full = os.path.abspath(input_file)
     run_dir = os.path.dirname(input_file_path_full)
     if not run_dir:

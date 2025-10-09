@@ -2,8 +2,8 @@ import argparse
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from cclib.io import ccread
-from sklearn.preprocessing import StandardScaler
+from cclib.io import ccread  # type: ignore
+from sklearn.preprocessing import StandardScaler  # type: ignore
 from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
 import glob
 import re
@@ -111,7 +111,7 @@ def calculate_deviation_percentage(values):
 
     mean_val = np.mean(numeric_values)
     if mean_val == 0.0: # Avoid division by zero if mean is zero
-        return (max_val - min_val) / abs(mean_val) * 100.0 if max_val != min_val else 0.0
+        return 100.0 if max_val != min_val else 0.0  # Return a fixed large percentage for zero mean
     
     return ((max_val - min_val) / abs(mean_val)) * 100.0
 
@@ -311,9 +311,9 @@ def extract_properties_from_logfile(logfile_path):
         
         if raw_data:
             # Determine the actual ccData object to work with
-            if hasattr(raw_data, 'data') and isinstance(raw_data.data, list) and len(raw_data.data) > 0:
+            if hasattr(raw_data, 'data') and isinstance(raw_data.data, list) and len(raw_data.data) > 0:  # type: ignore
                 # This is a ccCollection, extract the last ccData object for optimization results
-                data = raw_data.data[-1]
+                data = raw_data.data[-1]  # type: ignore
             elif type(raw_data).__name__.startswith('ccData'): # Broaden check to include subclasses like ccData_optdone_bool
                 data = raw_data
             else:
@@ -385,29 +385,34 @@ def extract_properties_from_logfile(logfile_path):
         file_extension = os.path.splitext(logfile_path)[1].lower()
 
         # These lines will now correctly access attributes from a ccData object
-        methods_list = data.metadata.get("methods", [])
-        extracted_props['method'] = methods_list[0] if methods_list else "Unknown"
-
-        extracted_props['functional'] = data.metadata.get("functional", "Unknown")
-        extracted_props['basis_set'] = data.metadata.get("basis_set", "Unknown")
+        metadata = getattr(data, 'metadata', {})
+        if metadata:
+            methods_list = metadata.get("methods", [])
+            extracted_props['method'] = methods_list[0] if methods_list else "Unknown"
+            extracted_props['functional'] = metadata.get("functional", "Unknown")
+            extracted_props['basis_set'] = metadata.get("basis_set", "Unknown")
+        else:
+            extracted_props['method'] = "Unknown"
+            extracted_props['functional'] = "Unknown"
+            extracted_props['basis_set'] = "Unknown"
 
         extracted_props['charge'] = getattr(data, 'charge', None)
         extracted_props['multiplicity'] = getattr(data, 'mult', None)
 
-        if hasattr(data, 'atomnos') and data.atomnos is not None and len(data.atomnos) > 0:
-            extracted_props['num_atoms'] = len(data.atomnos)
-            extracted_props['final_geometry_atomnos'] = data.atomnos
+        if hasattr(data, 'atomnos') and data.atomnos is not None and len(data.atomnos) > 0:  # type: ignore
+            extracted_props['num_atoms'] = len(data.atomnos)  # type: ignore
+            extracted_props['final_geometry_atomnos'] = data.atomnos  # type: ignore
         else:
             print(f"  WARNING: No atom numbers (atomnos) found for {os.path.basename(logfile_path)}")
 
-        if hasattr(data, 'atomcoords') and data.atomcoords is not None and len(data.atomcoords) > 0:
+        if hasattr(data, 'atomcoords') and data.atomcoords is not None and len(data.atomcoords) > 0:  # type: ignore
             coords_candidate = None
-            if isinstance(data.atomcoords, list) and len(data.atomcoords) > 0:
-                coords_candidate = np.asarray(data.atomcoords[-1])
-            elif isinstance(data.atomcoords, np.ndarray) and data.atomcoords.ndim == 3:
-                coords_candidate = data.atomcoords[-1]
-            elif isinstance(data.atomcoords, np.ndarray) and data.atomcoords.ndim == 2 and data.atomcoords.shape[1] == 3:
-                coords_candidate = data.atomcoords
+            if isinstance(data.atomcoords, list) and len(data.atomcoords) > 0:  # type: ignore
+                coords_candidate = np.asarray(data.atomcoords[-1])  # type: ignore
+            elif isinstance(data.atomcoords, np.ndarray) and data.atomcoords.ndim == 3:  # type: ignore
+                coords_candidate = data.atomcoords[-1]  # type: ignore
+            elif isinstance(data.atomcoords, np.ndarray) and data.atomcoords.ndim == 2 and data.atomcoords.shape[1] == 3:  # type: ignore
+                coords_candidate = data.atomcoords  # type: ignore
             
             if coords_candidate is not None and coords_candidate.ndim == 2 and coords_candidate.shape[1] == 3:
                 extracted_props['final_geometry_coords'] = coords_candidate
@@ -415,7 +420,7 @@ def extract_properties_from_logfile(logfile_path):
                 print(f"  WARNING: Final geometry candidate has wrong shape for {os.path.basename(logfile_path)}: {coords_candidate.shape}. Skipping geometry-dependent calculations.")
                 extracted_props['final_geometry_coords'] = None
             else:
-                print(f"  WARNING: atomcoords found but unexpected format for {os.path.basename(logfile_path)}. Expected (N,3), (steps,N,3) or list of (N,3) arrays. Actual shape: {getattr(data.atomcoords, 'shape', 'N/A')}. Skipping geometry-dependent calculations.")
+                print(f"  WARNING: atomcoords found but unexpected format for {os.path.basename(logfile_path)}. Expected (N,3), (steps,N,3) or list of (N,3) arrays. Actual shape: {getattr(data.atomcoords, 'shape', 'N/A')}. Skipping geometry-dependent calculations.")  # type: ignore
                 extracted_props['final_geometry_coords'] = None
         else:
             print(f"  WARNING: No atomcoords found for {os.path.basename(logfile_path)}")
@@ -540,26 +545,30 @@ def extract_properties_from_logfile(logfile_path):
 
         # Extract HOMO/LUMO energies and gap using cclib ---
         # This part relies on cclib, which generally extracts the final values correctly for Gaussian.
-        # Corrected: Changed 'has_a_lumo_energy' back to 'hasattr(data, "moenergies")')
-        if hasattr(data, "homos") and data.homos and \
-           hasattr(data, "moenergies") and data.moenergies and len(data.moenergies) > 0: 
-            try:
-                if len(data.homos) > 0 and isinstance(data.moenergies[0], (list, np.ndarray)) and len(data.moenergies[0]) > 0:
-                    homo_index = data.homos[0]
-                    if homo_index >= 0 and (homo_index + 1) < len(data.moenergies[0]):
-                        homo_energy = data.moenergies[0][homo_index]
-                        lumo_energy = data.moenergies[0][homo_index + 1]
+        # Check for both homos and moenergies attributes with proper error handling
+        try:
+            if hasattr(data, "homos") and hasattr(data, "moenergies") and \
+               data.homos is not None and data.moenergies is not None and \  # type: ignore
+               len(data.homos) > 0 and len(data.moenergies) > 0:  # type: ignore
+                # Additional check to ensure moenergies[0] exists and is accessible
+                if isinstance(data.moenergies[0], (list, np.ndarray)) and len(data.moenergies[0]) > 0:  # type: ignore
+                    homo_index = data.homos[0]  # type: ignore
+                    if homo_index >= 0 and (homo_index + 1) < len(data.moenergies[0]):  # type: ignore
+                        homo_energy = data.moenergies[0][homo_index]  # type: ignore
+                        lumo_energy = data.moenergies[0][homo_index + 1]  # type: ignore
                         extracted_props['homo_energy'] = homo_energy
                         extracted_props['lumo_energy'] = lumo_energy
                         extracted_props['homo_lumo_gap'] = lumo_energy - homo_energy
                     else:
                         print(f"  WARNING: HOMO/LUMO indices out of bounds or invalid moenergies configuration for {os.path.basename(logfile_path)}")
                 else:
-                    print(f"  WARNING: 'homos' array or 'moenergies[0]' is empty/invalid for {os.path.basename(logfile_path)}")
-            except Exception as e:
-                print(f"  ERROR: Problem extracting HOMO/LUMO with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse for gap.")
-        else:
-            print(f"  WARNING: Missing 'homos' or 'moenergies' attributes for {os.path.basename(logfile_path)}")
+                    print(f"  WARNING: 'moenergies[0]' is not accessible or empty for {os.path.basename(logfile_path)}")
+            else:
+                print(f"  WARNING: Missing or invalid 'homos' or 'moenergies' attributes for {os.path.basename(logfile_path)}")
+        except (AttributeError, IndexError, TypeError) as e:
+            print(f"  ERROR: Problem accessing HOMO/LUMO data with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse for gap.")
+        except Exception as e:
+            print(f"  ERROR: Problem extracting HOMO/LUMO with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse for gap.")
 
         # Custom parsing for HOMO-LUMO Gap if cclib fails for .out files (e.g., semiempirical)
         if extracted_props['homo_lumo_gap'] is None and file_extension == '.out':
@@ -576,21 +585,21 @@ def extract_properties_from_logfile(logfile_path):
         # --- Conditional ROTATIONAL CONSTANTS EXTRACTION based on file type ---
         # First, try cclib for all file types
         # This part also relies on cclib for rotconsts, which should get the final ones.
-        if hasattr(data, "rotconsts") and data.rotconsts is not None and len(data.rotconsts) > 0:
+        if hasattr(data, "rotconsts") and data.rotconsts is not None and len(data.rotconsts) > 0:  # type: ignore
             rot_consts_candidate = None
             try:
-                if isinstance(data.rotconsts, list) and len(data.rotconsts) > 0:
-                    rot_consts_candidate = np.asarray(data.rotconsts[0])
-                elif isinstance(data.rotconsts, np.ndarray) and data.rotconsts.ndim > 0:
-                    if data.rotconsts.ndim > 1:
-                        rot_consts_candidate = data.rotconsts[-1]
+                if isinstance(data.rotconsts, list) and len(data.rotconsts) > 0:  # type: ignore
+                    rot_consts_candidate = np.asarray(data.rotconsts[0])  # type: ignore
+                elif isinstance(data.rotconsts, np.ndarray) and data.rotconsts.ndim > 0:  # type: ignore
+                    if data.rotconsts.ndim > 1:  # type: ignore
+                        rot_consts_candidate = data.rotconsts[-1]  # type: ignore
                     else:
-                        rot_consts_candidate = data.rotconsts
+                        rot_consts_candidate = data.rotconsts  # type: ignore
                 
                 if rot_consts_candidate is not None and rot_consts_candidate.ndim == 1 and len(rot_consts_candidate) == 3:
                     extracted_props['rotational_constants'] = rot_consts_candidate.astype(float)
                 else:
-                    print(f"  WARNING: cclib found rotational constants but unexpected format for {os.path.basename(logfile_path)}. Expected 1D array of 3 floats. Actual format: {type(data.rotconsts)}, Shape: {getattr(data.rotconsts, 'shape', 'N/A')}. Trying custom parse.")
+                    print(f"  WARNING: cclib found rotational constants but unexpected format for {os.path.basename(logfile_path)}. Expected 1D array of 3 floats. Actual format: {type(data.rotconsts)}, Shape: {getattr(data.rotconsts, 'shape', 'N/A')}. Trying custom parse.")  # type: ignore
                     extracted_props['rotational_constants'] = None
             except Exception as e:
                 print(f"  ERROR: Problem extracting rotational constants with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse.")
@@ -625,12 +634,12 @@ def extract_properties_from_logfile(logfile_path):
         # Extract Vibrational Frequencies using cclib ---
         # The core check for frequency calculation presence will be here.
         # cclib.vibfreqs will be None or empty if no frequency calculation was found.
-        if hasattr(data, "vibfreqs") and data.vibfreqs is not None and len(data.vibfreqs) > 0:
+        if hasattr(data, "vibfreqs") and data.vibfreqs is not None and len(data.vibfreqs) > 0:  # type: ignore
             extracted_props['_has_freq_calc'] = True # Set flag if freq data is present
             try:
-                if len(data.vibfreqs) > 0 and isinstance(data.vibfreqs[0], (int, float, np.number)):
-                    imag_freqs = [freq for freq in data.vibfreqs if freq < 0]
-                    real_freqs = [freq for freq in data.vibfreqs if freq > 0]
+                if len(data.vibfreqs) > 0 and isinstance(data.vibfreqs[0], (int, float, np.number)):  # type: ignore
+                    imag_freqs = [freq for freq in data.vibfreqs if freq < 0]  # type: ignore
+                    real_freqs = [freq for freq in data.vibfreqs if freq > 0]  # type: ignore
                     
                     # Skip files with any imaginary frequencies
                     if len(imag_freqs) > 0:
@@ -672,31 +681,6 @@ def extract_properties_from_logfile(logfile_path):
     except Exception as e:
         print(f"  GENERIC_ERROR: Failed to extract properties from {os.path.basename(logfile_path)} (after cclib parse): {e}")
         return None
-
-def calculate_deviation_percentage(values):
-    """Calculates the percentage deviation (max-min / abs(mean)) for a list of numerical values."""
-    if not values or len(values) < 2:
-        return 0.0 # Or None, depending on desired behavior for single/no values
-    
-    # Filter out None values before calculating min/max
-    numeric_values = [v for v in values if v is not None]
-    if not numeric_values:
-        return 0.0
-
-    min_val = min(numeric_values)
-    max_val = max(numeric_values)
-
-    if min_val == 0.0 and max_val == 0.0:
-        return 0.0 # All zeros, no deviation
-
-    if max_val == min_val:
-        return 0.0
-
-    mean_val = np.mean(numeric_values)
-    if mean_val == 0.0: # Avoid division by zero if mean is zero
-        return (max_val - min_val) / abs(mean_val) * 100.0 if max_val != min_val else 0.0
-    
-    return ((max_val - min_val) / abs(mean_val)) * 100.0
 
 # --- START: RMSD functions provided by user ---
 def calculate_rmsd(atomnos1, coords1, atomnos2, coords2):
@@ -749,7 +733,9 @@ def calculate_rmsd(atomnos1, coords1, atomnos2, coords2):
         # Step 2: Perform Kabsch alignment to find the optimal rotation
         # R.align_vectors(a, b) finds rotation and RMSD to transform a to align with b.
         # So here, we want to align centered_coords2 (source) to centered_coords1 (target).
-        rotation, rmsd_value = R.align_vectors(centered_coords2, centered_coords1)
+        result = R.align_vectors(centered_coords2, centered_coords1)
+        rotation = result[0]
+        rmsd_value = result[1]  # The RMSD is always the second value returned
 
         # The 'rmsd_value' returned by align_vectors IS the minimized RMSD.
         # You don't need to re-apply the rotation and calculate it again.
@@ -1457,7 +1443,7 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
                 # Create and save dendrogram
                 plt.figure(figsize=(12, 8))
                 dendrogram(linkage_matrix, labels=motif_labels, orientation='top', 
-                          distance_sort='descending', show_leaf_counts=True)
+                          distance_sort=True, show_leaf_counts=True)
                 plt.title(f'Motifs Dendrogram (Complete Feature Clustering)')
                 plt.xlabel('Motif')
                 plt.ylabel('Distance')
@@ -1666,10 +1652,40 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     `abs_tolerances` (dict): Dictionary of feature_name: absolute_tolerance. If the max difference
                              for a feature within a group is less than its tolerance, it's zeroed out.
     """
-    # Default weights with reduced vibrational frequency weights
+    # Default weights for all clustering features
+    # These can be adjusted using the --weights flag, e.g., --weights "(first_vib_freq=0.5)(homo_lumo_gap=1.5)"
+    # Set to 0.0 to exclude a feature completely from clustering
+    # Available features:
+    # - electronic_energy: Final electronic energy (Hartree)
+    # - gibbs_free_energy: Gibbs free energy (Hartree) 
+    # - entropy: Entropy (J/(mol·K) or a.u.)
+    # - homo_energy: HOMO energy (eV)
+    # - lumo_energy: LUMO energy (eV)
+    # - homo_lumo_gap: HOMO-LUMO gap (eV)
+    # - dipole_moment: Dipole moment (Debye)
+    # - radius_of_gyration: Radius of gyration (Å)
+    # - rotational_constants_A/B/C: Rotational constants (GHz)
+    # - first_vib_freq: First vibrational frequency (cm⁻¹)
+    # - last_vib_freq: Last vibrational frequency (cm⁻¹)
+    # - average_hbond_distance: Average hydrogen bond distance (Å)
+    # - average_hbond_angle: Average hydrogen bond angle (degrees)
+    # - num_hydrogen_bonds: Number of hydrogen bonds (not used for clustering but mapped)
     default_weights = {
-        'first_vib_freq': 0.0,  # Reduced to 0.0 (0% weight) due to high sensitivity
-        'last_vib_freq': 0.1,   # Reduced to 0.1 (10% weight) due to high sensitivity
+        'electronic_energy': 1.0,          # Final electronic energy
+        'gibbs_free_energy': 1.0,          # Gibbs free energy
+        'entropy': 1.0,                    # Entropy
+        'homo_energy': 1.0,                # HOMO energy
+        'lumo_energy': 1.0,                # LUMO energy
+        'homo_lumo_gap': 1.0,              # HOMO-LUMO gap
+        'dipole_moment': 1.0,              # Dipole moment
+        'radius_of_gyration': 1.0,         # Radius of gyration
+        'rotational_constants_A': 1.0,     # Rotational constant A
+        'rotational_constants_B': 1.0,     # Rotational constant B
+        'rotational_constants_C': 1.0,     # Rotational constant C
+        'first_vib_freq': 0.1,             # First vibrational frequency
+        'last_vib_freq': 0.5,              # Last vibrational frequency
+        'average_hbond_distance': 1.0,     # Average hydrogen bond distance
+        'average_hbond_angle': 1.0,        # Average hydrogen bond angle
     }
     
     if weights is None:
@@ -1698,12 +1714,18 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         output_base_dir = os.path.join(output_base_dir, final_comparison_dir)
         os.makedirs(output_base_dir, exist_ok=True) # Ensure this new base directory exists
         print(f"  Comparison mode: All outputs will be placed in '{output_base_dir}'")
+    else:
+        # For normal mode, use simple "similarity" directory
+        output_base_dir = os.path.join(output_base_dir, "similarity")
+        os.makedirs(output_base_dir, exist_ok=True) # Ensure this new base directory exists
+        print(f"  All outputs will be placed in 'similarity'")
 
     # Define a generic cache file path
     cache_file_name = "data_cache.pkl" # Shortened cache file name
     cache_file_path = os.path.join(output_base_dir, cache_file_name)
 
     all_extracted_data = []
+    skipped_files = set()  # Initialize skipped_files early to avoid unbound variable warnings
     
     files_to_process = []
     if is_compare_mode:
@@ -1737,7 +1759,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     # Unknown format
                     raise ValueError("Unknown cache format")
                 
-                current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(input_source, file_extension_pattern))}
+                current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
                 retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
                 
                 # Files that were processed (either successfully or skipped)
@@ -1776,7 +1798,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             all_extracted_data = []
             skipped_files = set()
 
-        files_to_process = glob.glob(os.path.join(input_source, file_extension_pattern))
+        files_to_process = glob.glob(os.path.join(str(input_source), str(file_extension_pattern))) if input_source and file_extension_pattern else []
         if not files_to_process:
             print(f"No files matching '{file_extension_pattern}' found in '{input_source}'. Skipping this folder.")
             return
