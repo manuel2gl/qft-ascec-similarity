@@ -352,35 +352,6 @@ class SystemState:
         self.iz_types: List[int] = []             # List of atomic numbers
         self.nnu_types: List[int] = []            # List of atom counts per element type
         self.volume_based_recommendations: Dict = {}  # Volume-based box recommendations
-        
-        # Default weights for parameters (can be adjusted manually)
-        # These weights can be modified to change the influence of different parameters
-        # Use command line flags to override specific parameters:
-        # --conformational <value>  : Set conformational move probability (0.0-1.0)
-        # --maxdihedral <degrees>   : Set maximum dihedral rotation angle
-        # --standard               : Use standard Metropolis criterion instead of modified
-        self.default_weights: Dict[str, float] = {
-            'energy_weight': 1.0,                    # Weight for energy evaluation in optimization
-            'geometry_weight': 1.0,                  # Weight for geometric constraints
-            'conformational_weight': 1.0,            # Weight for conformational moves
-            'translation_weight': 1.0,               # Weight for translational moves
-            'rotation_weight': 1.0,                  # Weight for rotational moves
-            'temperature_weight': 1.0,               # Weight for temperature scaling
-            'volume_weight': 1.0,                    # Weight for volume calculations
-            'interaction_weight': 1.0,               # Weight for intermolecular interactions
-            'bond_weight': 1.0,                      # Weight for bond parameters
-            'angle_weight': 1.0,                     # Weight for angle parameters
-            'dihedral_weight': 1.0,                  # Weight for dihedral parameters
-            'vdw_weight': 1.0,                       # Weight for van der Waals interactions
-            'electrostatic_weight': 1.0,             # Weight for electrostatic interactions
-            'solvation_weight': 1.0,                 # Weight for solvation effects
-            'entropy_weight': 1.0,                   # Weight for entropy contributions
-            'pressure_weight': 1.0,                  # Weight for pressure effects
-            'density_weight': 1.0,                   # Weight for density calculations
-            'packing_weight': 1.0,                   # Weight for packing efficiency
-            'symmetry_weight': 1.0,                  # Weight for symmetry considerations
-            'dispersion_weight': 1.0,                # Weight for dispersion corrections
-        }
 
     def ran0_method(self) -> float:
         """
@@ -5702,18 +5673,22 @@ def collect_out_files_with_tracking():
         
         num_files = len(all_out_files)
         
-        # Create similarity folder with incremental numbering
+        # Create similarity folder with incremental numbering at parent level
+        parent_directory = os.path.dirname(current_directory)
+        
         def get_next_similarity_dir():
             """Find the next available similarity directory (similarity, similarity_2, etc.)"""
             base_name = "similarity"
-            if not os.path.exists(base_name):
-                return base_name
+            similarity_path = os.path.join(parent_directory, base_name)
+            if not os.path.exists(similarity_path):
+                return similarity_path
             
             counter = 2
             while True:
                 similarity_dir_name = f"{base_name}_{counter}"
-                if not os.path.exists(similarity_dir_name):
-                    return similarity_dir_name
+                similarity_path = os.path.join(parent_directory, similarity_dir_name)
+                if not os.path.exists(similarity_path):
+                    return similarity_path
                 counter += 1
         
         similarity_dir = get_next_similarity_dir()
@@ -5722,7 +5697,9 @@ def collect_out_files_with_tracking():
         for file_path in all_out_files:
             shutil.copy2(file_path, similarity_dir)
         
-        print(f"Copied {num_files} .out files to {similarity_dir}")
+        # Get just the folder name for display (without full path)
+        similarity_folder_name = os.path.basename(similarity_dir)
+        print(f"Copied {num_files} .out files to {similarity_folder_name}")
         return similarity_dir
     except:
         return None
@@ -5816,8 +5793,16 @@ def execute_sort_command(include_summary=True):
         else:
             print("Sorting accepted and finalized.")
             # Suggest similarity analysis if .out files were collected
-            similarity_dir = os.path.join("..", "similarity")
-            if os.path.exists(similarity_dir):
+            # Check if any similarity folder exists at the parent level
+            parent_dir = os.path.dirname(os.getcwd())
+            similarity_dirs = []
+            for item in os.listdir(parent_dir):
+                if item == "similarity" or item.startswith("similarity_"):
+                    similarity_path = os.path.join(parent_dir, item)
+                    if os.path.isdir(similarity_path):
+                        similarity_dirs.append(item)
+            
+            if similarity_dirs:
                 print("\nSuggested next step:")
                 print("  python3 ascec-v04.py sim --threshold 0.9")
                 print("  Run similarity analysis on collected output files")
