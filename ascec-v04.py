@@ -5672,6 +5672,7 @@ def collect_out_files_with_tracking():
             return None
         
         num_files = len(all_out_files)
+        base_destination_folder_name = f"orca_out_{num_files}"
         
         # Create similarity folder with incremental numbering at parent level
         parent_directory = os.path.dirname(current_directory)
@@ -5694,13 +5695,19 @@ def collect_out_files_with_tracking():
         similarity_dir = get_next_similarity_dir()
         os.makedirs(similarity_dir, exist_ok=True)
         
+        # Create the orca_out_### subfolder inside similarity folder
+        destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_dir)
+        destination_path = os.path.join(similarity_dir, destination_folder_name)
+        os.makedirs(destination_path)
+        
+        # Copy files to the orca_out_### subfolder
         for file_path in all_out_files:
-            shutil.copy2(file_path, similarity_dir)
+            shutil.copy2(file_path, destination_path)
         
         # Get just the folder name for display (without full path)
         similarity_folder_name = os.path.basename(similarity_dir)
-        print(f"Copied {num_files} .out files to {similarity_folder_name}")
-        return similarity_dir
+        print(f"Copied {num_files} .out files to {similarity_folder_name}/{destination_folder_name}")
+        return destination_path
     except:
         return None
 
