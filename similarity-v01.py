@@ -547,9 +547,9 @@ def extract_properties_from_logfile(logfile_path):
         # This part relies on cclib, which generally extracts the final values correctly for Gaussian.
         # Check for both homos and moenergies attributes with proper error handling
         try:
-            if hasattr(data, "homos") and hasattr(data, "moenergies") and \
-               data.homos is not None and data.moenergies is not None and \  # type: ignore
-               len(data.homos) > 0 and len(data.moenergies) > 0:  # type: ignore
+            if (hasattr(data, "homos") and hasattr(data, "moenergies") and 
+                data.homos is not None and data.moenergies is not None and  # type: ignore
+                len(data.homos) > 0 and len(data.moenergies) > 0):  # type: ignore
                 # Additional check to ensure moenergies[0] exists and is accessible
                 if isinstance(data.moenergies[0], (list, np.ndarray)) and len(data.moenergies[0]) > 0:  # type: ignore
                     homo_index = data.homos[0]  # type: ignore
