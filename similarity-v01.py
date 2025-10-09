@@ -1,16 +1,15 @@
 import argparse
 import os
 import numpy as np
-import matplotlib.pyplot as plt
-from cclib.io import ccread  # type: ignore
-from sklearn.preprocessing import StandardScaler  # type: ignore
-from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+# matplotlib import moved to functions that use it for faster startup
+# cclib import moved to functions that use it for faster startup
+# sklearn and scipy imports moved to functions that use them for faster startup
 import glob
 import re
 import subprocess
 import shutil
 import pickle # Added for caching
-from scipy.spatial.transform import Rotation as R # Ensure R is imported like this!
+# scipy.spatial.transform import moved to function that uses it
 
 
 # Constants for Boltzmann distribution
@@ -304,6 +303,8 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         }
 
 def extract_properties_from_logfile(logfile_path):
+    from cclib.io import ccread  # Import only when needed
+    
     data = None # Initialize data to None
 
     try:
@@ -697,6 +698,8 @@ def calculate_rmsd(atomnos1, coords1, atomnos2, coords2):
     Returns:
         float: The calculated RMSD value, or None if an error occurs.
     """
+    from scipy.spatial.transform import Rotation as R  # Import only when needed
+    
     # Filter out hydrogen atoms (atomic number 1)
     heavy_indices1 = [i for i, z in enumerate(atomnos1) if z != 1]
     heavy_coords1 = coords1[heavy_indices1]
@@ -858,6 +861,8 @@ def perform_second_rmsd_clustering(cluster_members_to_refine, rmsd_threshold):
     Returns:
         list: A list of new sub-clusters (each a list of data dictionaries).
     """
+    from scipy.cluster.hierarchy import linkage, fcluster  # Import only when needed
+    
     if len(cluster_members_to_refine) <= 1:
         # For singletons, ensure the second RMSD context is set even if trivial
         for m in cluster_members_to_refine:
@@ -1640,6 +1645,13 @@ def parse_abs_tolerance_argument(tolerance_str):
 
 # Modified to accept rmsd_threshold and output_base_dir
 def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, motif_threshold=1.0):
+    """
+    Performs hierarchical clustering and comprehensive analysis on molecular structures.
+    This is the main analysis function that orchestrates the entire clustering workflow.
+    """
+    from sklearn.preprocessing import StandardScaler  # Import only when needed
+    from scipy.cluster.hierarchy import dendrogram, linkage, fcluster  # Import only when needed
+    import matplotlib.pyplot as plt  # Import only when needed
     """
     Performs hierarchical clustering and analysis on the extracted molecular properties,
     and saves .dat and .xyz files for each cluster.

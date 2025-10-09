@@ -829,6 +829,10 @@ def config_molecules(natom: int, nmo: int, r_coords: np.ndarray, state: SystemSt
         while overlap_found and attempts < state.MAX_OVERLAP_PLACEMENT_ATTEMPTS:
             attempts += 1
             
+            # Show progress for difficult placements
+            if attempts % 10000 == 0:
+                _print_verbose(f"    Molecule {mol_def.label} (instance {i+1}): {attempts} placement attempts...", 1, state)
+            
             # Dynamically adjust translation and rotation ranges if placement is difficult.
             # This mimics Fortran's 'ds' adjustment to help break out of steric traps.
             if attempts >= next_increase_threshold_for_this_molecule:
@@ -980,6 +984,7 @@ def initialize_molecular_coords_in_box(state: SystemState) -> Tuple[np.ndarray, 
 
     # Now, randomly translate and rotate molecules from this superimposed state
     # This calls the more general config_molecules that includes overlap checking
+    _print_verbose("Configuring molecular positions (this may take a moment for large systems)...", 1, state)
     config_molecules(state.natom, state.num_molecules, state.rp, state)
 
     return state.rp, state.iznu
@@ -1519,16 +1524,20 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
         return 0.0, 0
 
     try:
-        # First, check if the QM executable is available
+        # First, check if the QM executable is available with shorter timeout and better error handling
         if state.qm_program == "orca":
-            # Test if ORCA is available using a simple version check
+            # Test if ORCA is available using a simple version check with reduced timeout
             try:
-                test_process = subprocess.run([qm_exe, "--version"], capture_output=True, text=True, timeout=10)
+                test_process = subprocess.run([qm_exe, "--version"], capture_output=True, text=True, timeout=3)
                 # ORCA might return non-zero even for version check, so just check if it ran
                 _print_verbose(f"ORCA test command executed: {qm_exe} --version", 2, state)
-            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-                _print_verbose(f"Error: ORCA executable '{qm_exe}' not found or not working: {e}", 0, state)
+            except subprocess.TimeoutExpired:
+                _print_verbose(f"Warning: ORCA executable '{qm_exe}' timeout during version check (proceeding anyway)", 1, state)
+            except FileNotFoundError:
+                _print_verbose(f"Error: ORCA executable '{qm_exe}' not found in PATH", 0, state)
                 return 0.0, 0
+            except Exception as e:
+                _print_verbose(f"Warning: ORCA executable test failed: {e} (proceeding anyway)", 1, state)
         
         if state.qm_program == "orca":
             # Special handling for ORCA to capture output properly
@@ -6174,6 +6183,11 @@ def main_ascec_integrated():
     start_time = time.time() # Start wall time measurement
 
     state = SystemState()
+    
+    # Print startup message early to confirm script is running
+    _print_verbose(f"{version}", 0, state)
+    _print_verbose("Starting ASCEC simulation...", 0, state)
+    
     # Set verbosity level based on command line arguments
     if args.va:
         state.verbosity_level = 2
@@ -6197,6 +6211,21 @@ def main_ascec_integrated():
     
     try:
         # Call read_input_file as early as possible to populate state
+        # Add file existence check to prevent blocking on missing files
+        if not os.path.exists(input_file):
+            _print_verbose(f"\nCRITICAL ERROR: Input file '{input_file}' not found.", 0, state)
+            _print_verbose("Please check the file path and ensure the file exists.", 0, state)
+            sys.exit(1)
+        
+        # Add file readability check
+        try:
+            with open(input_file, 'r') as test_file:
+                test_file.readline()  # Try to read first line
+        except (PermissionError, IOError) as e:
+            _print_verbose(f"\nCRITICAL ERROR: Cannot read input file '{input_file}': {e}", 0, state)
+            _print_verbose("Please check file permissions and ensure the file is not locked.", 0, state)
+            sys.exit(1)
+            
         read_input_file(state, input_file)
         
         # Apply command-line overrides for conformational parameters (if provided)

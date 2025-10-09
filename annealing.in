@@ -1,31 +1,33 @@
-# file_ascec4.in - Input for Water Pentamer Simulation
+# Input for water_pentamer Simulation
 
-1 10         	# Line 1: Simulation Mode & Number of Config
-				      # 1: Annealing; 0: Random configurations 
-7.0         	# Line 2: Simulation Cube Length (Angstroms)
+1 10          # Line 1: Simulation Mode & Number of Config
+              # 1: Annealing; 0: Random configurations 
+7.0           # Line 2: Simulation Cube Length (Angstroms)
 
-2            	# Line 3: Annealing Quenching route
-				      # (1: Linear, 2: Geometrical).
+2             # Line 3: Annealing Quenching route
+              # (1: Linear, 2: Geometrical).
 
-100.0  10.0  50 	# Line 4: Linear Quenching Parameters
+100.0  10.0  50   # Line 4: Linear Quenching Parameters
 
-600.0   5.0  50	  # Line 5: Geometric Quenching Parameters
+600.0   5.0  100  # Line 5: Geometric Quenching Parameters
 
 3000  50      # Line 6: Maximum Monte Carlo Cycles per T and floor value
 
 1.0 1.0       # Line 7: Maximum Displacement (A) & Rotation (radians)
 
-2 orca        # Line 8: QM Program Index & alias
-				      # (1: Gaussian, 2: ORCA, 3: for other, etc.)
+0 60         # Line 8: Conformational sampling (%) & Maximum dihedral rotation (degrees)
 
-pm3     		  # Line 9: Hamiltonian & Basis Set
-				      # (e.g., pm3, hf)(e.g., 6-31G*, STO-3G)
+2 orca        # Line 9: QM Program Index & alias
+              # (1: Gaussian, 2: ORCA, 3: for other, etc.)
 
-6          		# Line 10: nprocs & memory (QM program)
+pm3           # Line 10: Hamiltonian & Basis Set
+              # (e.g., pm3, hf)(e.g., 6-31G*, STO-3G)
 
-0 1           # Line 11: Charge & Spin Multiplicity
+8             # Line 11: nprocs [memory] (QM calculations and ASCEC evaluation)
 
-5             # Line 12: Number of Molecules (nmo)
+0 1           # Line 12: Charge & Spin Multiplicity
+
+2             # Line 13: Number of Molecules (nmo)
 
 # Lines below: Molecule Definition
 # (Num Atoms, Label, followed by xyz coordinates, separated by *)
@@ -39,25 +41,25 @@ H  -0.757000  0.586000  0.000000
 *
 3
 water2
-O   3.000000  0.000000  0.000000
-H   3.757000  0.586000  0.000000
-H   2.243000  0.586000  0.000000
+O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000
 *
 3
 water3
-O   0.000000  3.000000  0.000000
-H   0.757000  3.586000  0.000000
-H  -0.757000  3.586000  0.000000
+O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000
 *
 3
 water4
-O   -3.000000  0.000000  0.000000
-H   -2.243000  0.586000  0.000000
-H   -3.757000  0.586000  0.000000
+O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000
 *
 3
 water5
-O   0.000000  -3.000000  0.000000
-H   0.757000  -2.414000  0.000000
-H  -0.757000  -2.414000  0.000000
+O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000
 *

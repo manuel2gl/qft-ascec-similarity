@@ -1,14 +1,18 @@
 #name
-! Opt GFN2-xTB
+! Opt GFN2-xTB ALPB(water) TightSCF Numfreq
 
 %pal
-  nprocs 12
+  nprocs 8
 end
 
 %maxcore 4000
 
 %geom
   maxiter 5000
+  TolE 1e-8
+  TolRMSG 1e-5
+  Trust 0.3
+  MaxStep 0.3
 end
 
 * xyz 0 1
