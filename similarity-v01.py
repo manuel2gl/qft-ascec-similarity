@@ -1727,10 +1727,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         os.makedirs(output_base_dir, exist_ok=True) # Ensure this new base directory exists
         print(f"  Comparison mode: All outputs will be placed in '{output_base_dir}'")
     else:
-        # For normal mode, use simple "similarity" directory
-        output_base_dir = os.path.join(output_base_dir, "similarity")
-        os.makedirs(output_base_dir, exist_ok=True) # Ensure this new base directory exists
-        print(f"  All outputs will be placed in 'similarity'")
+        # For normal mode, output directly to the working directory (no subfolder)
+        os.makedirs(output_base_dir, exist_ok=True) # Ensure this base directory exists
+        print(f"  All outputs will be placed in the current working directory")
 
     # Define a generic cache file path
     cache_file_name = "data_cache.pkl" # Shortened cache file name
