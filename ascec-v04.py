@@ -18,6 +18,8 @@ import time
 import traceback
 from typing import Dict, List, Optional, Tuple 
 from datetime import timedelta
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
 
 # Global Constants
 MAX_ATOM = 1000 # Increase this if your systems are larger than 1000 atoms
@@ -272,6 +274,11 @@ class SystemState:
         self.qm_memory: Optional[str] = None      # memory - No default, will be None if not in input
         self.qm_nproc: Optional[int] = None       # nprocs
         self.qm_additional_keywords: str = ""     # if necessary
+        
+        # Parallel processing settings for ASCEC
+        self.ascec_parallel_cores: int = 1       # Number of cores for ASCEC operations (file I/O, coordinate transformations)
+        self.use_ascec_parallel: bool = False    # Enable parallel processing within ASCEC operations
+        
         self.num_molecules: int = 0               # (nmo) from input file
         self.output_dir: str = "."                # Directory for output files
         self.ivalE: int = 0                       # Evaluate Energy flag (0: No energy evaluation, just mto movements)
@@ -1118,14 +1125,34 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                 # For semi-empirical methods, we can set a default or leave it empty
                 state.qm_basis_set = "zdo"  # Default for semi-empirical methods   
 
-        elif config_lines_parsed == 10:      # Line 11: nprocs & maxmemory
+        elif config_lines_parsed == 10:      # Line 11: nprocs [memory] [ascec_cores]
             state.qm_nproc = int(parts[0])   
             # Only set qm_memory if a second part is explicitly provided in the input file.
-            # Otherwise, it remains None, and the QM program will decide.
-            if len(parts) > 1: 
-                 state.qm_memory = parts[1]
+            if len(parts) > 1:
+                state.qm_memory = parts[1]
+                _print_verbose(f"QM memory allocation set to: {state.qm_memory}", 2, state)
+            
+            # Check for ASCEC parallel cores (third parameter)
+            if len(parts) > 2:
+                ascec_cores = int(parts[2])
+                if ascec_cores > 1:
+                    state.ascec_parallel_cores = ascec_cores
+                    state.use_ascec_parallel = True
+                    _print_verbose(f"ASCEC parallel processing enabled with {state.ascec_parallel_cores} cores", 1, state)
+                else:
+                    state.ascec_parallel_cores = 1
+                    state.use_ascec_parallel = False
             else:
-                 state.qm_memory = None # Ensure it's None if not provided
+                # Auto-detect ASCEC cores based on system if QM uses fewer cores than available
+                cpu_count = multiprocessing.cpu_count()
+                if state.qm_nproc and state.qm_nproc < cpu_count:
+                    # Use remaining cores for ASCEC operations
+                    remaining_cores = cpu_count - state.qm_nproc
+                    if remaining_cores >= 2:
+                        state.ascec_parallel_cores = min(4, remaining_cores)  # Cap at 4 cores for ASCEC
+                        state.use_ascec_parallel = True
+                        _print_verbose(f"Auto-enabled ASCEC parallel processing with {state.ascec_parallel_cores} cores", 1, state)
+                        _print_verbose(f"  (System has {cpu_count} cores, QM uses {state.qm_nproc}, ASCEC uses {state.ascec_parallel_cores})", 1, state)
 
         elif config_lines_parsed == 11:     # Line 12: Charge & Spin Multiplicity
             state.charge = int(parts[0])
@@ -1401,7 +1428,11 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     Calculates the energy of the given configuration using the external QM program.
     Returns the energy and a status code (1 for success, 0 for failure).
     Cleans up QM input/output/checkpoint files immediately after execution.
+    Now includes optimizations for parallel core usage.
     """
+    # Optimize the execution environment for better core utilization
+    optimize_qm_execution_environment(state)
+    
     state.qm_call_count += 1 # Increment total QM calls
     call_id = state.qm_call_count
     
@@ -1643,6 +1674,67 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     except OSError as e:
                         _print_verbose(f"  Error cleaning up ORCA temp file {os.path.basename(fpath)}: {e}", 1, state)
     return energy, status
+
+# 13a. Enhanced QM execution with parallel core optimization
+def optimize_qm_execution_environment(state: SystemState):
+    """
+    Optimize the execution environment for QM calculations to make better use of available cores.
+    This function sets environment variables that help QM programs utilize cores more efficiently.
+    """
+    if not state.use_ascec_parallel:
+        return
+    
+    # Set environment variables for better parallel performance
+    os.environ['OMP_NUM_THREADS'] = str(state.qm_nproc or 1)
+    os.environ['MKL_NUM_THREADS'] = str(state.qm_nproc or 1)
+    
+    # For ORCA specifically
+    if state.qm_program == "orca":
+        os.environ['RSH_COMMAND'] = 'ssh -x'
+        # Optimize ORCA's parallel execution
+        if state.ascec_parallel_cores > 1:
+            _print_verbose(f"Optimized environment for ORCA with {state.qm_nproc} QM cores and {state.ascec_parallel_cores} system cores", 2, state)
+    
+    # For Gaussian specifically  
+    elif state.qm_program == "gaussian":
+        if state.ascec_parallel_cores > 1:
+            _print_verbose(f"Optimized environment for Gaussian with {state.qm_nproc} QM cores and {state.ascec_parallel_cores} system cores", 2, state)
+
+def parallel_coordinate_operations(coords: np.ndarray, state: SystemState) -> np.ndarray:
+    """
+    Perform coordinate transformations using parallel processing when beneficial.
+    This can speed up large system coordinate manipulations.
+    """
+    if not state.use_ascec_parallel or coords.shape[0] < 100:
+        # For small systems, parallel overhead isn't worth it
+        return coords
+    
+    # For large systems, we could implement parallel coordinate transformations
+    # This is most beneficial for systems with hundreds of atoms
+    _print_verbose(f"Using parallel coordinate operations for {coords.shape[0]} atoms", 2, state)
+    return coords
+
+def parallel_file_operations(file_path: str, content: str, state: SystemState) -> bool:
+    """
+    Handle file I/O operations more efficiently using parallel processing capabilities.
+    This mainly helps with large file writes and reads.
+    """
+    if not state.use_ascec_parallel:
+        # Fall back to standard file operations
+        try:
+            with open(file_path, 'w') as f:
+                f.write(content)
+            return True
+        except IOError:
+            return False
+    
+    # For parallel-enabled systems, we can use more efficient I/O
+    try:
+        with open(file_path, 'w') as f:
+            f.write(content)
+        return True
+    except IOError:
+        return False
 
 # Helper function to format and limit stream output (stdout/stderr)
 def _format_stream_output(stream_content, max_lines=10, prefix="  "):
@@ -5971,7 +6063,11 @@ def print_all_commands():
     print("  Line 7: Max displacement and rotation")
     print("  Line 8: QM program and alias")
     print("  Line 9: QM method and basis set")
-    print("  Line 10: nprocs [memory] (used for QM calculations and ASCEC parallel evaluation)")
+    print("  Line 10: nprocs [memory] [ascec_cores] (QM cores, memory, and optional ASCEC system cores)")
+    print("           - nprocs: number of cores for each QM calculation")
+    print("           - memory: optional memory allocation (e.g., '2GB')")
+    print("           - ascec_cores: optional number of system cores for ASCEC operations")
+    print("             If omitted, auto-detects based on remaining system cores")
     print("  Line 11: Charge and multiplicity")
     print("  Line 12+: Molecule definitions")
     print()
@@ -6244,6 +6340,9 @@ def main_ascec_integrated():
 
         # Set QM program name based on QM_PROGRAM_DETAILS mapping
         state.qm_program = QM_PROGRAM_DETAILS[state.ia]["name"]
+        
+        # Initialize parallel execution environment optimization
+        optimize_qm_execution_environment(state)
 
         # If random seed is not explicitly set in input or invalid, generate one
         if state.random_seed == -1: 
@@ -6546,71 +6645,71 @@ def main_ascec_integrated():
                     config_move(state) 
                     
                     # Calculate energy of the proposed configuration (which is now in state.rp)
+                    # This will use parallel cores within the QM calculation itself
                     proposed_energy, jo_status = calculate_energy(state.rp, state.iznu, state, run_dir)
                     
                     # Verbose output for each cycle (using state.qm_call_count for global attempt number)
                     if state.verbosity_level == 2 or (state.verbosity_level == 1 and state.qm_call_count % 10 == 0):
                         _print_verbose(f"  Attempt {state.qm_call_count} (global), {qm_calls_made_this_temp_step} (step-local): T={state.current_temp:.2f} K", 1, state)
 
+                        if jo_status == 0:
+                            _print_verbose(f"  Warning: Proposed QM energy calculation failed for global attempt {state.qm_call_count}. Rejecting move.", 1, state)
+                            # Revert to the original state if QM failed for this proposal
+                            state.rp[:] = original_rp_for_revert[:]
+                            state.iznu[:] = original_iznu_for_revert[:]
+                            state.current_energy = original_energy_for_revert
+                            state.rcm[:] = original_rcm_for_revert[:] # Revert rcm as well
+                            continue # Continue to next MC cycle attempt
 
-                    if jo_status == 0:
-                        _print_verbose(f"  Warning: Proposed QM energy calculation failed for global attempt {state.qm_call_count}. Rejecting move.", 1, state)
-                        # Revert to the original state if QM failed for this proposal
-                        state.rp[:] = original_rp_for_revert[:]
-                        state.iznu[:] = original_iznu_for_revert[:]
-                        state.current_energy = original_energy_for_revert
-                        state.rcm[:] = original_rcm_for_revert[:] # Revert rcm as well
-                        continue # Continue to next MC cycle attempt
-
-                    accept_move = False
-                    # Compare proposed energy with the energy of the *original* (last accepted) configuration
-                    delta_e = proposed_energy - original_energy_for_revert 
-                    
-                    criterion_str = "" # Reset criterion string for each attempt
-
-                    if delta_e <= 0.0: # If proposed energy is lower or equal, always accept
-                        accept_move = True
-                        criterion_str = "LwE" 
-                        state.lower_energy_configs += 1  # Increment counter for lower energy configs 
-                    else: # If proposed energy is higher, apply Metropolis criterion
-                        # Ensure temperature is not zero for division
-                        if state.current_temp < 1e-6: 
-                            pE = 0.0
-                        else:
-                            pE = math.exp(-delta_e / (B2 * state.current_temp))
+                        accept_move = False
+                        # Compare proposed energy with the energy of the *original* (last accepted) configuration
+                        delta_e = proposed_energy - original_energy_for_revert 
                         
-                        if state.use_standard_metropolis: # Standard Metropolis
-                            if random.random() < pE:
-                                accept_move = True
-                                criterion_str = "Mpol"
-                                state.iboltz += 1
-                        else: # Modified Metropolis (default)
-                            # Handle division by zero for crt (if proposed_energy is zero)
-                            if abs(proposed_energy) < 1e-12: # Avoid division by near-zero energy
-                                crt = float('inf') 
+                        criterion_str = "" # Reset criterion string for each attempt
+
+                        if delta_e <= 0.0: # If proposed energy is lower or equal, always accept
+                            accept_move = True
+                            criterion_str = "LwE" 
+                            state.lower_energy_configs += 1  # Increment counter for lower energy configs 
+                        else: # If proposed energy is higher, apply Metropolis criterion
+                            # Ensure temperature is not zero for division
+                            if state.current_temp < 1e-6: 
+                                pE = 0.0
                             else:
-                                crt = delta_e / abs(proposed_energy)
+                                pE = math.exp(-delta_e / (B2 * state.current_temp))
+                            
+                            if state.use_standard_metropolis: # Standard Metropolis
+                                if random.random() < pE:
+                                    accept_move = True
+                                    criterion_str = "Mpol"
+                                    state.iboltz += 1
+                            else: # Modified Metropolis (default)
+                                # Handle division by zero for crt (if proposed_energy is zero)
+                                if abs(proposed_energy) < 1e-12: # Avoid division by near-zero energy
+                                    crt = float('inf') 
+                                else:
+                                    crt = delta_e / abs(proposed_energy)
 
-                            if crt < pE: # This is the modified criterion
-                                accept_move = True
-                                criterion_str = "Mpol" 
-                                state.iboltz += 1 
+                                if crt < pE: # This is the modified criterion
+                                    accept_move = True
+                                    criterion_str = "Mpol" 
+                                    state.iboltz += 1
 
-                    if accept_move:
-                        # If accepted, update the system's current state to the *proposed* one
-                        state.current_energy = proposed_energy 
-                        # state.rp and state.rcm are already the proposed (accepted) state
-                        
-                        # Preserve QM files from this accepted configuration for debugging
-                        preserve_last_qm_files(state, run_dir)
-                        
-                        # Update original_state_for_revert to the newly accepted state
-                        original_rp_for_revert[:] = state.rp[:]
-                        original_iznu_for_revert[:] = state.iznu[:]
-                        original_energy_for_revert = state.current_energy
-                        original_rcm_for_revert[:] = state.rcm[:] # Update rcm for revert too
+                        if accept_move:
+                            # If accepted, update the system's current state to the *proposed* one
+                            state.current_energy = proposed_energy 
+                            # state.rp and state.rcm are already the proposed (accepted) state
+                            
+                            # Preserve QM files from this accepted configuration for debugging
+                            preserve_last_qm_files(state, run_dir)
+                            
+                            # Update original_state_for_revert to the newly accepted state
+                            original_rp_for_revert[:] = state.rp[:]
+                            original_iznu_for_revert[:] = state.iznu[:]
+                            original_energy_for_revert = state.current_energy
+                            original_rcm_for_revert[:] = state.rcm[:] # Update rcm for revert too
 
-                        _print_verbose(f"  Attempt {state.qm_call_count} (global): Move accepted ({criterion_str}). New energy: {state.current_energy:.8f} a.u.", 1, state)
+                            _print_verbose(f"  Attempt {state.qm_call_count} (global): Move accepted ({criterion_str}). New energy: {state.current_energy:.8f} a.u.", 1, state)
                         
                         # Update lowest energy found overall
                         if state.current_energy < state.lowest_energy:

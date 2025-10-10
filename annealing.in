@@ -23,7 +23,7 @@
 pm3           # Line 10: Hamiltonian & Basis Set
               # (e.g., pm3, hf)(e.g., 6-31G*, STO-3G)
 
-8             # Line 11: nprocs [memory] (QM calculations and ASCEC evaluation)
+8             # Line 11: nprocs [memory] ascec (QM calculations and ASCEC evaluation)
 
 0 1           # Line 12: Charge & Spin Multiplicity
 

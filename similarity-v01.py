@@ -9,6 +9,9 @@ import re
 import subprocess
 import shutil
 import pickle # Added for caching
+import multiprocessing as mp  # Added for parallel processing
+from functools import partial  # Added for parallel processing
+import sys  # Added for custom argument parsing
 # scipy.spatial.transform import moved to function that uses it
 
 
@@ -301,6 +304,22 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
             'average_hbond_angle': None, 'min_hbond_angle': None, 
             'max_hbond_angle': None, 'std_hbond_angle': None
         }
+
+def process_file_parallel_wrapper(file_path):
+    """
+    Wrapper function for parallel processing of files.
+    Returns a tuple of (success, result, filename) to handle both successful extractions and skipped files.
+    """
+    try:
+        filename = os.path.basename(file_path)
+        extracted_props = extract_properties_from_logfile(file_path)
+        if extracted_props:
+            return (True, extracted_props, filename)  # Success
+        else:
+            return (False, None, filename)  # Skipped (likely imaginary frequencies)
+    except Exception as e:
+        print(f"  ERROR: Failed to process {os.path.basename(file_path)}: {e}")
+        return (False, None, os.path.basename(file_path))  # Error
 
 def extract_properties_from_logfile(logfile_path):
     from cclib.io import ccread  # Import only when needed
@@ -1641,10 +1660,24 @@ def parse_abs_tolerance_argument(tolerance_str):
             print(f"WARNING: Could not parse absolute tolerance for '{key}={value}'. Skipping this tolerance.")
     return tolerances
 
+def preprocess_j_argument(argv):
+    """
+    Preprocesses command line arguments to handle -j8 format (no space) by converting it to -j 8.
+    This allows both '-j 8' and '-j8' formats to work.
+    """
+    processed_argv = []
+    for arg in argv:
+        if arg.startswith('-j') and len(arg) > 2 and arg[2:].isdigit():
+            # Convert -j8 to -j 8
+            processed_argv.extend(['-j', arg[2:]])
+        else:
+            processed_argv.append(arg)
+    return processed_argv
+
 
 
 # Modified to accept rmsd_threshold and output_base_dir
-def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, motif_threshold=1.0):
+def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, motif_threshold=1.0, num_cores=None):
     """
     Performs hierarchical clustering and comprehensive analysis on molecular structures.
     This is the main analysis function that orchestrates the entire clustering workflow.
@@ -1652,6 +1685,10 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     from sklearn.preprocessing import StandardScaler  # Import only when needed
     from scipy.cluster.hierarchy import dendrogram, linkage, fcluster  # Import only when needed
     import matplotlib.pyplot as plt  # Import only when needed
+    
+    # Set default number of cores if not specified
+    if num_cores is None:
+        num_cores = mp.cpu_count()
     """
     Performs hierarchical clustering and analysis on the extracted molecular properties,
     and saves .dat and .xyz files for each cluster.
@@ -1743,12 +1780,21 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         files_to_process = input_source # input_source is already the list of files
         # For compare mode, we should probably bypass cache loading/saving, or make it specific to the comparison.
         # For now, let's assume compare mode always re-processes the two files.
-        print(f"Starting data extraction for comparison mode from {len(files_to_process)} files...")
-        for file_path in sorted(files_to_process):
-            print(f"  Extracting from: {os.path.basename(file_path)}...")
-            extracted_props = extract_properties_from_logfile(file_path)
-            if extracted_props:
+        print(f"Starting parallel data extraction for comparison mode from {len(files_to_process)} files...")
+        
+        # Use parallel processing for comparison mode
+        effective_cores = min(num_cores, len(files_to_process))  # Don't use more cores than files
+        print(f"  Using {effective_cores} CPU cores for parallel processing")
+        
+        with mp.Pool(processes=effective_cores) as pool:
+            results = pool.map(process_file_parallel_wrapper, sorted(files_to_process))
+        
+        # Process results
+        for success, extracted_props, filename in results:
+            if success and extracted_props:
                 all_extracted_data.append(extracted_props)
+            elif not success:
+                skipped_files.add(filename)
     else:
         # Existing cache logic for normal mode
         if os.path.exists(cache_file_path) and not force_reprocess_cache:
@@ -1836,14 +1882,20 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
         # Process files if needed
         if files_to_actually_process:
-            for file_path in sorted(files_to_actually_process):
-                vprint(f"  Extracting from: {os.path.basename(file_path)}...")
-                extracted_props = extract_properties_from_logfile(file_path)
-                if extracted_props:
+            # Use parallel processing for normal mode
+            effective_cores = min(num_cores, len(files_to_actually_process))  # Don't use more cores than files
+            print(f"  Using {effective_cores} CPU cores for parallel processing")
+            
+            with mp.Pool(processes=effective_cores) as pool:
+                results = pool.map(process_file_parallel_wrapper, sorted(files_to_actually_process))
+            
+            # Process results
+            for success, extracted_props, filename in results:
+                if success and extracted_props:
                     all_extracted_data.append(extracted_props)
-                else:
+                elif not success:
                     # File was skipped (likely due to imaginary frequencies)
-                    skipped_files.add(os.path.basename(file_path))
+                    skipped_files.add(filename)
             
             # Save updated cache with both successful and skipped files
             if not is_compare_mode:
@@ -2737,11 +2789,15 @@ if __name__ == "__main__":
                         help="Specify absolute tolerances for features as a string, e.g., '(electronic_energy=1e-5)(dipole_moment=1e-3)'. Features with max difference below tolerance are zeroed out for scaling.")
     parser.add_argument("--motif", type=float, default=None,
                         help="Threshold for final motif clustering (excluding H-bond count). If not specified, uses the same value as --threshold.")
+    parser.add_argument("--cores", "-j", type=int, default=None,
+                        help=f"Number of CPU cores to use for parallel processing. Default: auto-detect ({mp.cpu_count()} cores available)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output showing detailed information for each step.")
 
 
-    args = parser.parse_args()
+    # Preprocess arguments to handle -j8 format
+    processed_args = preprocess_j_argument(sys.argv[1:])
+    args = parser.parse_args(processed_args)
     clustering_threshold = args.threshold
     rmsd_validation_threshold = args.rmsd 
     output_directory = args.output_dir
@@ -2750,6 +2806,7 @@ if __name__ == "__main__":
     min_std_threshold_val = args.min_std_threshold 
     abs_tolerances_dict = parse_abs_tolerance_argument(args.abs_tolerance)
     motif_threshold = args.motif if args.motif is not None else clustering_threshold
+    num_cores = args.cores if args.cores is not None else mp.cpu_count()
     
     # Update the global verbose flag
     VERBOSE = args.verbose
@@ -2814,7 +2871,8 @@ if __name__ == "__main__":
             is_compare_mode=True,
             min_std_threshold=min_std_threshold_val,
             abs_tolerances=abs_tolerances_dict, # Pass the new argument
-            motif_threshold=motif_threshold
+            motif_threshold=motif_threshold,
+            num_cores=num_cores  # Pass parallel processing cores
         )
         print(f"\n--- Finished comparing {len(compare_files)} files: {', '.join(file_names)} ---\n")
 
@@ -2905,7 +2963,7 @@ if __name__ == "__main__":
                 display_name = "./"
             print(f"\n--- Processing folder: {display_name} ---\n")
 
-            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, motif_threshold=motif_threshold)
+            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, motif_threshold=motif_threshold, num_cores=num_cores)
 
             print(f"\n--- Finished processing folder: {display_name} ---\n")
 
