@@ -79,6 +79,177 @@ def show_parallel_progress(completed: int, total: int, prefix: str = "Progress")
         print(f'\r{prefix}: |{bar}| {percent}% ({completed}/{total})', end='', flush=True)
         if completed == total:
             print()  # New line when complete
+
+def _process_xyz_file_simple(xyz_file_data):
+    """
+    Process a single XYZ file for simple calculation system creation.
+    This is a module-level function to support multiprocessing.
+    """
+    xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
+    
+    # Extract configurations
+    configurations = extract_configurations_from_xyz(xyz_file)
+    if not configurations:
+        return [], f"Warning: No configurations found in {xyz_file}"
+    
+    # Determine run number from filename and directory
+    filename = os.path.basename(xyz_file)
+    if filename.startswith("combined_results") or filename.startswith("combined_r"):
+        run_num = 1
+    else:
+        # Extract seed from result_<seed>.xyz
+        try:
+            seed = filename.replace("result_", "").replace(".xyz", "")
+            run_num = int(seed) if seed.isdigit() else 1
+        except:
+            run_num = 1
+        
+        # Also try to get run number from directory name if it contains meaningful info
+        dir_name = os.path.dirname(xyz_file)
+        if dir_name != ".":
+            # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
+            parts = os.path.basename(dir_name).split('_')
+            for part in reversed(parts):
+                try:
+                    dir_run_num = int(part)
+                    run_num = dir_run_num  # Use directory number if available
+                    break
+                except ValueError:
+                    continue
+    
+    file_input_files = []
+    
+    # Create input files for each configuration
+    for config in configurations:
+        # Clean up the comment for result files to remove temperature and add source info
+        if not (filename.startswith("combined_results") or filename.startswith("combined_r")):
+            # Extract energy from original comment
+            original_comment = config['comment']
+            energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+            config_match = re.search(r'Configuration: (\d+)', original_comment)
+            
+            energy = energy_match.group(1) if energy_match else "unknown"
+            config_num = config_match.group(1) if config_match else config['config_num']
+            
+            # Create new comment without temperature, with source info
+            source_name = filename.replace('.xyz', '')
+            if energy == "unknown":
+                config['comment'] = f"Configuration: {config_num} | {source_name}"
+            else:
+                config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
+        
+        if filename.startswith("combined_results") or filename.startswith("combined_r"):
+            input_name = f"opt_conf_{config['config_num']}{input_ext}"
+        else:
+            input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
+            
+        input_path = os.path.join(calc_dir, input_name)
+        
+        if create_qm_input_file(config, template_content, input_path, qm_program):
+            file_input_files.append(input_name)
+    
+    return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
+
+def _process_xyz_file_for_calc(xyz_file_data):
+    """
+    Process a single XYZ file for calculation system creation.
+    This is a module-level function to support multiprocessing.
+    """
+    xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
+    
+    # Extract configurations
+    configurations = extract_configurations_from_xyz(xyz_file)
+    if not configurations:
+        return [], f"Warning: No configurations found in {xyz_file}"
+    
+    # Determine the run number from the directory name
+    dir_name = os.path.dirname(xyz_file)
+    if dir_name == ".":
+        run_num = 1
+    else:
+        # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
+        parts = os.path.basename(dir_name).split('_')
+        run_num = 1
+        for part in reversed(parts):
+            try:
+                run_num = int(part)
+                break
+            except ValueError:
+                continue
+    
+    file_input_files = []
+    source_name = os.path.basename(xyz_file).replace('.xyz', '')
+    
+    # Create input files for each configuration
+    for config in configurations:
+        # Clean up the comment to remove temperature and add source info
+        original_comment = config['comment']
+        energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+        config_match = re.search(r'Configuration: (\d+)', original_comment)
+        
+        energy = energy_match.group(1) if energy_match else "unknown"
+        config_num = config_match.group(1) if config_match else config['config_num']
+        
+        # Create new comment without temperature, with source info
+        if energy == "unknown":
+            config['comment'] = f"Configuration: {config_num} | {source_name}"
+        else:
+            config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
+        
+        input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
+        input_path = os.path.join(calc_dir, input_name)
+        
+        if create_qm_input_file(config, template_content, input_path, qm_program):
+            file_input_files.append(input_name)
+        
+    return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
+
+def _process_xyz_file_for_opt(xyz_file_data):
+    """
+    Process a single XYZ file for optimization system creation.
+    This is a module-level function to support multiprocessing.
+    """
+    xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
+    
+    # Extract configurations
+    configurations = extract_configurations_from_xyz(xyz_file)
+    if not configurations:
+        return [], f"Warning: No configurations found in {xyz_file}"
+    
+    file_input_files = []
+    base_name = os.path.basename(xyz_file).replace('.xyz', '')
+    
+    # Create input files for each configuration
+    for config in configurations:
+        # Extract motif name from comment if available, otherwise use base filename
+        import re
+        comment = config['comment']
+        motif_match = re.search(r'[Mm]otif_(\d+)', comment)
+        
+        # If not found in comment, try to extract from filename
+        if not motif_match:
+            motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
+        
+        if motif_match:
+            # Use motif name from comment or filename
+            motif_num = int(motif_match.group(1))
+            input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
+            source_name = f"motif_{motif_num:0>2}"
+        else:
+            # For non-motif files, use simple opt_conf_X naming
+            input_name = f"opt_conf_{config['config_num']}{input_ext}"
+            source_name = base_name
+        
+        input_path = os.path.join(opt_dir, input_name)
+        
+        # Update config comment with source file info
+        config['comment'] = f"Configuration: {config['config_num']} | Source: {source_name}"
+        
+        # Create input file
+        if create_qm_input_file(config, template_content, input_path, qm_program):
+            file_input_files.append(input_name)
+    
+    return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
 MAX_OVERLAP_PLACEMENT_ATTEMPTS = 100000 # Max attempts to place a single molecule without significant overlap
 
 # Set this to True to create a SEPARATE COPY of the XYZ file
@@ -4261,73 +4432,6 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
     # Process each XYZ file in parallel
     all_input_files = []
     
-    # Define a function for parallel processing of XYZ files
-    def process_xyz_file_simple(xyz_file_data):
-        xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
-        
-        # Extract configurations
-        configurations = extract_configurations_from_xyz(xyz_file)
-        if not configurations:
-            return [], f"Warning: No configurations found in {xyz_file}"
-        
-        # Determine run number from filename and directory
-        filename = os.path.basename(xyz_file)
-        if filename.startswith("combined_results") or filename.startswith("combined_r"):
-            run_num = 1
-        else:
-            # Extract seed from result_<seed>.xyz
-            try:
-                seed = filename.replace("result_", "").replace(".xyz", "")
-                run_num = int(seed) if seed.isdigit() else 1
-            except:
-                run_num = 1
-            
-            # Also try to get run number from directory name if it contains meaningful info
-            dir_name = os.path.dirname(xyz_file)
-            if dir_name != ".":
-                # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
-                parts = os.path.basename(dir_name).split('_')
-                for part in reversed(parts):
-                    try:
-                        dir_run_num = int(part)
-                        run_num = dir_run_num  # Use directory number if available
-                        break
-                    except ValueError:
-                        continue
-        
-        file_input_files = []
-        
-        # Create input files for each configuration
-        for config in configurations:
-            # Clean up the comment for result files to remove temperature and add source info
-            if not (filename.startswith("combined_results") or filename.startswith("combined_r")):
-                # Extract energy from original comment
-                original_comment = config['comment']
-                energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
-                config_match = re.search(r'Configuration: (\d+)', original_comment)
-                
-                energy = energy_match.group(1) if energy_match else "unknown"
-                config_num = config_match.group(1) if config_match else config['config_num']
-                
-                # Create new comment without temperature, with source info
-                source_name = filename.replace('.xyz', '')
-                if energy == "unknown":
-                    config['comment'] = f"Configuration: {config_num} | {source_name}"
-                else:
-                    config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
-            
-            if filename.startswith("combined_results") or filename.startswith("combined_r"):
-                input_name = f"opt_conf_{config['config_num']}{input_ext}"
-            else:
-                input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
-                
-            input_path = os.path.join(calc_dir, input_name)
-            
-            if create_qm_input_file(config, template_content, input_path, qm_program):
-                file_input_files.append(input_name)
-        
-        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
-    
     # Prepare data for parallel processing
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -4343,7 +4447,7 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
-        future_to_file = {executor.submit(process_xyz_file_simple, args): args[0] 
+        future_to_file = {executor.submit(_process_xyz_file_simple, args): args[0] 
                          for args in xyz_file_args}
         
         # Collect results as they complete
@@ -4567,50 +4671,6 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
     # Process each selected XYZ file in parallel
     all_input_files = []
     
-    # Define a function for parallel processing of XYZ files for optimization
-    def process_xyz_file_for_opt(xyz_file_data):
-        xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
-        
-        # Extract configurations
-        configurations = extract_configurations_from_xyz(xyz_file)
-        if not configurations:
-            return [], f"Warning: No configurations found in {xyz_file}"
-        
-        file_input_files = []
-        base_name = os.path.basename(xyz_file).replace('.xyz', '')
-        
-        # Create input files for each configuration
-        for config in configurations:
-            # Extract motif name from comment if available, otherwise use base filename
-            import re
-            comment = config['comment']
-            motif_match = re.search(r'[Mm]otif_(\d+)', comment)
-            
-            # If not found in comment, try to extract from filename
-            if not motif_match:
-                motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
-            
-            if motif_match:
-                # Use motif name from comment or filename
-                motif_num = int(motif_match.group(1))
-                input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
-                source_name = f"motif_{motif_num:0>2}"
-            else:
-                # For non-motif files, use simple opt_conf_X naming
-                input_name = f"opt_conf_{config['config_num']}{input_ext}"
-                source_name = base_name
-            
-            input_path = os.path.join(opt_dir, input_name)
-            
-            # Update config comment with source file info
-            config['comment'] = f"Configuration: {config['config_num']} | Source: {source_name}"
-            
-            # Create input file
-            if create_qm_input_file(config, template_content, input_path, qm_program):
-                file_input_files.append(input_name)
-        
-        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
-    
     # Prepare data for parallel processing
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -4626,7 +4686,7 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
-        future_to_file = {executor.submit(process_xyz_file_for_opt, args): args[0] 
+        future_to_file = {executor.submit(_process_xyz_file_for_opt, args): args[0] 
                          for args in xyz_file_args}
         
         # Collect results as they complete
@@ -5289,57 +5349,6 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
     # Process each selected XYZ file in parallel
     all_input_files = []
     
-    # Define a function for parallel processing of XYZ files
-    def process_xyz_file_for_calc(xyz_file_data):
-        xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
-        
-        # Extract configurations
-        configurations = extract_configurations_from_xyz(xyz_file)
-        if not configurations:
-            return [], f"Warning: No configurations found in {xyz_file}"
-        
-        # Determine the run number from the directory name
-        dir_name = os.path.dirname(xyz_file)
-        if dir_name == ".":
-            run_num = 1
-        else:
-            # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
-            parts = os.path.basename(dir_name).split('_')
-            run_num = 1
-            for part in reversed(parts):
-                try:
-                    run_num = int(part)
-                    break
-                except ValueError:
-                    continue
-        
-        file_input_files = []
-        source_name = os.path.basename(xyz_file).replace('.xyz', '')
-        
-        # Create input files for each configuration
-        for config in configurations:
-            # Clean up the comment to remove temperature and add source info
-            original_comment = config['comment']
-            energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
-            config_match = re.search(r'Configuration: (\d+)', original_comment)
-            
-            energy = energy_match.group(1) if energy_match else "unknown"
-            config_num = config_match.group(1) if config_match else config['config_num']
-            
-            # Create new comment without temperature, with source info
-            if energy == "unknown":
-                config['comment'] = f"Configuration: {config_num} | {source_name}"
-            else:
-                config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
-            
-            input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
-            input_path = os.path.join(calc_dir, input_name)
-            
-            if create_qm_input_file(config, template_content, input_path, qm_program):
-                file_input_files.append(input_name)
-            
-        return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
-    
     # Prepare data for parallel processing
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -5355,7 +5364,7 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
-        future_to_file = {executor.submit(process_xyz_file_for_calc, args): args[0] 
+        future_to_file = {executor.submit(_process_xyz_file_for_calc, args): args[0] 
                          for args in xyz_file_args}
         
         # Collect results as they complete
