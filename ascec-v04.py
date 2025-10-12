@@ -18,8 +18,16 @@ import time
 import traceback
 from typing import Dict, List, Optional, Tuple 
 from datetime import timedelta
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import multiprocessing
+
+# Set multiprocessing start method for better compatibility
+if __name__ == '__main__':
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        # If already set, continue
+        pass
 
 # Global Constants
 MAX_ATOM = 1000 # Increase this if your systems are larger than 1000 atoms
@@ -28,6 +36,49 @@ B2 = 3.166811563e-6   # Boltzmann constant in Hartree/K (approx. 3.166811563 × 
 
 # Constants for overlap prevention during initial configuration generation (in config_molecules)
 OVERLAP_SCALE_FACTOR = 0.7 # Factor to make overlap check slightly more lenient (e.g., allow partial overlap)
+
+def get_optimal_workers(task_type: str, num_items: int) -> int:
+    """
+    Calculate optimal number of workers for different task types.
+    
+    Args:
+        task_type: Type of task ('cpu_intensive', 'io_intensive', 'mixed')
+        num_items: Number of items to process
+    
+    Returns:
+        Optimal number of workers
+    """
+    cpu_count = multiprocessing.cpu_count()
+    
+    if task_type == 'cpu_intensive':
+        # For CPU-intensive tasks like parsing files
+        return min(cpu_count, num_items, 8)
+    elif task_type == 'io_intensive':
+        # For I/O-intensive tasks like file copying
+        return min(cpu_count * 2, num_items, 6)  
+    elif task_type == 'mixed':
+        # For mixed tasks like file creation
+        return min(cpu_count, num_items, 4)
+    else:
+        return min(cpu_count, num_items, 4)  # Default
+
+def show_parallel_progress(completed: int, total: int, prefix: str = "Progress"):
+    """
+    Show progress during parallel processing.
+    
+    Args:
+        completed: Number of completed tasks
+        total: Total number of tasks
+        prefix: Prefix for progress message
+    """
+    if total > 0:
+        percent = int(100 * completed / total)
+        bar_length = 30
+        filled_length = int(bar_length * completed / total)
+        bar = '█' * filled_length + '-' * (bar_length - filled_length)
+        print(f'\r{prefix}: |{bar}| {percent}% ({completed}/{total})', end='', flush=True)
+        if completed == total:
+            print()  # New line when complete
 MAX_OVERLAP_PLACEMENT_ATTEMPTS = 100000 # Max attempts to place a single molecule without significant overlap
 
 # Set this to True to create a SEPARATE COPY of the XYZ file
@@ -4207,15 +4258,17 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
         return "No XYZ files selected for processing."
     xyz_files = selected_xyz_files
     
-    # Process each XYZ file
+    # Process each XYZ file in parallel
     all_input_files = []
     
-    for xyz_file in xyz_files:
+    # Define a function for parallel processing of XYZ files
+    def process_xyz_file_simple(xyz_file_data):
+        xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
+        
         # Extract configurations
         configurations = extract_configurations_from_xyz(xyz_file)
         if not configurations:
-            print(f"Warning: No configurations found in {xyz_file}")
-            continue
+            return [], f"Warning: No configurations found in {xyz_file}"
         
         # Determine run number from filename and directory
         filename = os.path.basename(xyz_file)
@@ -4242,12 +4295,11 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
                     except ValueError:
                         continue
         
-        print(f"\nProcessing {xyz_file} with {len(configurations)} configurations:")
+        file_input_files = []
         
         # Create input files for each configuration
         for config in configurations:
             # Clean up the comment for result files to remove temperature and add source info
-            filename = os.path.basename(xyz_file)
             if not (filename.startswith("combined_results") or filename.startswith("combined_r")):
                 # Extract energy from original comment
                 original_comment = config['comment']
@@ -4272,10 +4324,41 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
             input_path = os.path.join(calc_dir, input_name)
             
             if create_qm_input_file(config, template_content, input_path, qm_program):
-                all_input_files.append(input_name)
-                print(f"  Created: {input_name}")
-            else:
-                print(f"  Failed to create: {input_name}")
+                file_input_files.append(input_name)
+        
+        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
+    
+    # Prepare data for parallel processing
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    print(f"Processing {len(xyz_files)} XYZ files in parallel...")
+    
+    # Prepare arguments for each file
+    xyz_file_args = [(xyz_file, template_content, calc_dir, qm_program, input_ext) 
+                     for xyz_file in xyz_files]
+    
+    # Use parallel processing with limited workers
+    max_workers = get_optimal_workers('mixed', len(xyz_files))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {executor.submit(process_xyz_file_simple, args): args[0] 
+                         for args in xyz_file_args}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_file):
+            xyz_file = future_to_file[future]
+            try:
+                file_input_files, status_msg = future.result()
+                all_input_files.extend(file_input_files)
+                print(f"  {status_msg}")
+                for input_file in file_input_files:
+                    print(f"    Created: {input_file}")
+            except Exception as e:
+                print(f"  Error processing {xyz_file}: {e}")
+    
+    print(f"Completed processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
@@ -4481,21 +4564,23 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
     except IOError as e:
         return f"Error reading template file: {e}"
     
-    # Process each selected XYZ file
+    # Process each selected XYZ file in parallel
     all_input_files = []
     
-    for xyz_file in selected_xyz_files:
+    # Define a function for parallel processing of XYZ files for optimization
+    def process_xyz_file_for_opt(xyz_file_data):
+        xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
+        
         # Extract configurations
         configurations = extract_configurations_from_xyz(xyz_file)
         if not configurations:
-            print(f"Warning: No configurations found in {xyz_file}")
-            continue
+            return [], f"Warning: No configurations found in {xyz_file}"
+        
+        file_input_files = []
+        base_name = os.path.basename(xyz_file).replace('.xyz', '')
         
         # Create input files for each configuration
         for config in configurations:
-            # Get base name for source info
-            base_name = os.path.basename(xyz_file).replace('.xyz', '')
-            
             # Extract motif name from comment if available, otherwise use base filename
             import re
             comment = config['comment']
@@ -4522,10 +4607,41 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
             
             # Create input file
             if create_qm_input_file(config, template_content, input_path, qm_program):
-                all_input_files.append(input_name)
-                print(f"Created: {input_name}")
-            else:
-                print(f"Failed to create: {input_name}")
+                file_input_files.append(input_name)
+        
+        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
+    
+    # Prepare data for parallel processing
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    print(f"Processing {len(selected_xyz_files)} XYZ files for optimization in parallel...")
+    
+    # Prepare arguments for each file
+    xyz_file_args = [(xyz_file, template_content, opt_dir, qm_program, input_ext) 
+                     for xyz_file in selected_xyz_files]
+    
+    # Use parallel processing with limited workers
+    max_workers = get_optimal_workers('mixed', len(selected_xyz_files))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {executor.submit(process_xyz_file_for_opt, args): args[0] 
+                         for args in xyz_file_args}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_file):
+            xyz_file = future_to_file[future]
+            try:
+                file_input_files, status_msg = future.result()
+                all_input_files.extend(file_input_files)
+                print(f"  {status_msg}")
+                for input_file in file_input_files:
+                    print(f"    Created: {input_file}")
+            except Exception as e:
+                print(f"  Error processing {xyz_file}: {e}")
+    
+    print(f"Completed processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
@@ -5170,15 +5286,17 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
     if not selected_xyz_files:
         return "No XYZ files selected for processing."
     
-    # Process each selected XYZ file
+    # Process each selected XYZ file in parallel
     all_input_files = []
     
-    for xyz_file in selected_xyz_files:
+    # Define a function for parallel processing of XYZ files
+    def process_xyz_file_for_calc(xyz_file_data):
+        xyz_file, template_content, calc_dir, qm_program, input_ext = xyz_file_data
+        
         # Extract configurations
         configurations = extract_configurations_from_xyz(xyz_file)
         if not configurations:
-            print(f"Warning: No configurations found in {xyz_file}")
-            continue
+            return [], f"Warning: No configurations found in {xyz_file}"
         
         # Determine the run number from the directory name
         dir_name = os.path.dirname(xyz_file)
@@ -5195,7 +5313,8 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
                 except ValueError:
                     continue
         
-        print(f"\nProcessing {xyz_file} (run {run_num}) with {len(configurations)} configurations:")
+        file_input_files = []
+        source_name = os.path.basename(xyz_file).replace('.xyz', '')
         
         # Create input files for each configuration
         for config in configurations:
@@ -5208,7 +5327,6 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
             config_num = config_match.group(1) if config_match else config['config_num']
             
             # Create new comment without temperature, with source info
-            source_name = os.path.basename(xyz_file).replace('.xyz', '')
             if energy == "unknown":
                 config['comment'] = f"Configuration: {config_num} | {source_name}"
             else:
@@ -5218,10 +5336,41 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
             input_path = os.path.join(calc_dir, input_name)
             
             if create_qm_input_file(config, template_content, input_path, qm_program):
-                all_input_files.append(input_name)
-                print(f"  Created: {input_name}")
-            else:
-                print(f"  Failed to create: {input_name}")
+                file_input_files.append(input_name)
+            
+        return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
+    
+    # Prepare data for parallel processing
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    print(f"Processing {len(selected_xyz_files)} XYZ files in parallel...")
+    
+    # Prepare arguments for each file
+    xyz_file_args = [(xyz_file, template_content, calc_dir, qm_program, input_ext) 
+                     for xyz_file in selected_xyz_files]
+    
+    # Use parallel processing with limited workers
+    max_workers = get_optimal_workers('mixed', len(selected_xyz_files))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_file = {executor.submit(process_xyz_file_for_calc, args): args[0] 
+                         for args in xyz_file_args}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_file):
+            xyz_file = future_to_file[future]
+            try:
+                file_input_files, status_msg = future.result()
+                all_input_files.extend(file_input_files)
+                print(f"  {status_msg}")
+                for input_file in file_input_files:
+                    print(f"    Created: {input_file}")
+            except Exception as e:
+                print(f"  Error processing {xyz_file}: {e}")
+    
+    print(f"Completed processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
@@ -5385,28 +5534,101 @@ def extract_base(filename):
     return name
 
 def group_files_by_base(directory='.'):
-    """Group files by base name and move them to folders."""
+    """Group files by base name and move them to folders using parallel processing."""
+    import multiprocessing as mp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     
     files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
     base_map = defaultdict(list)
 
-    for file in files:
-        base = extract_base(file)
-        if base:
-            base_map[base].append(file)
+    print(f"Analyzing {len(files)} files for grouping...")
+    
+    # Define function to extract base for a batch of files
+    def extract_bases_batch(file_batch):
+        batch_map = defaultdict(list)
+        for file in file_batch:
+            base = extract_base(file)
+            if base:
+                batch_map[base].append(file)
+        return batch_map
 
-    # Move files
-    moved_count = 0
-    for base, grouped_files in base_map.items():
+    # Use parallel processing for base extraction if we have many files
+    if len(files) > 100:
+        # Split files into batches for parallel processing
+        batch_size = max(10, len(files) // mp.cpu_count())
+        file_batches = [files[i:i + batch_size] for i in range(0, len(files), batch_size)]
+        
+        max_workers = get_optimal_workers('cpu_intensive', len(file_batches))
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all batch processing tasks
+            future_to_batch = {executor.submit(extract_bases_batch, batch): batch 
+                              for batch in file_batches}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_batch):
+                try:
+                    batch_map = future.result()
+                    for base, file_list in batch_map.items():
+                        base_map[base].extend(file_list)
+                except Exception as e:
+                    print(f"Error processing batch: {e}")
+    else:
+        # For smaller file sets, process directly
+        for file in files:
+            base = extract_base(file)
+            if base:
+                base_map[base].append(file)
+
+    # Move files using parallel processing
+    def move_file_group(group_data):
+        base, grouped_files, directory = group_data
+        moved_files = []
+        
         if len(grouped_files) > 1:
             folder_path = os.path.join(directory, base)
             os.makedirs(folder_path, exist_ok=True)
+            
             for file in grouped_files:
-                src = os.path.join(directory, file)
-                dest = os.path.join(folder_path, file)
-                shutil.move(src, dest)
-            print(f"Moved {len(grouped_files)} files to folder: {base}")
-            moved_count += len(grouped_files)
+                try:
+                    src = os.path.join(directory, file)
+                    dest = os.path.join(folder_path, file)
+                    shutil.move(src, dest)
+                    moved_files.append(file)
+                except Exception as e:
+                    print(f"Error moving {file}: {e}")
+            
+            if moved_files:
+                return f"Moved {len(moved_files)} files to folder: {base}", len(moved_files)
+        
+        return None, 0
+
+    # Prepare groups for parallel moving
+    groups_to_move = [(base, grouped_files, directory) 
+                     for base, grouped_files in base_map.items() 
+                     if len(grouped_files) > 1]
+    
+    moved_count = 0
+    
+    if groups_to_move:
+        print(f"Moving files in {len(groups_to_move)} groups using parallel processing...")
+        
+        max_workers = get_optimal_workers('io_intensive', len(groups_to_move))
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all moving tasks
+            future_to_group = {executor.submit(move_file_group, group): group[0] 
+                              for group in groups_to_move}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_group):
+                try:
+                    message, count = future.result()
+                    if message:
+                        print(message)
+                        moved_count += count
+                except Exception as e:
+                    print(f"Error in file moving: {e}")
     
     if moved_count == 0:
         print("No files needed to be grouped.")
@@ -5598,6 +5820,9 @@ def format_wall_time(seconds):
 
 def summarize_calculations(directory=".", file_types=None):
     """Create summary of calculations for ORCA (.out) and/or Gaussian (.log) files."""
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
     if file_types is None:
         file_types = ['orca', 'gaussian']  # Default: process both types
     
@@ -5634,18 +5859,36 @@ def summarize_calculations(directory=".", file_types=None):
         if not found_files:
             continue  # Skip this type if no files found
             
+        print(f"Processing {len(found_files)} {file_type.upper()} files in parallel...")
+        
+        # Use parallel processing to parse files
+        max_workers = get_optimal_workers('cpu_intensive', len(found_files))
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all parsing tasks
+            future_to_file = {executor.submit(parse_function, filepath): filepath for filepath in found_files}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_file):
+                filepath = future_to_file[future]
+                try:
+                    results = future.result()
+                    if results:
+                        job_summaries.append(results)
+                        all_results['job_count'] += 1
+                        if results.get('time') is not None:
+                            all_results['total_time'] += results['time']
+                            if all_results['min_time'] is None or results['time'] < all_results['min_time']:
+                                all_results['min_time'] = results['time']
+                            if all_results['max_time'] is None or results['time'] > all_results['max_time']:
+                                all_results['max_time'] = results['time']
+                except Exception as e:
+                    print(f"Error processing {filepath}: {e}")
+        
+        print(f"Completed processing {len(job_summaries)} {file_type.upper()} files successfully.")
+        
+        # Write summary file with collected results
         with open(summary_file, 'w', encoding='utf-8') as outfile:
-            for filepath in found_files:
-                results = parse_function(filepath)
-                if results:
-                    job_summaries.append(results)
-                    all_results['job_count'] += 1
-                    if results.get('time') is not None:
-                        all_results['total_time'] += results['time']
-                        if all_results['min_time'] is None or results['time'] < all_results['min_time']:
-                            all_results['min_time'] = results['time']
-                        if all_results['max_time'] is None or results['time'] > all_results['max_time']:
-                            all_results['max_time'] = results['time']
 
             # Sort the job summaries by total_time
             job_summaries.sort(key=lambda x: x.get('time') or float('inf'))
@@ -5685,12 +5928,46 @@ def summarize_calculations(directory=".", file_types=None):
     return sum(results_by_type.values())
 
 def find_out_files(root_dir):
-    """Find all .out files in the directory tree."""
+    """Find all .out files in the directory tree using parallel processing."""
+    import multiprocessing as mp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import os
+    
     out_files = []
+    directories_to_search = []
+    
+    # First, collect all directories to search
     for root, dirs, files in os.walk(root_dir):
+        directories_to_search.append((root, files))
+    
+    # Define function to search a single directory
+    def search_directory(dir_data):
+        root, files = dir_data
+        local_out_files = []
         for file in files:
             if file.endswith('.out'):
-                out_files.append(os.path.join(root, file))
+                local_out_files.append(os.path.join(root, file))
+        return local_out_files
+    
+    # Use parallel processing to search directories
+    if len(directories_to_search) > 1:
+        max_workers = get_optimal_workers('io_intensive', len(directories_to_search))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all directory search tasks
+            future_to_dir = {executor.submit(search_directory, dir_data): dir_data[0] 
+                            for dir_data in directories_to_search}
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_dir):
+                try:
+                    local_files = future.result()
+                    out_files.extend(local_files)
+                except Exception as e:
+                    print(f"Error searching directory: {e}")
+    else:
+        # For single directory, just do it directly
+        out_files = search_directory(directories_to_search[0]) if directories_to_search else []
+    
     return out_files
 
 
@@ -5732,14 +6009,43 @@ def collect_out_files():
     os.makedirs(destination_path)
     print(f"\nCreated destination folder: similarity/{destination_folder_name}")
 
-    print(f"Copying {num_files} .out files to 'similarity/{destination_folder_name}'...")
-    for file_path in all_out_files:
+    # Define function to copy a single file
+    def copy_file(file_data):
+        file_path, destination_path = file_data
         try:
             shutil.copy2(file_path, destination_path)
+            return f"Copied: {os.path.basename(file_path)}"
         except Exception as e:
-            print(f"Error copying {os.path.basename(file_path)}: {e}")
+            return f"Error copying {os.path.basename(file_path)}: {e}"
 
-    print(f"\nCopied {num_files} .out files to similarity/{destination_folder_name}")
+    print(f"Copying {num_files} .out files to 'similarity/{destination_folder_name}' in parallel...")
+    
+    # Use parallel processing for file copying
+    import multiprocessing as mp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    max_workers = get_optimal_workers('io_intensive', num_files)
+    
+    copy_tasks = [(file_path, destination_path) for file_path in all_out_files]
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all copy tasks
+        future_to_file = {executor.submit(copy_file, task): task[0] 
+                         for task in copy_tasks}
+        
+        # Collect results as they complete
+        successful_copies = 0
+        for future in as_completed(future_to_file):
+            try:
+                result = future.result()
+                if "Copied:" in result:
+                    successful_copies += 1
+                if successful_copies % 10 == 0 or "Error" in result:  # Show progress every 10 files or errors
+                    print(f"  {result}")
+            except Exception as e:
+                print(f"  Unexpected error: {e}")
+
+    print(f"\nCopied {successful_copies}/{num_files} .out files to similarity/{destination_folder_name}")
     print("Process complete. Original files remain untouched.")
     return True
 
