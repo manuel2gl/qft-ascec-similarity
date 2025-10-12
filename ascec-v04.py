@@ -5558,81 +5558,131 @@ def format_time_summary(seconds, include_days=False):
         return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
 
 def format_total_time(seconds):
-    """Format the total time."""
+    """Format the total execution time in H:M:S format."""
+    hours, rem = divmod(seconds, 3600)
+    minutes, sec = divmod(rem, 60)
+    return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
+
+def format_mean_time(seconds):
+    """Format mean execution time in H:M:S format."""
+    hours, rem = divmod(seconds, 3600)
+    minutes, sec = divmod(rem, 60)
+    return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
+
+def format_wall_time(seconds):
+    """Format the wall time showing only non-zero values."""
     days, rem = divmod(seconds, 24 * 3600)
     hours, rem = divmod(rem, 3600)
     minutes, sec = divmod(rem, 60)
-    total_hours = int(seconds // 3600)
-    return f"{total_hours}:{int(minutes)}:{sec:.3f}"
+    
+    # Build time string showing only non-zero values
+    time_parts = []
+    
+    if days > 0:
+        weeks, remaining_days = divmod(days, 7)
+        if weeks > 0:
+            time_parts.append(f"{int(weeks)} week{'s' if weeks != 1 else ''}")
+        if remaining_days > 0:
+            time_parts.append(f"{int(remaining_days)} day{'s' if remaining_days != 1 else ''}")
+    
+    if hours > 0:
+        time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
+    
+    if minutes > 0:
+        time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
+    
+    if sec > 0 or len(time_parts) == 0:  # Show seconds if it's the only unit or if there are seconds
+        time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
+    
+    return ", ".join(time_parts)
 
-def format_wall_time(seconds):
-    """Format the wall time in days and hours."""
-    days, rem = divmod(seconds, 24 * 3600)
-    hours = rem // 3600
-    return f"{int(days)} days, {int(hours)} hours"
+def summarize_calculations(directory=".", file_types=None):
+    """Create summary of calculations for ORCA (.out) and/or Gaussian (.log) files."""
+    if file_types is None:
+        file_types = ['orca', 'gaussian']  # Default: process both types
+    
+    results_by_type = {}
+    
+    # Process each requested file type
+    for file_type in file_types:
+        if file_type == 'orca':
+            summary_file = "orca_summary.txt"
+            file_extension = ".out"
+            parse_function = parse_orca_output
+        elif file_type == 'gaussian':
+            summary_file = "gaussian_summary.txt" 
+            file_extension = ".log"
+            parse_function = parse_gaussian_output
+        else:
+            continue
+        
+        job_summaries = []
+        all_results = {
+            'job_count': 0,
+            'total_time': 0,
+            'min_time': None,
+            'max_time': None,
+        }
 
-def format_hours_only(seconds):
-    """Format time in total hours."""
-    hours = seconds / 3600
-    return f"{hours:.3f} hours"
-
-def summarize_calculations(directory="."):
-    """Create summary of ORCA calculations."""
-    summary_file = "orca_summary.txt"
-    job_summaries = []
-    all_results = {
-        'job_count': 0,
-        'total_time': 0,
-        'min_time': None,
-        'max_time': None,
-    }
-
-    with open(summary_file, 'w', encoding='utf-8') as outfile:
+        # Find files of this type
+        found_files = []
         for root, _, files in os.walk(directory):
             for filename in files:
-                if filename.endswith(".out"):
-                    filepath = os.path.join(root, filename)
-                    results = parse_orca_output(filepath)
-                    if results:
-                        job_summaries.append(results)
-                        all_results['job_count'] += 1
-                        if results.get('time') is not None:
-                            all_results['total_time'] += results['time']
-                            if all_results['min_time'] is None or results['time'] < all_results['min_time']:
-                                all_results['min_time'] = results['time']
-                            if all_results['max_time'] is None or results['time'] > all_results['max_time']:
-                                all_results['max_time'] = results['time']
+                if filename.endswith(file_extension):
+                    found_files.append(os.path.join(root, filename))
+        
+        if not found_files:
+            continue  # Skip this type if no files found
+            
+        with open(summary_file, 'w', encoding='utf-8') as outfile:
+            for filepath in found_files:
+                results = parse_function(filepath)
+                if results:
+                    job_summaries.append(results)
+                    all_results['job_count'] += 1
+                    if results.get('time') is not None:
+                        all_results['total_time'] += results['time']
+                        if all_results['min_time'] is None or results['time'] < all_results['min_time']:
+                            all_results['min_time'] = results['time']
+                        if all_results['max_time'] is None or results['time'] > all_results['max_time']:
+                            all_results['max_time'] = results['time']
 
-        # Sort the job summaries by total_time
-        job_summaries.sort(key=lambda x: x.get('time') or float('inf'))
+            # Sort the job summaries by total_time
+            job_summaries.sort(key=lambda x: x.get('time') or float('inf'))
 
-        # Write summary
-        outfile.write("=" * 40 + "\n")
-        outfile.write("Summary of all calculations:\n")
-        outfile.write(f"  Number of jobs: {all_results['job_count']}\n")
-        if all_results['total_time']:
-            outfile.write(f"  Total execution time: {format_total_time(all_results['total_time'])}\n")
-            outfile.write(f"  Mean execution time: {format_hours_only(all_results['total_time'] / all_results['job_count'])}\n")
-            outfile.write(f"  Shortest execution time: {format_time_summary(all_results['min_time'], include_days=False)}\n")
-            outfile.write(f"  Longest execution time: {format_time_summary(all_results['max_time'], include_days=False)}\n")
-            outfile.write(f"  Total wall time: {format_wall_time(all_results['total_time'])}\n")
+            # Write summary
+            outfile.write("=" * 40 + "\n")
+            outfile.write("Summary of all calculations:\n")
+            outfile.write(f"  Number of jobs: {all_results['job_count']}\n")
+            if all_results['total_time']:
+                outfile.write(f"  Total execution time: {format_total_time(all_results['total_time'])}\n")
+                outfile.write(f"  Mean execution time: {format_mean_time(all_results['total_time'] / all_results['job_count'])}\n")
+                outfile.write(f"  Shortest execution time: {format_time_summary(all_results['min_time'], include_days=False)}\n")
+                outfile.write(f"  Longest execution time: {format_time_summary(all_results['max_time'], include_days=False)}\n")
+                outfile.write(f"  Total wall time: {format_wall_time(all_results['total_time'])}\n")
 
-        outfile.write("=" * 40 + "\n\n")
+            outfile.write("=" * 40 + "\n\n")
 
-        # Write individual job details
-        job_index = 1
-        for result in job_summaries:
-            outfile.write(f"=> {job_index}. {result['input_file']}.out\n")
-            job_index += 1
-            for key, value in result.items():
-                if key == 'time' and value is not None:
-                    outfile.write(f"  time = {format_time_summary(value, include_days=False)}\n")
-                elif key != 'input_file':
-                    outfile.write(f"  {key} = {value}\n")
-            outfile.write("\n")
+            # Write individual job details
+            job_index = 1
+            for result in job_summaries:
+                if file_type == 'orca':
+                    outfile.write(f"=> {job_index}. {result['input_file']}.out\n")
+                else:  # gaussian
+                    outfile.write(f"=> {job_index}. {result['input_file']}.log\n")
+                job_index += 1
+                for key, value in result.items():
+                    if key == 'time' and value is not None:
+                        outfile.write(f"  time = {format_time_summary(value, include_days=False)}\n")
+                    elif key != 'input_file':
+                        outfile.write(f"  {key} = {value}\n")
+                outfile.write("\n")
 
-    print(f"Summary written to {summary_file}")
-    return len(job_summaries)
+        print(f"Summary written to {summary_file}")
+        results_by_type[file_type] = len(job_summaries)
+
+    # Return total number of summaries created
+    return sum(results_by_type.values())
 
 def find_out_files(root_dir):
     """Find all .out files in the directory tree."""
@@ -5750,16 +5800,38 @@ def group_files_by_base_with_tracking(directory='.'):
 def create_summary_with_tracking(directory):
     """Create summaries and return list of created files."""
     created_files = []
+    
+    # Check for ORCA files (.out)
+    orca_files = []
+    gaussian_files = []
+    
+    for root, _, files in os.walk(directory):
+        for filename in files:
+            if filename.endswith(".out"):
+                orca_files.append(os.path.join(root, filename))
+            elif filename.endswith(".log"):
+                gaussian_files.append(os.path.join(root, filename))
+    
     try:
-        num_summaries = summarize_calculations(directory)
-        if num_summaries > 0:
-            # Common summary files that might be created
-            potential_files = ['calculation_summary.txt', 'results_summary.csv', 'energy_summary.dat']
-            for filename in potential_files:
-                if os.path.exists(filename):
-                    created_files.append(filename)
+        # Determine which file types to process
+        file_types_to_process = []
+        if orca_files:
+            file_types_to_process.append('orca')
+        if gaussian_files:
+            file_types_to_process.append('gaussian')
+        
+        # Create summaries for found file types
+        if file_types_to_process:
+            num_summaries = summarize_calculations(directory, file_types_to_process)
+            
+            # Check which summary files were created
+            if 'orca' in file_types_to_process and os.path.exists("orca_summary.txt"):
+                created_files.append("orca_summary.txt")
+            if 'gaussian' in file_types_to_process and os.path.exists("gaussian_summary.txt"):
+                created_files.append("gaussian_summary.txt")
     except:
         pass
+    
     return created_files
 
 
@@ -5842,6 +5914,90 @@ def revert_sort_changes(original_state, created_files, created_folders):
                 print(f"  Removed folder: {folder_path}")
         except Exception as e:
             print(f"  Warning: Could not revert folder {folder_path}: {e}")
+
+
+def parse_gaussian_output(filepath):
+    """Parse Gaussian .log output file for energy and time."""
+    results = {'input_file': os.path.splitext(os.path.basename(filepath))[0]}
+    
+    try:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as file:
+            content = file.read()
+    except Exception as e:
+        print(f"Error reading {filepath}: {e}")
+        return None
+
+    # Extract SCF Done energy (final energy)
+    energy_matches = re.findall(r"SCF Done:\s+E\([^)]+\)\s*=\s*(-?\d+\.\d+)", content)
+    if energy_matches:
+        results['energy'] = float(energy_matches[-1])  # Take the last SCF Done energy
+    else:
+        results['energy'] = None
+
+    # Extract job cpu time
+    time_match = re.search(r"Job cpu time:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+\.\d+)\s*seconds", content)
+    if time_match:
+        days = int(time_match.group(1))
+        hours = int(time_match.group(2))
+        minutes = int(time_match.group(3))
+        seconds = float(time_match.group(4))
+        results['time'] = (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds
+    else:
+        results['time'] = None
+    
+    return results
+
+def execute_summary_only():
+    """Execute only summary creation without sorting files."""
+    print("=" * 50)
+    print("ASCEC Summary Creation")
+    print("=" * 50)
+    
+    # Check for ORCA files (.out) and Gaussian files (.log)
+    orca_files = []
+    gaussian_files = []
+    
+    for root, _, files in os.walk("."):
+        for filename in files:
+            if filename.endswith(".out"):
+                orca_files.append(os.path.join(root, filename))
+            elif filename.endswith(".log"):
+                gaussian_files.append(os.path.join(root, filename))
+    
+    created_summaries = []
+    file_types_to_process = []
+    
+    if orca_files:
+        print(f"\nFound {len(orca_files)} ORCA output files.")
+        file_types_to_process.append('orca')
+        
+    if gaussian_files:
+        print(f"\nFound {len(gaussian_files)} Gaussian output files.")
+        file_types_to_process.append('gaussian')
+    
+    if not orca_files and not gaussian_files:
+        print("\nNo ORCA (.out) or Gaussian (.log) output files found in the current directory or its subfolders.")
+        return
+        
+    # Create summaries for found file types
+    if file_types_to_process:
+        print("Creating summaries...")
+        num_summaries = summarize_calculations(".", file_types_to_process)
+        
+        # Check which summary files were created
+        if 'orca' in file_types_to_process and os.path.exists("orca_summary.txt"):
+            created_summaries.append("orca_summary.txt")
+        if 'gaussian' in file_types_to_process and os.path.exists("gaussian_summary.txt"):
+            created_summaries.append("gaussian_summary.txt")
+    
+    print("\n" + "=" * 50)
+    print("Summary Creation Completed")
+    print("=" * 50)
+    
+    if created_summaries:
+        print(f"\nCreated summary files: {', '.join(created_summaries)}")
+    else:
+        print("\nNo summary files were created (no valid calculation data found).")
 
 
 def execute_sort_command(include_summary=True):
@@ -6039,6 +6195,7 @@ def print_all_commands():
     print("  Sort and organize calculation results:")
     print("    python3 ascec-v04.py sort                     # Full sort with summary")
     print("    python3 ascec-v04.py sort --nosum             # Sort without summary")
+    print("    python3 ascec-v04.py sort --justsum           # Create summaries only")
     print()
     
     print("  Merge launcher scripts:")
@@ -6120,6 +6277,7 @@ def main_ascec_integrated():
     parser.add_argument("--va", action="store_true", help="Very verbose output: print detailed steps for every cycle.")
     parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
     parser.add_argument("--nosum", action="store_true", help="Skip summary creation in sort command.")
+    parser.add_argument("--justsum", action="store_true", help="Only create summary files without sorting or moving files.")
     parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
     parser.add_argument("--conformational", type=float, default=None, 
                        help="Override conformational move probability from input file (0.0-1.0)")
@@ -6143,7 +6301,10 @@ def main_ascec_integrated():
     
     # Check if sort mode is requested
     if args.command.lower() == "sort":
-        execute_sort_command(include_summary=not args.nosum)
+        if args.justsum:
+            execute_summary_only()
+        else:
+            execute_sort_command(include_summary=not args.nosum)
         return
     
     # Check if box analysis mode is requested
@@ -6257,17 +6418,19 @@ def main_ascec_integrated():
             print("Example: python3 ascec-v04.py example.in r3")
             sys.exit(1)
 
-        # Initialize file handles and paths to None to prevent UnboundLocalError
-        out_file_handle = None 
-        failed_initial_configs_xyz_handle = None 
-        failed_configs_path = None 
-        
-        rless_file_path = None 
-        tvse_file_path = None  
-        xyz_filename_base = "" # Initialize for error path
-        rless_filename = ""    # Initialize for error path
-        tvse_filename = ""     # Initialize for error path
-        initial_failed_config_idx = 0  # Initialize for failed config tracking    # Determine the directory where the input file is located
+    # Initialize file handles and paths to None to prevent UnboundLocalError
+    out_file_handle = None 
+    failed_initial_configs_xyz_handle = None 
+    failed_configs_path = None 
+    
+    rless_file_path = None 
+    tvse_file_path = None  
+    xyz_filename_base = "" # Initialize for error path
+    rless_filename = ""    # Initialize for error path
+    tvse_filename = ""     # Initialize for error path
+    initial_failed_config_idx = 0  # Initialize for failed config tracking
+    
+    # Determine the directory where the input file is located
     input_file_path_full = os.path.abspath(input_file)
     run_dir = os.path.dirname(input_file_path_full)
     if not run_dir:
@@ -6524,7 +6687,7 @@ def main_ascec_integrated():
                     try: failed_initial_configs_xyz_handle.close() # Close before attempting conversion
                     except Exception as e: _print_verbose(f"Error closing failed initial configs file during final cleanup: {e}", 0, state)
                     
-                    if os.path.exists(failed_configs_path):
+                    if failed_configs_path and os.path.exists(failed_configs_path):
                         failed_mol_filename = os.path.splitext(failed_configs_path)[0] + ".mol"
                         try:
                             _print_verbose(f"Attempting to convert failed initial configs XYZ '{os.path.basename(failed_configs_path)}' to MOL...", 1, state)
@@ -6539,7 +6702,7 @@ def main_ascec_integrated():
                 raise RuntimeError("Initial QM energy calculation did not succeed after all retries. Exiting.")
 
             # If initial QM succeeded, we can remove the failed initial configs file
-            if failed_initial_configs_xyz_handle and os.path.exists(failed_configs_path):
+            if failed_initial_configs_xyz_handle and failed_configs_path and os.path.exists(failed_configs_path):
                 try:
                     failed_initial_configs_xyz_handle.close() # Close before removing
                     os.remove(failed_configs_path)
@@ -6830,10 +6993,10 @@ def main_ascec_integrated():
             except Exception as e: _print_verbose(f"Error closing main output file: {e}", 0, state)
         
         # Write lowest energy config file only if it was successfully found (already handled in annealing loop)
-        if state.random_generate_config == 1 and state.lowest_energy_rp is not None:
+        if state.random_generate_config == 1 and state.lowest_energy_rp is not None and rless_file_path:
             write_lowest_energy_config_file(state, rless_file_path)
         elif state.random_generate_config == 1 and state.lowest_energy_rp is None:
-            _print_verbose(f"No lowest energy configuration was successfully found and stored. Skipping '{rless_file_path}' generation.", 0, state)
+            _print_verbose(f"No lowest energy configuration was successfully found and stored. Skipping rless file generation.", 0, state)
 
         # Handle MOL conversion for XYZ files (which were created by write_accepted_xyz)
         # We need to ensure paths are defined before attempting conversion
