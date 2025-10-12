@@ -5792,31 +5792,40 @@ def format_mean_time(seconds):
     return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
 
 def format_wall_time(seconds):
-    """Format the wall time showing only non-zero values."""
+    """Format the wall time showing only the two most significant time units."""
     days, rem = divmod(seconds, 24 * 3600)
     hours, rem = divmod(rem, 3600)
     minutes, sec = divmod(rem, 60)
     
-    # Build time string showing only non-zero values
+    # Build time string showing only the two most significant units
     time_parts = []
     
-    if days > 0:
+    # Check for weeks and days
+    if days >= 7:
         weeks, remaining_days = divmod(days, 7)
-        if weeks > 0:
-            time_parts.append(f"{int(weeks)} week{'s' if weeks != 1 else ''}")
+        time_parts.append(f"{int(weeks)} week{'s' if weeks != 1 else ''}")
         if remaining_days > 0:
             time_parts.append(f"{int(remaining_days)} day{'s' if remaining_days != 1 else ''}")
-    
-    if hours > 0:
+    elif days > 0:
+        # Days and hours
+        time_parts.append(f"{int(days)} day{'s' if days != 1 else ''}")
+        if hours > 0:
+            time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
+    elif hours > 0:
+        # Hours and minutes
         time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
-    
-    if minutes > 0:
+        if minutes > 0:
+            time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
+    elif minutes > 0:
+        # Minutes and seconds
         time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
-    
-    if sec > 0 or len(time_parts) == 0:  # Show seconds if it's the only unit or if there are seconds
+        time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
+    else:
+        # Just seconds
         time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
     
-    return ", ".join(time_parts)
+    # Return only the first two parts (most significant)
+    return ", ".join(time_parts[:2])
 
 def summarize_calculations(directory=".", file_types=None):
     """Create summary of calculations for ORCA (.out) and/or Gaussian (.log) files."""
