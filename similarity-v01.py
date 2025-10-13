@@ -47,17 +47,17 @@ def print_step(message, **kwargs):
 
 def get_cpu_count_fast():
     """
-    Get CPU count using fast methods (nproc command first, then fallbacks).
-    This prevents startup delays on systems where mp.cpu_count() is slow.
+    Get CPU count using fast methods without timeouts.
+    Uses all available resources for maximum performance.
     """
     # Method 1: Try nproc command (fastest on Linux/Unix systems)
     try:
-        result = subprocess.run(['nproc'], capture_output=True, text=True, timeout=1)
+        result = subprocess.run(['nproc'], capture_output=True, text=True)
         if result.returncode == 0:
             cpu_count = int(result.stdout.strip())
             if cpu_count > 0:
                 return cpu_count
-    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
         pass
     
     # Method 2: Try /proc/cpuinfo (Linux fallback)
@@ -77,18 +77,12 @@ def get_cpu_count_fast():
     except (OSError, AttributeError):
         pass
     
-    # Method 4: Last resort - mp.cpu_count() with timeout
+    # Method 4: Use mp.cpu_count() without timeout
     try:
-        import signal
-        def timeout_handler(signum, frame):
-            raise TimeoutError("CPU count detection timed out")
-        
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(2)
         cpu_count = mp.cpu_count()
-        signal.alarm(0)
-        return cpu_count
-    except (TimeoutError, OSError, AttributeError):
+        if cpu_count > 0:
+            return cpu_count
+    except (OSError, AttributeError):
         pass
     
     # Final fallback: use 4 cores (reasonable default)
