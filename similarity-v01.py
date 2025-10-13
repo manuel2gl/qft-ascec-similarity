@@ -45,6 +45,56 @@ def print_step(message, **kwargs):
     """Print concise step information (always shown)"""
     print(message, **kwargs)
 
+def get_cpu_count_fast():
+    """
+    Get CPU count using fast methods (nproc command first, then fallbacks).
+    This prevents startup delays on systems where mp.cpu_count() is slow.
+    """
+    # Method 1: Try nproc command (fastest on Linux/Unix systems)
+    try:
+        result = subprocess.run(['nproc'], capture_output=True, text=True, timeout=1)
+        if result.returncode == 0:
+            cpu_count = int(result.stdout.strip())
+            if cpu_count > 0:
+                return cpu_count
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        pass
+    
+    # Method 2: Try /proc/cpuinfo (Linux fallback)
+    try:
+        with open('/proc/cpuinfo', 'r') as f:
+            cpu_count = sum(1 for line in f if line.startswith('processor'))
+            if cpu_count > 0:
+                return cpu_count
+    except (FileNotFoundError, IOError):
+        pass
+    
+    # Method 3: Try os.cpu_count() (usually faster than mp.cpu_count())
+    try:
+        cpu_count = os.cpu_count()
+        if cpu_count is not None and cpu_count > 0:
+            return cpu_count
+    except (OSError, AttributeError):
+        pass
+    
+    # Method 4: Last resort - mp.cpu_count() with timeout
+    try:
+        import signal
+        def timeout_handler(signum, frame):
+            raise TimeoutError("CPU count detection timed out")
+        
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(2)
+        cpu_count = mp.cpu_count()
+        signal.alarm(0)
+        return cpu_count
+    except (TimeoutError, OSError, AttributeError):
+        pass
+    
+    # Final fallback: use 4 cores (reasonable default)
+    print("  Warning: CPU count detection failed, defaulting to 4 cores")
+    return 4
+
 ### Embedded element masses dictionary ###
 element_masses = {
     "H": 1.008, "He": 4.0026, "Li": 6.94, "Be": 9.012, "B": 10.81,
@@ -1688,7 +1738,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     
     # Set default number of cores if not specified
     if num_cores is None:
-        num_cores = mp.cpu_count()
+        num_cores = get_cpu_count_fast()
     """
     Performs hierarchical clustering and analysis on the extracted molecular properties,
     and saves .dat and .xyz files for each cluster.
@@ -2790,7 +2840,7 @@ if __name__ == "__main__":
     parser.add_argument("--motif", type=float, default=None,
                         help="Threshold for final motif clustering (excluding H-bond count). If not specified, uses the same value as --threshold.")
     parser.add_argument("--cores", "-j", type=int, default=None,
-                        help=f"Number of CPU cores to use for parallel processing. Default: auto-detect ({mp.cpu_count()} cores available)")
+                        help="Number of CPU cores to use for parallel processing. Default: auto-detect")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output showing detailed information for each step.")
 
@@ -2806,7 +2856,7 @@ if __name__ == "__main__":
     min_std_threshold_val = args.min_std_threshold 
     abs_tolerances_dict = parse_abs_tolerance_argument(args.abs_tolerance)
     motif_threshold = args.motif if args.motif is not None else clustering_threshold
-    num_cores = args.cores if args.cores is not None else mp.cpu_count()
+    num_cores = args.cores if args.cores is not None else get_cpu_count_fast()
     
     # Update the global verbose flag
     VERBOSE = args.verbose
