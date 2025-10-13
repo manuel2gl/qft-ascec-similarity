@@ -50,49 +50,50 @@ def get_cpu_count_fast():
     Get CPU count using fast methods without timeouts.
     Uses all available resources for maximum performance.
     """
-    print("  DEBUG: Starting CPU count detection...")
-    
-    # Method 1: Try nproc command (fastest on Linux/Unix systems)
+    # Method 1: Try nproc --all command (shows all CPUs regardless of limits)
     try:
-        result = subprocess.run(['nproc'], capture_output=True, text=True)
+        result = subprocess.run(['nproc', '--all'], capture_output=True, text=True)
         if result.returncode == 0:
             cpu_count = int(result.stdout.strip())
             if cpu_count > 0:
-                print(f"  DEBUG: CPU count detected via nproc: {cpu_count}")
                 return cpu_count
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError) as e:
-        print(f"  DEBUG: nproc failed: {e}")
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        # Fallback to regular nproc
+        try:
+            result = subprocess.run(['nproc'], capture_output=True, text=True)
+            if result.returncode == 0:
+                cpu_count = int(result.stdout.strip())
+                if cpu_count > 0:
+                    return cpu_count
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+            pass
     
     # Method 2: Try /proc/cpuinfo (Linux fallback)
     try:
         with open('/proc/cpuinfo', 'r') as f:
             cpu_count = sum(1 for line in f if line.startswith('processor'))
             if cpu_count > 0:
-                print(f"  DEBUG: CPU count detected via /proc/cpuinfo: {cpu_count}")
                 return cpu_count
-    except (FileNotFoundError, IOError) as e:
-        print(f"  DEBUG: /proc/cpuinfo failed: {e}")
+    except (FileNotFoundError, IOError):
+        pass
     
     # Method 3: Try os.cpu_count() (usually faster than mp.cpu_count())
     try:
         cpu_count = os.cpu_count()
         if cpu_count is not None and cpu_count > 0:
-            print(f"  DEBUG: CPU count detected via os.cpu_count(): {cpu_count}")
             return cpu_count
-    except (OSError, AttributeError) as e:
-        print(f"  DEBUG: os.cpu_count() failed: {e}")
+    except (OSError, AttributeError):
+        pass
     
     # Method 4: Use mp.cpu_count() without timeout
     try:
         cpu_count = mp.cpu_count()
         if cpu_count > 0:
-            print(f"  DEBUG: CPU count detected via mp.cpu_count(): {cpu_count}")
             return cpu_count
-    except (OSError, AttributeError) as e:
-        print(f"  DEBUG: mp.cpu_count() failed: {e}")
+    except (OSError, AttributeError):
+        pass
     
-    # Final fallback: use 24 cores (your system's actual count)
-    print("  WARNING: CPU count detection failed, defaulting to 24 cores")
+    # Final fallback: use 24 cores (reasonable default for modern systems)
     return 24
 
 ### Embedded element masses dictionary ###
