@@ -1833,7 +1833,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         print(f"Starting parallel data extraction for comparison mode from {len(files_to_process)} files...")
         
         # Use parallel processing for comparison mode
-        effective_cores = min(num_cores, len(files_to_process))  # Don't use more cores than files
+        effective_cores = num_cores  # Use all available cores
         print(f"  Using {effective_cores} CPU cores for parallel processing")
         
         with mp.Pool(processes=effective_cores) as pool:
@@ -1933,7 +1933,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # Process files if needed
         if files_to_actually_process:
             # Use parallel processing for normal mode
-            effective_cores = min(num_cores, len(files_to_actually_process))  # Don't use more cores than files
+            effective_cores = num_cores  # Use all available cores
             print(f"  Using {effective_cores} CPU cores for parallel processing")
             
             with mp.Pool(processes=effective_cores) as pool:
