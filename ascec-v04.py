@@ -5815,23 +5815,42 @@ def format_wall_time(seconds):
         time_parts.append(f"{int(weeks)} week{'s' if weeks != 1 else ''}")
         if remaining_days > 0:
             time_parts.append(f"{int(remaining_days)} day{'s' if remaining_days != 1 else ''}")
+        elif hours > 0:
+            # If no remaining days but we have hours, show hours
+            time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
+        elif minutes > 0:
+            # If no days or hours but we have minutes, show minutes
+            time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
     elif days > 0:
-        # Days and hours
+        # Days and hours/minutes
         time_parts.append(f"{int(days)} day{'s' if days != 1 else ''}")
         if hours > 0:
             time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
+        elif minutes > 0:
+            # If no hours but we have minutes, show minutes
+            time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
     elif hours > 0:
         # Hours and minutes
         time_parts.append(f"{int(hours)} hour{'s' if hours != 1 else ''}")
         if minutes > 0:
             time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
+        elif sec > 0:
+            # If no minutes but we have seconds, show seconds
+            time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
     elif minutes > 0:
         # Minutes and seconds
         time_parts.append(f"{int(minutes)} minute{'s' if minutes != 1 else ''}")
-        time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
+        if sec > 0:
+            time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
+        # Note: For sub-second precision, we could add milliseconds here if needed
     else:
-        # Just seconds
-        time_parts.append(f"{int(sec)} second{'s' if sec != 1 else ''}")
+        # Just seconds (including fractional seconds)
+        if sec >= 1:
+            time_parts.append(f"{sec:.1f} second{'s' if sec != 1 else ''}")
+        else:
+            # Show milliseconds for very short times
+            milliseconds = sec * 1000
+            time_parts.append(f"{milliseconds:.0f} millisecond{'s' if milliseconds != 1 else ''}")
     
     # Return only the first two parts (most significant)
     return ", ".join(time_parts[:2])
