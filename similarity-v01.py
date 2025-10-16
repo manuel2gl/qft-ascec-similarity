@@ -1782,7 +1782,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         'rotational_constants_A': 1.0,     # Rotational constant A
         'rotational_constants_B': 1.0,     # Rotational constant B
         'rotational_constants_C': 1.0,     # Rotational constant C
-        'first_vib_freq': 0.1,             # First vibrational frequency
+        'first_vib_freq': 0.0,             # First vibrational frequency
         'last_vib_freq': 0.5,              # Last vibrational frequency
         'average_hbond_distance': 1.0,     # Average hydrogen bond distance
         'average_hbond_angle': 1.0,        # Average hydrogen bond angle
