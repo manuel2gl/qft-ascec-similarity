@@ -101,7 +101,7 @@ def _process_xyz_file_simple(xyz_file_data):
         try:
             seed = filename.replace("result_", "").replace(".xyz", "")
             run_num = int(seed) if seed.isdigit() else 1
-        except:
+        except (ValueError, AttributeError):
             run_num = 1
         
         # Also try to get run number from directory name if it contains meaningful info
@@ -1340,12 +1340,12 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
 
         elif config_lines_parsed == 9: # Line 10: Hamiltonian & Basis Set (e.g., "pm3 zdo")
             state.qm_method = parts[0]      
-            # Handle case where only method is provided (common for semi-empirical methods)
+            # Handle case where only method is provided (basis set is optional)
             if len(parts) > 1:
                 state.qm_basis_set = parts[1]   
             else:
-                # For semi-empirical methods, we can set a default or leave it empty
-                state.qm_basis_set = "zdo"  # Default for semi-empirical methods   
+                # If no basis set provided, leave it as None - respect user's input
+                state.qm_basis_set = None   
 
         elif config_lines_parsed == 10:      # Line 11: nprocs [memory] [ascec_cores]
             state.qm_nproc = int(parts[0])   
@@ -1674,37 +1674,6 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     temp_files_to_clean = [qm_input_path, qm_output_path]
     if qm_chk_path:
         temp_files_to_clean.append(qm_chk_path)
-    
-    # Add ORCA-specific files to cleanup list
-    if state.qm_program == "orca":
-        input_basename = f"qm_input_{call_id}"
-        orca_files = [
-            f"{input_basename}.gbw",
-            f"{input_basename}.densities", 
-            f"{input_basename}_property.txt",
-            f"{input_basename}.engrad",
-            f"{input_basename}.pcgrad",
-            f"{input_basename}.hess",
-            f"{input_basename}.cis",
-            f"{input_basename}.uno",
-            # ORCA temporary files (semi-empirical methods generate many .tmp files)
-            f"{input_basename}.1.tmp",
-            f"{input_basename}.2.tmp", 
-            f"{input_basename}.3.tmp",
-            f"{input_basename}.E.tmp",
-            f"{input_basename}.H.tmp",
-            f"{input_basename}.K.tmp",
-            f"{input_basename}.S.tmp",
-            f"{input_basename}.eht.tmp",
-            f"{input_basename}.fsv.tmp",
-            f"{input_basename}.ndopar.tmp",
-            f"{input_basename}.SM12.tmp",
-            f"{input_basename}.SP12.tmp",
-            f"{input_basename}.diis.tmp",
-            f"{input_basename}.en.tmp"
-        ]
-        for orca_file in orca_files:
-            temp_files_to_clean.append(os.path.join(run_dir, orca_file))
 
     try:
         # Generate QM input file
@@ -1715,8 +1684,12 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 if state.qm_memory: f.write(f"%mem={state.qm_memory}\n")
                 if state.qm_nproc: f.write(f"%nproc={state.qm_nproc}\n")
                 
-                # Changed from / to space as requested: pm3 zdo
-                f.write(f"# {state.qm_method} {state.qm_basis_set}\n\n") 
+                # Build the route line - only include basis set if provided
+                if state.qm_basis_set:
+                    f.write(f"# {state.qm_method} {state.qm_basis_set}\n\n")
+                else:
+                    f.write(f"# {state.qm_method}\n\n")
+                    
                 f.write("ASCEC QM Calculation\n\n")
                 f.write(f"{state.charge} {state.multiplicity}\n")
                 for i in range(state.natom):
@@ -1726,16 +1699,12 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 if state.qm_additional_keywords: f.write(f"{state.qm_additional_keywords}\n")
                 f.write("\n") 
             elif state.qm_program == "orca":
-                # ORCA keyword line generation
-                # For semi-empirical methods like PM3, AM1, MNDO, we don't include basis sets
-                semi_empirical_methods = ['pm3', 'am1', 'mndo', 'pm6', 'pm7']
-                
-                if state.qm_method and state.qm_method.lower() in semi_empirical_methods:
-                    # Semi-empirical methods don't need basis sets
-                    f.write(f"! {state.qm_method}\n")
+                # ORCA keyword line generation - respect user's exact input
+                # Build keyword line with method and basis set if provided
+                if state.qm_basis_set:
+                    f.write(f"! {state.qm_method} {state.qm_basis_set}\n")
                 else:
-                    # Ab initio or DFT methods need basis sets
-                    f.write(f"! {state.qm_method or 'HF'} {state.qm_basis_set or 'STO-3G'}\n")
+                    f.write(f"! {state.qm_method}\n")
                 
                 if state.qm_additional_keywords: f.write(f"! {state.qm_additional_keywords}\n")
                 
@@ -1744,12 +1713,10 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     mem_val = state.qm_memory.replace('GB', '').replace('MB', '')
                     f.write(f"%maxcore {mem_val}\n") 
                 
-                # Only use parallel processing for non-semi-empirical methods
-                # Semi-empirical methods (NDO methods) in ORCA don't support parallel execution
-                if state.qm_nproc and state.qm_method and state.qm_method.lower() not in semi_empirical_methods:
+                # Parallel processing settings
+                # Note: Some methods (like semi-empirical NDO methods) don't support parallel execution
+                if state.qm_nproc:
                     f.write(f"%pal nprocs {state.qm_nproc} end\n")
-                elif state.qm_nproc and state.qm_method and state.qm_method.lower() in semi_empirical_methods:
-                    _print_verbose(f"Note: Parallel processing disabled for semi-empirical method {state.qm_method} (ORCA limitation)", 1, state)
                 
                 f.write(f"* xyz {state.charge} {state.multiplicity}\n")
                 for i in range(state.natom):
@@ -1869,32 +1836,22 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
         # Always preserve the last QM files for debugging (both successful and failed attempts)
         preserve_last_qm_files_debug(state, run_dir, call_id, status)
         
-        # Clean up numbered QM files but keep the "last_" versions for debugging
+        # For ORCA, discover and add all auxiliary files to cleanup list AFTER calculation completes
+        if state.qm_program == "orca":
+            input_basename = f"qm_input_{call_id}"
+            orca_pattern = os.path.join(run_dir, f"{input_basename}*")
+            for orca_file in glob.glob(orca_pattern):
+                # Skip the main input and output files (already in temp_files_to_clean)
+                if orca_file not in temp_files_to_clean and os.path.isfile(orca_file):
+                    temp_files_to_clean.append(orca_file)
+        
+        # Clean up numbered QM files but keep the "anneal.*" versions for debugging
         for fpath in temp_files_to_clean:
             if os.path.exists(fpath):
                 try:
                     os.remove(fpath)
                 except OSError as e:
                     _print_verbose(f"  Error cleaning up {os.path.basename(fpath)}: {e}", 0, state)
-        
-        # Additional cleanup for ORCA temporary files using glob patterns
-        if state.qm_program == "orca":
-            import glob
-            input_basename = f"qm_input_{call_id}"
-            orca_patterns = [
-                f"{input_basename}*.tmp",  # All .tmp files
-                f"{input_basename}.*.tmp", # All numbered .tmp files like .1.tmp, .2.tmp
-                f"{input_basename}*.log",  # Any log files
-            ]
-            for pattern in orca_patterns:
-                pattern_path = os.path.join(run_dir, pattern)
-                for fpath in glob.glob(pattern_path):
-                    try:
-                        if os.path.exists(fpath):
-                            os.remove(fpath)
-                            _print_verbose(f"  Cleaned ORCA temp file: {os.path.basename(fpath)}", 2, state)
-                    except OSError as e:
-                        _print_verbose(f"  Error cleaning up ORCA temp file {os.path.basename(fpath)}: {e}", 1, state)
     return energy, status
 
 # 13a. Enhanced QM execution with parallel core optimization
@@ -4643,7 +4600,7 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
         # Clean up empty directory
         try:
             os.rmdir(opt_dir)
-        except:
+        except OSError:
             pass
         return "No files selected for optimization. Operation cancelled."
     
@@ -5727,24 +5684,24 @@ def create_combined_mol():
         return False
 
 # Summary functionality - integrated from summary_files.py
-def parse_orca_output(filename):
+def parse_orca_output(filepath):
     """Parse an ORCA output file to extract key information."""
     
     results = {}
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
     except (FileNotFoundError, IOError, UnicodeDecodeError) as e:
-        print(f"Error reading file {filename}: {e}")
+        print(f"Error reading file {filepath}: {e}")
         return None
 
     # Check for ORCA signature
     if "ORCA - Electronic Structure Program" not in content:
         if "*******" not in content:
-            print(f"File {filename} is not an ORCA output file.")
+            print(f"File {filepath} is not an ORCA output file.")
             return None
 
-    results['input_file'] = os.path.splitext(os.path.basename(filename))[0]
+    results['input_file'] = os.path.splitext(os.path.basename(filepath))[0]
 
     # Extract final single point energy
     energy_matches = re.findall(r"FINAL SINGLE POINT ENERGY\s*(-?\d+\.\d+)", content)
@@ -5902,8 +5859,8 @@ def summarize_calculations(directory=".", file_types=None):
         max_workers = get_optimal_workers('cpu_intensive', len(found_files))
         
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all parsing tasks
-            future_to_file = {executor.submit(parse_function, filepath): filepath for filepath in found_files}
+            # Submit all parsing tasks - use keyword argument to avoid type checker issues
+            future_to_file = {executor.submit(parse_function, filepath=filepath): filepath for filepath in found_files}
             
             # Collect results as they complete
             for future in as_completed(future_to_file):
@@ -6172,7 +6129,7 @@ def create_summary_with_tracking(directory):
                 created_files.append("orca_summary.txt")
             if 'gaussian' in file_types_to_process and os.path.exists("gaussian_summary.txt"):
                 created_files.append("gaussian_summary.txt")
-    except:
+    except Exception:
         pass
     
     return created_files
@@ -6224,7 +6181,7 @@ def collect_out_files_with_tracking():
         similarity_folder_name = os.path.basename(similarity_dir)
         print(f"Copied {num_files} .out files to {similarity_folder_name}/{destination_folder_name}")
         return destination_path
-    except:
+    except Exception:
         return None
 
 
