@@ -5492,11 +5492,15 @@ def extract_base(filename):
     
     # Remove extension
     name, *_ = filename.split('.', 1)
-    # Remove known suffixes (only the last one)
-    for suffix in KNOWN_SUFFIXES:
-        if name.endswith(suffix):
-            name = name[: -len(suffix)]
-            break
+    # Remove all known suffixes (not just the last one) by repeatedly checking
+    changed = True
+    while changed:
+        changed = False
+        for suffix in KNOWN_SUFFIXES:
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                changed = True
+                break  # Start over to handle multiple suffixes
     return name
 
 def group_files_by_base(directory='.'):
