@@ -6920,9 +6920,10 @@ def main_ascec_integrated():
                     
                     # Print conformational sampling information
                     if state.conformational_move_prob > 0.0:
-                        _print_verbose(f"Note: Conformational sampling is configured ({state.conformational_move_prob*100:.1f}%) but currently disabled for stability", 0, state)
-                        _print_verbose(f"      Only rigid-body moves (translation + rotation) will be used", 0, state)
-                        _print_verbose(f"      This ensures reliable annealing progress for all molecule types", 0, state)
+                        _print_verbose(f"Conformational sampling enabled: {state.conformational_move_prob*100:.1f}% probability", 0, state)
+                        _print_verbose(f"  Maximum dihedral rotation: ±{np.degrees(state.max_dihedral_angle_rad):.1f}°", 0, state)
+                        _print_verbose(f"  Move types: {state.conformational_move_prob*100:.1f}% conformational (dihedral rotations), {(1-state.conformational_move_prob)*100:.1f}% rigid-body (translation+rotation)", 0, state)
+                        _print_verbose(f"  Note: Conformational moves with atom overlaps automatically fall back to rigid-body moves", 0, state)
                     else:
                         _print_verbose("Using rigid-body moves only (translation + rotation)", 0, state)
                     
