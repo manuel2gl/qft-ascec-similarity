@@ -2331,7 +2331,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
         if len(group_data) < 2 or not any(d.get(f) is not None for d in group_data for f in ['radius_of_gyration', 'dipole_moment', 'homo_lumo_gap', 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle', 'rotational_constants']):
             vprint(f"\nSkipping detailed clustering for H-bond group {hbond_count}: Less than 2 configurations or no valid numerical features left after filtering. Treating each as a single-configuration cluster.")
-            print_step(f"H-bond group {hbond_count}: {len(group_data)} config(s) - treating as single-config clusters")
+            print_step(f"\nH-bond group {hbond_count}: {len(group_data)} config(s) - treating as single-config clusters")
             
             for single_mol_data in group_data:
                 single_mol_data['_rmsd_pass_origin'] = 'first_pass_validated' 
