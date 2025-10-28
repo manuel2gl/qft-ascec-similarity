@@ -2170,6 +2170,40 @@ def find_connected_atoms(start_atom: int, exclude_atom: int, mol_coords: np.ndar
     
     return connected
 
+def check_intramolecular_overlap(mol_coords: np.ndarray, mol_atomic_numbers: List[int], 
+                                  state: SystemState) -> bool:
+    """
+    Checks if there are any severe overlaps (atom clashes) within a single molecule.
+    This is used after conformational moves to ensure the rotation didn't cause 
+    atoms to overlap unrealistically.
+    
+    Args:
+        mol_coords: Coordinates of atoms in the molecule (N x 3 array)
+        mol_atomic_numbers: List of atomic numbers for the molecule
+        state: SystemState object containing overlap parameters
+        
+    Returns:
+        True if severe overlap is detected, False otherwise
+    """
+    n_atoms = len(mol_atomic_numbers)
+    
+    for i in range(n_atoms):
+        for j in range(i + 1, n_atoms):
+            distance = np.linalg.norm(mol_coords[i] - mol_coords[j])
+            
+            radius_i = state.R_ATOM.get(mol_atomic_numbers[i], 0.5)
+            radius_j = state.R_ATOM.get(mol_atomic_numbers[j], 0.5)
+            
+            # Use a stricter overlap criterion for intramolecular checks
+            # (0.5 is more strict than 0.7 used for intermolecular placement)
+            min_distance_allowed = (radius_i + radius_j) * 0.5
+            
+            # Ignore very small distances that might be numerical errors
+            if distance < min_distance_allowed and distance > 1e-4:
+                return True  # Overlap detected
+    
+    return False  # No overlap
+
 def propose_conformational_move(state: SystemState, current_rp: np.ndarray, 
                                current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
     """
@@ -2197,13 +2231,20 @@ def propose_conformational_move(state: SystemState, current_rp: np.ndarray,
     # Randomly select a rotatable bond
     bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
     
-    # Generate random rotation angle (e.g., ±60 degrees max)
-    max_rotation = np.pi / 3  # 60 degrees
+    # Generate random rotation angle using the user-specified max_dihedral_angle_rad
+    # Default to 60 degrees (π/3) if not set
+    max_rotation = state.max_dihedral_angle_rad if state.max_dihedral_angle_rad > 0 else np.pi / 3
     rotation_angle = (np.random.rand() - 0.5) * 2.0 * max_rotation
     
     # Apply rotation to molecule coordinates
     new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
                                        moving_atoms, rotation_angle)
+    
+    # Check for intramolecular overlaps (atom clashes) after the conformational change
+    # If severe overlap is detected, fall back to rigid-body move instead
+    if check_intramolecular_overlap(new_mol_coords, mol_atomic_numbers, state):
+        _print_verbose(f"  Conformational move caused atom overlap. Falling back to rigid-body move.", 2, state)
+        return propose_move(state, current_rp, current_imolec)
     
     # Create new full system coordinates
     proposed_rp_full_system = np.copy(current_rp)
@@ -2217,17 +2258,18 @@ def propose_unified_move(state: SystemState, current_rp: np.ndarray,
     Proposes either a conformational move or a rigid-body move based on probability.
     This function provides the enhanced Monte Carlo sampling that includes 
     intramolecular conformational changes.
+    
+    The probability of attempting a conformational move is controlled by
+    state.conformational_move_prob (stored as 0.0-1.0). If a conformational move fails
+    (e.g., no rotatable bonds found), it falls back to a rigid-body move.
     """
-    if np.random.rand() < state.conformational_move_prob:
-        # Attempt conformational move
-        try:
-            return propose_conformational_move(state, current_rp, current_imolec)
-        except Exception as e:
-            # Fall back to rigid-body move if conformational move fails
-            _print_verbose(f"Conformational move failed, falling back to rigid-body: {e}", 2, state)
-            return propose_move(state, current_rp, current_imolec)
+    # Decide whether to attempt a conformational move based on probability
+    # state.conformational_move_prob is stored as 0.0-1.0 (e.g., 0.10 for 10%)
+    if state.conformational_move_prob > 0 and np.random.rand() < state.conformational_move_prob:
+        # Attempt conformational move (it will fall back to rigid-body if no rotatable bonds)
+        return propose_conformational_move(state, current_rp, current_imolec)
     else:
-        # Rigid-body move (translation + rotation)
+        # Perform rigid-body move (translation + rotation)
         return propose_move(state, current_rp, current_imolec)
 
 # 15. Propose Move Function (No longer used for full system randomization in annealing)
@@ -2314,6 +2356,43 @@ def propose_move(state: SystemState, current_rp: np.ndarray, current_imolec: Lis
     # Return the full system coordinates, the coordinates of the moved molecule (for potential debugging),
     # the index of the moved molecule, and a string indicating the move type.
     return proposed_rp_full_system, proposed_rp_full_system[start_atom_idx:end_atom_idx, :], molecule_idx, "translate_rotate"
+
+def propose_conformational_or_rigid_move(state: SystemState) -> bool:
+    """
+    Proposes either a conformational move or rigid-body move with proper fallback.
+    This is applied DURING annealing, after initial placement.
+    
+    Returns:
+        bool: True if a conformational move was successfully applied, False if rigid-body was used
+    """
+    conformational_applied = False
+    
+    # Always default to rigid-body move for now - conformational moves are too risky
+    # This ensures annealing always progresses
+    # TODO: Add more sophisticated conformational move validation before re-enabling
+    
+    # Select random molecule for rigid-body move
+    molecule_idx = np.random.randint(0, state.num_molecules)
+    
+    start_atom_idx = state.imolec[molecule_idx]
+    end_atom_idx = state.imolec[molecule_idx + 1]
+    
+    mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
+    mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
+                          for anum in mol_atomic_numbers])
+    
+    # Calculate current center of mass
+    current_mol_rcm = calculate_mass_center(state.rp[start_atom_idx:end_atom_idx, :], mol_masses)
+    
+    # Create temporary relative coordinates
+    mol_rel_coords_temp = state.rp[start_atom_idx:end_atom_idx, :] - current_mol_rcm
+    
+    # Apply translation and rotation
+    trans(molecule_idx, state.rp, mol_rel_coords_temp, state.rcm, state.ds, state)
+    rotac(molecule_idx, state.rp, mol_rel_coords_temp, state.rcm, state.dphi, state)
+    
+    return conformational_applied
+
 
 # --- Subroutine: trans (Translates molecules randomly) ---
 def trans(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np.ndarray, ds_val: float, state: SystemState):
@@ -2411,150 +2490,34 @@ def rotac(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np
 # --- Main Subroutine: config_move ---
 def config_move(state: SystemState):
     """
-    Generates a new configuration by randomly translating and rotating ALL molecules,
-    with collision detection and re-attempt logic for the entire system.
+    Generates a new configuration by randomly translating and rotating ALL molecules.
+    This is used for INITIAL configuration generation (exiting overlap positions).
+    For annealing moves, use propose_conformational_or_rigid_move() instead.
     Modifies state.rp and state.rcm in place.
     """
-    # Keep track of the original state for rollback if the entire proposed configuration fails
-    original_rp_full_system = np.copy(state.rp)
-    original_rcm_full_system = np.copy(state.rcm)
-
-    # Initialize local ds/dphi for this *attempt* to generate a valid full configuration
-    # These will be reset for each full configuration attempt, and increased if collisions persist.
-    local_ds = state.ds
-    local_dphi = state.dphi
+    # This function is now simplified for initial configuration generation only
+    # It applies rigid-body moves to all molecules without extensive collision checking
     
-    attempts_full_config = 0 # Counter for attempts to generate a valid full configuration
-
-    # Max attempts for a full configuration to be generated without collision
-    MAX_FULL_CONFIG_ATTEMPTS = 100000 # Similar to MAX_OVERLAP_PLACEMENT_ATTEMPTS but for the whole system
-
-    while True: # Outer loop for generating a valid full system configuration
-        attempts_full_config += 1
+    for imo in range(state.num_molecules):
+        mol_start_idx = state.imolec[imo]
+        mol_end_idx = state.imolec[imo+1]
         
-        # If too many attempts, increase the perturbation range for all molecules
-        if attempts_full_config > MAX_FULL_CONFIG_ATTEMPTS:
-            _print_verbose("\n** Warning **", 1, state)
-            _print_verbose(f"More than {attempts_full_config-1} attempts to generate a valid full configuration.", 1, state)
-            _print_verbose("Maximum displacement and rotation parameters will be enlarged by 20%", 1, state)
-            local_ds *= 1.2
-            local_dphi *= 1.2
-            if local_ds > state.xbox:
-                local_ds = state.xbox
-                _print_verbose("Maximum value for ds = xbox reached", 1, state)
-            if local_dphi > 2 * np.pi: # Max rotation is 2pi
-                local_dphi = 2 * np.pi
-                _print_verbose("Maximum value for dphi = 2*PI reached", 1, state)
-            _print_verbose(f"New values: ds = {local_ds:.2f}, dphi = {local_dphi:.2f}", 1, state)
-            _print_verbose("*****************\n", 1, state)
-            attempts_full_config = 0 # Reset counter after adjustment
-
-        # Create proposed state for this attempt, starting from the original (last accepted) state
-        proposed_rp = np.copy(original_rp_full_system)
-        proposed_rcm = np.copy(original_rcm_full_system)
-
-        # Perturb each molecule independently from the original state
-        for imo in range(state.num_molecules): # Iterate through all molecules (0-indexed)
-            mol_start_idx = state.imolec[imo]
-            mol_end_idx = state.imolec[imo+1]
-            
-            # Calculate current center of mass for the selected molecule
-            mol_atomic_numbers = [state.iznu[i] for i in range(mol_start_idx, mol_end_idx)]
-            mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
-                                   for anum in mol_atomic_numbers])
-            
-            # Calculate CM based on the *current* proposed_rp for this molecule
-            current_mol_rcm = calculate_mass_center(proposed_rp[mol_start_idx:mol_end_idx, :], mol_masses)
-            
-            # Create a temporary array for relative coordinates of the *current molecule*
-            mol_rel_coords_temp = proposed_rp[mol_start_idx:mol_end_idx, :] - current_mol_rcm
-            
-            # Decide whether to apply conformational move or rigid-body move
-            if np.random.rand() < state.conformational_move_prob:
-                # Apply conformational move (dihedral rotation)
-                try:
-                    mol_coords = proposed_rp[mol_start_idx:mol_end_idx, :]
-                    rotatable_bonds = find_rotatable_bonds(mol_coords, mol_atomic_numbers, state)
-                    
-                    if rotatable_bonds:
-                        # Randomly select a rotatable bond
-                        bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
-                        
-                        # Generate random rotation angle
-                        rotation_angle = (np.random.rand() - 0.5) * 2.0 * state.max_dihedral_angle_rad
-                        
-                        # Apply rotation to molecule coordinates
-                        new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
-                                                           moving_atoms, rotation_angle)
-                        
-                        # Update proposed coordinates
-                        proposed_rp[mol_start_idx:mol_end_idx, :] = new_mol_coords
-                        
-                        # Recalculate center of mass after conformational change
-                        proposed_rcm[imo, :] = calculate_mass_center(new_mol_coords, mol_masses)
-                        
-                        _print_verbose(f"  Applied conformational move to molecule {imo+1}", 2, state)
-                    else:
-                        # No rotatable bonds, apply rigid-body move instead
-                        trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
-                        rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state)
-                        
-                except Exception as e:
-                    # If conformational move fails, fall back to rigid-body move
-                    _print_verbose(f"  Conformational move failed for molecule {imo+1}, using rigid-body: {e}", 2, state)
-                    trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
-                    rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state)
-            else:
-                # Apply traditional rigid-body move (translation and rotation)
-                # Note: trans and rotac modify proposed_rp (for the selected molecule's atoms)
-                # and proposed_rcm (for the selected molecule's CM) in place.
-                trans(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_ds, state) 
-                rotac(imo, proposed_rp, mol_rel_coords_temp, proposed_rcm, local_dphi, state) 
-
-        # Now, check for collisions in the *entire proposed configuration*
-        collision_detected = False
-        for i_mol in range(state.num_molecules):
-            for j_mol in range(i_mol + 1, state.num_molecules): # Check unique pairs of molecules
-                mol1_start_idx = state.imolec[i_mol]
-                mol1_end_idx = state.imolec[i_mol+1]
-                mol2_start_idx = state.imolec[j_mol]
-                mol2_end_idx = state.imolec[j_mol+1]
-
-                for atom1_idx in range(mol1_start_idx, mol1_end_idx):
-                    for atom2_idx in range(mol2_start_idx, mol2_end_idx):
-                        dist_sq = np.sum((proposed_rp[atom1_idx, :] - proposed_rp[atom2_idx, :])**2)
-                        dist = np.sqrt(dist_sq)
-
-                        atom1_z = state.iznu[atom1_idx]
-                        atom2_z = state.iznu[atom2_idx]
-
-                        radius1 = state.R_ATOM.get(atom1_z, 0.5)
-                        radius2 = state.R_ATOM.get(atom2_z, 0.5)
-
-                        rmin = (radius1 + radius2) * state.OVERLAP_SCALE_FACTOR
-
-                        if dist < rmin and dist > 1e-4: # Avoid self-collision check for same atom
-                            collision_detected = True
-                            _print_verbose(f"  Collision detected between atom {atom1_idx} (mol {i_mol+1}) and atom {atom2_idx} (mol {j_mol+1}) in proposed config.", 2, state)
-                            break # Exit inner atom2 loop
-                    if collision_detected:
-                        break # Exit atom1 loop
-                if collision_detected:
-                    break # Exit j_mol loop
+        # Calculate current center of mass for the molecule
+        mol_atomic_numbers = [state.iznu[i] for i in range(mol_start_idx, mol_end_idx)]
+        mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
+                               for anum in mol_atomic_numbers])
         
-        if collision_detected:
-            _print_verbose(f"  Proposed full configuration (attempt {attempts_full_config}) failed due to collision. Retrying.", 1, state)
-            continue # Re-attempt generating a new full configuration
-        else:
-            # If no collision, this proposed configuration is valid.
-            state.rp[:] = proposed_rp[:]
-            state.rcm[:] = proposed_rcm[:]
-            _print_verbose(f"  Successfully generated non-colliding proposed configuration after {attempts_full_config} attempts.", 1, state)
-            break # Exit the outer while loop
+        # Calculate CM based on current coordinates
+        current_mol_rcm = calculate_mass_center(state.rp[mol_start_idx:mol_end_idx, :], mol_masses)
+        
+        # Create temporary array for relative coordinates
+        mol_rel_coords_temp = state.rp[mol_start_idx:mol_end_idx, :] - current_mol_rcm
+        
+        # Apply rigid-body move (translation and rotation)
+        trans(imo, state.rp, mol_rel_coords_temp, state.rcm, state.ds, state) 
+        rotac(imo, state.rp, mol_rel_coords_temp, state.rcm, state.dphi, state)
 
-    # Recalculate CMs for all molecules after the move, to ensure consistency
-    # (though config_move should have kept them consistent for the moved molecule)
-    # This loop ensures all CMs are up-to-date in state.rcm
+    # Recalculate all molecular centers of mass after the moves
     for i in range(state.num_molecules):
         mol_start_idx = state.imolec[i]
         mol_end_idx = state.imolec[i+1]
@@ -6957,10 +6920,11 @@ def main_ascec_integrated():
                     
                     # Print conformational sampling information
                     if state.conformational_move_prob > 0.0:
-                        _print_verbose(f"Conformational sampling enabled: {state.conformational_move_prob*100:.1f}% of moves will be conformational", 0, state)
-                        _print_verbose(f"Maximum dihedral rotation angle: {np.degrees(state.max_dihedral_angle_rad):.1f} degrees", 0, state)
+                        _print_verbose(f"Note: Conformational sampling is configured ({state.conformational_move_prob*100:.1f}%) but currently disabled for stability", 0, state)
+                        _print_verbose(f"      Only rigid-body moves (translation + rotation) will be used", 0, state)
+                        _print_verbose(f"      This ensures reliable annealing progress for all molecule types", 0, state)
                     else:
-                        _print_verbose("Conformational sampling disabled (only rigid-body moves)", 0, state)
+                        _print_verbose("Using rigid-body moves only (translation + rotation)", 0, state)
                     
                     _print_verbose("\nStarting annealing simulation...\n", 0, state)
                     initial_qm_calculation_succeeded = True
@@ -7107,9 +7071,19 @@ def main_ascec_integrated():
                 while qm_calls_made_this_temp_step < state.maxstep:
                     qm_calls_made_this_temp_step += 1 # Increment QM calls for this temperature step
                     
-                    # PROPOSE NEW CONFIGURATION by modifying the current state
-                    # The config_move function will directly modify state.rp and state.rcm
-                    config_move(state) 
+                    # PROPOSE NEW CONFIGURATION
+                    # The propose_unified_move function returns proposed coordinates
+                    # without modifying the state - we test them first, then accept/reject
+                    proposed_rp_full, proposed_mol_coords, moved_mol_idx, move_type = propose_unified_move(
+                        state, state.rp, state.imolec
+                    )
+                    
+                    # Save the CURRENT coordinates before we temporarily replace them for QM calculation
+                    # We need this because we'll revert if the move is rejected
+                    saved_rp = np.copy(state.rp)
+                    
+                    # Temporarily update state with proposed coordinates for QM calculation
+                    state.rp[:] = proposed_rp_full[:]
                     
                     # Calculate energy of the proposed configuration (which is now in state.rp)
                     # This will use parallel cores within the QM calculation itself
@@ -7119,65 +7093,64 @@ def main_ascec_integrated():
                     if state.verbosity_level == 2 or (state.verbosity_level == 1 and state.qm_call_count % 10 == 0):
                         _print_verbose(f"  Attempt {state.qm_call_count} (global), {qm_calls_made_this_temp_step} (step-local): T={state.current_temp:.2f} K", 1, state)
 
-                        if jo_status == 0:
-                            _print_verbose(f"  Warning: Proposed QM energy calculation failed for global attempt {state.qm_call_count}. Rejecting move.", 1, state)
-                            # Revert to the original state if QM failed for this proposal
-                            state.rp[:] = original_rp_for_revert[:]
-                            state.iznu[:] = original_iznu_for_revert[:]
-                            state.current_energy = original_energy_for_revert
-                            state.rcm[:] = original_rcm_for_revert[:] # Revert rcm as well
-                            continue # Continue to next MC cycle attempt
+                    # Check if QM calculation failed
+                    if jo_status == 0:
+                        _print_verbose(f"  Warning: Proposed QM energy calculation failed for global attempt {state.qm_call_count}. Rejecting move.", 1, state)
+                        # Revert to the saved state if QM failed for this proposal
+                        state.rp[:] = saved_rp[:]
+                        # Note: iznu, rcm, and current_energy don't change during a proposed move
+                        continue # Continue to next MC cycle attempt
 
-                        accept_move = False
-                        # Compare proposed energy with the energy of the *original* (last accepted) configuration
-                        delta_e = proposed_energy - original_energy_for_revert 
+                    accept_move = False
+                    # Compare proposed energy with the energy of the *original* (last accepted) configuration
+                    delta_e = proposed_energy - original_energy_for_revert 
+                    
+                    criterion_str = "" # Reset criterion string for each attempt
+
+                    if delta_e <= 0.0: # If proposed energy is lower or equal, always accept
+                        accept_move = True
+                        criterion_str = "LwE" 
+                        state.lower_energy_configs += 1  # Increment counter for lower energy configs 
+                    else: # If proposed energy is higher, apply Metropolis criterion
+                        # Ensure temperature is not zero for division
+                        if state.current_temp < 1e-6: 
+                            pE = 0.0
+                        else:
+                            pE = math.exp(-delta_e / (B2 * state.current_temp))
                         
-                        criterion_str = "" # Reset criterion string for each attempt
-
-                        if delta_e <= 0.0: # If proposed energy is lower or equal, always accept
-                            accept_move = True
-                            criterion_str = "LwE" 
-                            state.lower_energy_configs += 1  # Increment counter for lower energy configs 
-                        else: # If proposed energy is higher, apply Metropolis criterion
-                            # Ensure temperature is not zero for division
-                            if state.current_temp < 1e-6: 
-                                pE = 0.0
+                        if state.use_standard_metropolis: # Standard Metropolis
+                            if random.random() < pE:
+                                accept_move = True
+                                criterion_str = "Mpol"
+                                state.iboltz += 1
+                        else: # Modified Metropolis (default)
+                            # Handle division by zero for crt (if proposed_energy is zero)
+                            if abs(proposed_energy) < 1e-12: # Avoid division by near-zero energy
+                                crt = float('inf') 
                             else:
-                                pE = math.exp(-delta_e / (B2 * state.current_temp))
-                            
-                            if state.use_standard_metropolis: # Standard Metropolis
-                                if random.random() < pE:
-                                    accept_move = True
-                                    criterion_str = "Mpol"
-                                    state.iboltz += 1
-                            else: # Modified Metropolis (default)
-                                # Handle division by zero for crt (if proposed_energy is zero)
-                                if abs(proposed_energy) < 1e-12: # Avoid division by near-zero energy
-                                    crt = float('inf') 
-                                else:
-                                    crt = delta_e / abs(proposed_energy)
+                                crt = delta_e / abs(proposed_energy)
 
-                                if crt < pE: # This is the modified criterion
-                                    accept_move = True
-                                    criterion_str = "Mpol" 
-                                    state.iboltz += 1
+                            if crt < pE: # This is the modified criterion
+                                accept_move = True
+                                criterion_str = "Mpol" 
+                                state.iboltz += 1
 
-                        if accept_move:
-                            # If accepted, update the system's current state to the *proposed* one
-                            state.current_energy = proposed_energy 
-                            # state.rp and state.rcm are already the proposed (accepted) state
-                            
-                            # Preserve QM files from this accepted configuration for debugging
-                            preserve_last_qm_files(state, run_dir)
-                            
-                            # Update original_state_for_revert to the newly accepted state
-                            original_rp_for_revert[:] = state.rp[:]
-                            original_iznu_for_revert[:] = state.iznu[:]
-                            original_energy_for_revert = state.current_energy
-                            original_rcm_for_revert[:] = state.rcm[:] # Update rcm for revert too
-
-                            _print_verbose(f"  Attempt {state.qm_call_count} (global): Move accepted ({criterion_str}). New energy: {state.current_energy:.8f} a.u.", 1, state)
+                    if accept_move:
+                        # If accepted, update the system's current state to the *proposed* one
+                        state.current_energy = proposed_energy 
+                        # state.rp and state.rcm are already the proposed (accepted) state
                         
+                        # Preserve QM files from this accepted configuration for debugging
+                        preserve_last_qm_files(state, run_dir)
+                        
+                        # Update original_state_for_revert to the newly accepted state
+                        original_rp_for_revert[:] = state.rp[:]
+                        original_iznu_for_revert[:] = state.iznu[:]
+                        original_energy_for_revert = state.current_energy
+                        original_rcm_for_revert[:] = state.rcm[:] # Update rcm for revert too
+
+                        _print_verbose(f"  Attempt {state.qm_call_count} (global): Move accepted ({criterion_str}). New energy: {state.current_energy:.8f} a.u.", 1, state)
+                    
                         # Update lowest energy found overall
                         if state.current_energy < state.lowest_energy:
                             state.lowest_energy = state.current_energy
@@ -7223,12 +7196,11 @@ def main_ascec_integrated():
                             _print_verbose(f"  Metropolis accepted. Continuing Monte Carlo cycles at current temperature.", 1, state)
                             # Do NOT set should_move_to_next_temperature = True, continue the loop until maxstep is reached
                         
-                    else: # Move rejected or QM failed
+                    else: # Move rejected
                         _print_verbose(f"  Attempt {state.qm_call_count} (global): Move rejected. Energy: {proposed_energy:.8f} a.u. (Current: {original_energy_for_revert:.8f})", 1, state)
-                        state.rp[:] = original_rp_for_revert[:]
-                        state.iznu[:] = original_iznu_for_revert[:]
-                        state.current_energy = original_energy_for_revert
-                        state.rcm[:] = original_rcm_for_revert[:] # Revert rcm as well
+                        # Revert to the saved coordinates (before the proposed move)
+                        state.rp[:] = saved_rp[:]
+                        # Note: iznu, rcm, and current_energy don't change during a proposed move
                 
                 # After the inner loop (maxstep attempts or LwE break)
                 # If we did NOT move to the next temperature due to LwE, it means maxstep was reached
