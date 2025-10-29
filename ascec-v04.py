@@ -7130,7 +7130,7 @@ def main_ascec_integrated():
                         if state.use_standard_metropolis: # Standard Metropolis
                             if random.random() < pE:
                                 accept_move = True
-                                criterion_str = "Mpol"
+                                criterion_str = "EMpol"
                                 state.iboltz += 1
                         else: # Modified Metropolis (default)
                             # Handle division by zero for crt (if proposed_energy is zero)
@@ -7201,7 +7201,7 @@ def main_ascec_integrated():
                             _print_verbose(f"  Lower energy accepted. Moving to next temperature step.", 1, state)
                             should_move_to_next_temperature = True
                             break # Break out of the inner for loop (Monte Carlo cycles)
-                        elif criterion_str == "Mpol":
+                        elif criterion_str in ["Mpol", "EMpol"]:
                             _print_verbose(f"  Metropolis accepted. Continuing Monte Carlo cycles at current temperature.", 1, state)
                             # Do NOT set should_move_to_next_temperature = True, continue the loop until maxstep is reached
                         
@@ -7213,13 +7213,13 @@ def main_ascec_integrated():
                 
                 # After the inner loop (maxstep attempts or LwE break)
                 # If we did NOT move to the next temperature due to LwE, it means maxstep was reached
-                # or only Mpol was accepted (and maxstep was reached).
+                # or only Mpol/EMpol was accepted (and maxstep was reached).
                 # In this case, if the last history entry was NOT the current QM call count,
                 # it means there were unlogged QM calls since the last history entry.
-                # This happens if Mpol was accepted, or if no configuration was accepted.
+                # This happens if Mpol/EMpol was accepted, or if no configuration was accepted.
                 if not should_move_to_next_temperature and state.qm_call_count > state.last_history_qm_call_count:
                     # This means the inner loop completed because maxstep was reached,
-                    # and either an Mpol was accepted earlier in this loop (and a line was written),
+                    # and either an Mpol/EMpol was accepted earlier in this loop (and a line was written),
                     # or no config was accepted at all.
                     # We need to write an N/A line to account for the remaining QM calls
                     # at the *current* temperature before it quenches.
