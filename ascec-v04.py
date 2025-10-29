@@ -1347,25 +1347,23 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                 # If no basis set provided, leave it as None - respect user's input
                 state.qm_basis_set = None   
 
-        elif config_lines_parsed == 10:      # Line 11: nprocs [memory] [ascec_cores]
+        elif config_lines_parsed == 10:      # Line 11: nprocs (QM calculations and ASCEC evaluation)
             state.qm_nproc = int(parts[0])   
-            # Only set qm_memory if a second part is explicitly provided in the input file.
-            if len(parts) > 1:
-                state.qm_memory = parts[1]
-                _print_verbose(f"QM memory allocation set to: {state.qm_memory}", 2, state)
             
-            # Check for ASCEC parallel cores (third parameter)
-            if len(parts) > 2:
-                ascec_cores = int(parts[2])
+            # Check for ASCEC parallel cores (optional second parameter)
+            if len(parts) > 1:
+                # User explicitly specified ASCEC cores
+                ascec_cores = int(parts[1])
                 if ascec_cores > 1:
                     state.ascec_parallel_cores = ascec_cores
                     state.use_ascec_parallel = True
-                    _print_verbose(f"ASCEC parallel processing enabled with {state.ascec_parallel_cores} cores", 1, state)
+                    _print_verbose(f"ASCEC parallel processing: {state.ascec_parallel_cores} cores (user-specified)", 1, state)
                 else:
                     state.ascec_parallel_cores = 1
                     state.use_ascec_parallel = False
+                    _print_verbose(f"ASCEC parallel processing disabled (user-specified)", 1, state)
             else:
-                # Auto-detect ASCEC cores based on system if QM uses fewer cores than available
+                # Only one value provided - let ASCEC auto-decide based on available resources
                 cpu_count = multiprocessing.cpu_count()
                 if state.qm_nproc and state.qm_nproc < cpu_count:
                     # Use remaining cores for ASCEC operations
@@ -1373,8 +1371,16 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                     if remaining_cores >= 2:
                         state.ascec_parallel_cores = min(4, remaining_cores)  # Cap at 4 cores for ASCEC
                         state.use_ascec_parallel = True
-                        _print_verbose(f"Auto-enabled ASCEC parallel processing with {state.ascec_parallel_cores} cores", 1, state)
-                        _print_verbose(f"  (System has {cpu_count} cores, QM uses {state.qm_nproc}, ASCEC uses {state.ascec_parallel_cores})", 1, state)
+                        _print_verbose(f"ASCEC parallel processing: {state.ascec_parallel_cores} cores (auto-detected)", 1, state)
+                        _print_verbose(f"  (System: {cpu_count} cores, QM: {state.qm_nproc}, ASCEC: {state.ascec_parallel_cores})", 1, state)
+                    else:
+                        state.ascec_parallel_cores = 1
+                        state.use_ascec_parallel = False
+                        _print_verbose(f"ASCEC parallel processing disabled (insufficient remaining cores)", 1, state)
+                else:
+                    # QM uses all or more cores than available - no parallel ASCEC
+                    state.ascec_parallel_cores = 1
+                    state.use_ascec_parallel = False
 
         elif config_lines_parsed == 11:     # Line 12: Charge & Spin Multiplicity
             state.charge = int(parts[0])
@@ -6487,11 +6493,13 @@ def print_all_commands():
     print("  Line 7: Max displacement and rotation")
     print("  Line 8: QM program and alias")
     print("  Line 9: QM method and basis set")
-    print("  Line 10: nprocs [memory] [ascec_cores] (QM cores, memory, and optional ASCEC system cores)")
-    print("           - nprocs: number of cores for each QM calculation")
-    print("           - memory: optional memory allocation (e.g., '2GB')")
-    print("           - ascec_cores: optional number of system cores for ASCEC operations")
-    print("             If omitted, auto-detects based on remaining system cores")
+    print("  Line 10: nprocs (QM calculations and ASCEC evaluation)")
+    print("           Format: qm_nprocs [ascec_nprocs]")
+    print("           - qm_nprocs: number of cores for each QM calculation")
+    print("           - ascec_nprocs: optional number of cores for ASCEC parallel operations")
+    print("           Examples:")
+    print("             '1 4'  = 1 core for QM, 4 cores for ASCEC")
+    print("             '1'    = 1 core for QM, ASCEC auto-decides parallel cores")
     print("  Line 11: Charge and multiplicity")
     print("  Line 12+: Molecule definitions")
     print()

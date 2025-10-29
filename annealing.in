@@ -15,7 +15,7 @@
 
 1.0 1.0       # Line 7: Maximum Displacement (A) & Rotation (radians)
 
-0 60         # Line 8: Conformational sampling (%) & Maximum dihedral rotation (degrees)
+0 60          # Line 8: Conformational sampling (%) & Maximum dihedral rotation (degrees)
 
 2 orca        # Line 9: QM Program Index & alias
               # (1: Gaussian, 2: ORCA, 3: for other, etc.)
@@ -23,7 +23,7 @@
 pm3           # Line 10: Hamiltonian & Basis Set
               # (e.g., pm3, hf)(e.g., 6-31G*, STO-3G)
 
-8             # Line 11: nprocs [memory] ascec (QM calculations and ASCEC evaluation)
+1 4           # Line 11: nprocs (QM calculations and ASCEC evaluation)
 
 0 1           # Line 12: Charge & Spin Multiplicity
 
