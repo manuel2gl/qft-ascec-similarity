@@ -28,6 +28,9 @@ version = "* Similarity-v01: Jun-2025 *"  # Version of the Similarity script
 # Global variable to control verbosity
 VERBOSE = False
 
+# Global cache for CPU count to avoid repeated expensive calls
+_CPU_COUNT_CACHE = None
+
 def hartree_to_kcal_mol(energy_hartree):
     """Convert energy from Hartree to kcal/mol"""
     return energy_hartree * HARTREE_TO_KCAL_MOL
@@ -47,53 +50,56 @@ def print_step(message, **kwargs):
 
 def get_cpu_count_fast():
     """
-    Get CPU count using fast methods without timeouts.
+    Get CPU count using fast methods, with caching to avoid repeated calls.
     Uses all available resources for maximum performance.
     """
-    # Method 1: Try nproc --all command (shows all CPUs regardless of limits)
-    try:
-        result = subprocess.run(['nproc', '--all'], capture_output=True, text=True)
-        if result.returncode == 0:
-            cpu_count = int(result.stdout.strip())
-            if cpu_count > 0:
-                return cpu_count
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        # Fallback to regular nproc
-        try:
-            result = subprocess.run(['nproc'], capture_output=True, text=True)
-            if result.returncode == 0:
-                cpu_count = int(result.stdout.strip())
-                if cpu_count > 0:
-                    return cpu_count
-        except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-            pass
+    global _CPU_COUNT_CACHE
     
-    # Method 2: Try /proc/cpuinfo (Linux fallback)
-    try:
-        with open('/proc/cpuinfo', 'r') as f:
-            cpu_count = sum(1 for line in f if line.startswith('processor'))
-            if cpu_count > 0:
-                return cpu_count
-    except (FileNotFoundError, IOError):
-        pass
+    # Return cached value if available
+    if _CPU_COUNT_CACHE is not None:
+        return _CPU_COUNT_CACHE
     
-    # Method 3: Try os.cpu_count() (usually faster than mp.cpu_count())
+    # Method 1: Try os.cpu_count() first (fastest, no subprocess)
     try:
         cpu_count = os.cpu_count()
         if cpu_count is not None and cpu_count > 0:
+            _CPU_COUNT_CACHE = cpu_count
             return cpu_count
     except (OSError, AttributeError):
         pass
     
-    # Method 4: Use mp.cpu_count() without timeout
+    # Method 2: Try /proc/cpuinfo (Linux, fast file read)
+    try:
+        with open('/proc/cpuinfo', 'r') as f:
+            cpu_count = sum(1 for line in f if line.startswith('processor'))
+            if cpu_count > 0:
+                _CPU_COUNT_CACHE = cpu_count
+                return cpu_count
+    except (FileNotFoundError, IOError):
+        pass
+    
+    # Method 3: Try nproc command (Linux)
+    try:
+        result = subprocess.run(['nproc'], capture_output=True, text=True, timeout=1.0)
+        if result.returncode == 0:
+            cpu_count = int(result.stdout.strip())
+            if cpu_count > 0:
+                _CPU_COUNT_CACHE = cpu_count
+                return cpu_count
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError, subprocess.TimeoutExpired):
+        pass
+    
+    # Method 4: Use mp.cpu_count() as last resort (can be slow)
     try:
         cpu_count = mp.cpu_count()
         if cpu_count > 0:
+            _CPU_COUNT_CACHE = cpu_count
             return cpu_count
     except (OSError, AttributeError):
         pass
     
     # Final fallback: use 24 cores (reasonable default for modern systems)
+    _CPU_COUNT_CACHE = 24
     return 24
 
 ### Embedded element masses dictionary ###
@@ -1733,9 +1739,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     Performs hierarchical clustering and comprehensive analysis on molecular structures.
     This is the main analysis function that orchestrates the entire clustering workflow.
     """
-    from sklearn.preprocessing import StandardScaler  # Import only when needed
-    from scipy.cluster.hierarchy import dendrogram, linkage, fcluster  # Import only when needed
-    import matplotlib.pyplot as plt  # Import only when needed
+    from sklearn.preprocessing import StandardScaler  # type: ignore # Import only when needed
+    from scipy.cluster.hierarchy import dendrogram, linkage, fcluster  # type: ignore # Import only when needed
+    import matplotlib.pyplot as plt  # type: ignore # Import only when needed
     
     # Set default number of cores if not specified
     if num_cores is None:
