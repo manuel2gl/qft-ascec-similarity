@@ -5710,13 +5710,16 @@ def parse_orca_output(filepath):
 
 def format_time_summary(seconds, include_days=False):
     """Format time for summary output."""
-    days, rem = divmod(seconds, 24 * 3600)
-    hours, rem = divmod(rem, 3600)
-    minutes, sec = divmod(rem, 60)
     if include_days:
+        days, rem = divmod(seconds, 24 * 3600)
+        hours, rem = divmod(rem, 3600)
+        minutes, sec = divmod(rem, 60)
         return f"{int(days)} days, {int(hours)}:{int(minutes)}:{sec:.3f}"
     else:
-        return f"{int(hours)}:{int(minutes)}:{sec:.3f}"
+        # Convert all time to hours (even if >24), minutes, seconds
+        total_hours, rem = divmod(seconds, 3600)
+        minutes, sec = divmod(rem, 60)
+        return f"{int(total_hours)}:{int(minutes)}:{sec:.3f}"
 
 def format_total_time(seconds):
     """Format the total execution time in H:M:S format."""
