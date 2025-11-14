@@ -1,3 +1,31 @@
+"""
+Similarity v01 - Structure Clustering and Analysis
+==================================================
+
+MULTI-SOFTWARE SUPPORT: Works with both ORCA and Gaussian
+---------------------------------------------------------
+
+FUNCTIONALITY:
+=============
+- Clusters optimized structures based on energy and geometry similarity
+- Identifies structures with imaginary frequencies
+- Separates structures into:
+  * clustered_with_normal: Safe to ignore (clustered with true minima)
+  * need_recalculation: Require retry (not clustered, potential missing motifs)
+
+OUTPUT FOR RETRY WORKFLOW:
+=========================
+For structures in need_recalculation/:
+  - Original output files (.out/.log)
+  - Individual XYZ geometries (.xyz)
+  - Combined XYZ file (combined_need_recalc.xyz)
+
+These files are used by ASCEC's intelligent retry system to:
+  1. Identify good vs failed structures
+  2. Process failed structures (displacement or final geometry extraction)
+  3. Recalculate only what needs fixing
+"""
+
 import argparse
 import os
 import numpy as np
@@ -204,6 +232,93 @@ def calculate_rms_deviation(values):
     rmsd = np.sqrt(np.mean(squared_deviations))
     
     return rmsd
+
+def extract_xyz_from_output(output_file):
+    """
+    Extract XYZ coordinates from ORCA or Gaussian output file.
+    Works for both file types by detecting the format.
+    
+    Args:
+        output_file: Path to .out or .log file
+        
+    Returns:
+        tuple: (natoms, coords_array, symbols_list) or (None, None, None) if failed
+    """
+    try:
+        with open(output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Detect file type
+        is_orca = False
+        is_gaussian = False
+        for line in lines[:100]:
+            if 'O   R   C   A' in line:
+                is_orca = True
+                break
+            if 'Gaussian' in line:
+                is_gaussian = True
+                break
+        
+        if is_orca:
+            # Extract from ORCA "CARTESIAN COORDINATES (ANGSTROEM)" section (last occurrence)
+            coord_start = None
+            for i in range(len(lines)-1, -1, -1):
+                if 'CARTESIAN COORDINATES (ANGSTROEM)' in lines[i]:
+                    coord_start = i + 2
+                    break
+            
+            if coord_start is None:
+                return None, None, None
+            
+            coords = []
+            symbols = []
+            for i in range(coord_start, len(lines)):
+                line = lines[i].strip()
+                if not line or line.startswith('---') or line.startswith('='):
+                    break
+                parts = line.split()
+                if len(parts) >= 4:
+                    symbol = parts[0]
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    symbols.append(symbol)
+                    coords.append([x, y, z])
+            
+            if coords:
+                return len(coords), np.array(coords), symbols
+        
+        elif is_gaussian:
+            # Extract from Gaussian "Standard orientation" section (last occurrence)
+            coord_start = None
+            for i in range(len(lines)-1, -1, -1):
+                if 'Standard orientation:' in lines[i]:
+                    coord_start = i + 5
+                    break
+            
+            if coord_start is None:
+                return None, None, None
+            
+            coords = []
+            symbols = []
+            for i in range(coord_start, len(lines)):
+                line = lines[i].strip()
+                if line.startswith('---'):
+                    break
+                parts = line.split()
+                if len(parts) >= 6:
+                    atomic_num = int(parts[1])
+                    x, y, z = float(parts[3]), float(parts[4]), float(parts[5])
+                    # Convert atomic number to symbol
+                    symbol = atomic_number_to_symbol(atomic_num)
+                    symbols.append(symbol)
+                    coords.append([x, y, z])
+            
+            if coords:
+                return len(coords), np.array(coords), symbols
+        
+        return None, None, None
+        
+    except Exception as e:
+        return None, None, None
 
 def calculate_radius_of_gyration(atomnos, atomcoords):
     """
@@ -1200,11 +1315,47 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
                     dest_file = os.path.join(clustered_dir, m['filename'])
                     shutil.copy2(source_file, dest_file)
             
+            # Process structures needing recalculation - extract XYZ geometries
+            xyz_data_list = []  # For combined file
             for m in skipped_need_recalc:
                 source_file = available_files.get(m['filename'])
                 if source_file and os.path.exists(source_file):
+                    # Copy output file
                     dest_file = os.path.join(need_recalc_dir, m['filename'])
                     shutil.copy2(source_file, dest_file)
+                    
+                    # Extract XYZ geometry
+                    natoms, coords, symbols = extract_xyz_from_output(source_file)
+                    if natoms is not None and coords is not None and symbols is not None:
+                        # Save individual XYZ file
+                        basename = os.path.splitext(m['filename'])[0]
+                        xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
+                        with open(xyz_file, 'w') as f:
+                            f.write(f"{natoms}\n")
+                            f.write(f"{basename} - needs recalculation\n")
+                            for symbol, coord in zip(symbols, coords):
+                                f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
+                        
+                        # Store for combined file
+                        xyz_data_list.append({
+                            'natoms': natoms,
+                            'symbols': symbols,
+                            'coords': coords,
+                            'basename': basename
+                        })
+            
+            # Create combined XYZ file with all structures needing recalculation
+            if xyz_data_list:
+                combined_xyz = os.path.join(need_recalc_dir, "combined_need_recalc.xyz")
+                with open(combined_xyz, 'w') as f:
+                    for data in xyz_data_list:
+                        f.write(f"{data['natoms']}\n")
+                        f.write(f"{data['basename']} - needs recalculation\n")
+                        for symbol, coord in zip(data['symbols'], data['coords']):
+                            f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
+                
+                vprint(f"  Created combined XYZ file: {combined_xyz}")
+                vprint(f"  Extracted {len(xyz_data_list)} individual XYZ files")
         
         total_skipped = len(skipped_clustered_with_normal) + len(skipped_need_recalc)
         print_step(f"\nProcessed {total_skipped} structures with imaginary frequencies:")
@@ -3333,10 +3484,10 @@ if __name__ == "__main__":
             display_name = os.path.basename(folder_path)
             if folder_path == current_dir:
                 display_name = "./"
-            print(f"\n--- Processing folder: {display_name} ---\n")
+            print(f"\nProcessing folder: {display_name}\n")
 
             perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, motif_threshold=motif_threshold, num_cores=num_cores, temperature_k=temperature_k)
 
-            print(f"\n--- Finished processing folder: {display_name} ---\n")
+            print(f"\nFinished processing folder: {display_name}\n")
 
     print_step("\nAll selected molecular analyses complete!")
