@@ -48,6 +48,13 @@ B2 = 3.166811563e-6   # Boltzmann constant in Hartree/K (approx. 3.166811563 × 
 # Constants for overlap prevention during initial configuration generation (in config_molecules)
 OVERLAP_SCALE_FACTOR = 0.7 # Factor to make overlap check slightly more lenient (e.g., allow partial overlap)
 
+def natural_sort_key(s):
+    """
+    Generate a sort key for natural (numerical) sorting.
+    Converts 'opt_conf_10.inp' to ['opt_conf_', 10, '.inp'] for proper numerical sorting.
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
 def get_optimal_workers(task_type: str, num_items: int) -> int:
     """
     Calculate optimal number of workers for different task types.
@@ -9128,7 +9135,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             print(f"\nExecuting calculations...\n")
             
             # Get list of input files to process
-            input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))])
+            input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
             num_inputs = len(input_files)
             
             # Determine QM program
@@ -9723,7 +9730,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             qm_program = 'gaussian'
         
         # Get list of input files to process
-        input_files = sorted([f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))])
+        input_files = sorted([f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
         num_inputs = len(input_files)
         
         # Check for resume state and exclusions
