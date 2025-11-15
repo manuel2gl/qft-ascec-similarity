@@ -9267,9 +9267,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 if attempt > 1:
                                     # Format ordinal number (2nd, 3rd, 4th, etc.)
                                     ordinal = f"{attempt}{'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
-                                    print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)")
+                                    print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)", flush=True)
                                 else:
-                                    print(f"\r  Running: {input_file}... ✓")
+                                    print(f"\r  Running: {input_file}... ✓", flush=True)
                                 num_completed += 1
                                 success = True
                                 
@@ -9441,7 +9441,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     
                     # If still not successful, mark as failed and continue to next
                     if not success:
-                        print(f"\r  Running: {input_file}... FAILED (exhausted all strategies)")
+                        print(f"\r  Running: {input_file}... ✗")
                         num_failed += 1
                         failed_calculations.append(input_file)
                         
@@ -10003,9 +10003,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         if attempt > 1:
                             # Format ordinal number (1st, 2nd, 3rd, 4th, etc.)
                             ordinal = f"{attempt}{'st' if attempt == 1 else 'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
-                            print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)")
+                            print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)", flush=True)
                         else:
-                            print(f"\r  Running: {input_file}... ✓")
+                            print(f"\r  Running: {input_file}... ✓", flush=True)
                         num_completed += 1
                         success = True
                         
@@ -10168,7 +10168,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             
             # If still not successful, mark as failed and continue
             if not success:
-                print(f"\r  Running: {input_file}... FAILED (exhausted all strategies)")
+                print(f"\r  Running: {input_file}... ✗")
                 num_failed += 1
                 failed_optimizations.append(input_file)
                 
