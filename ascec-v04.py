@@ -1780,7 +1780,11 @@ def plot_annealing_diagrams(tvse_file: str, output_dir: str, scaled: bool = Fals
         if y_min is not None and y_max is not None:
             ax2.set_ylim(y_min, y_max)
         
-        plt.tight_layout()
+        # Suppress tight_layout warning
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            plt.tight_layout()
         
         # Save figure
         basename = os.path.splitext(os.path.basename(tvse_file))[0]
@@ -1895,7 +1899,12 @@ def plot_combined_replicas_diagram(tvse_files: List[str], output_file: str, num_
         if replica_data:
             ax.legend(loc='upper right', frameon=False, fontsize=10)
         
-        plt.tight_layout()
+        # Suppress tight_layout warning
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            plt.tight_layout()
+        
         plt.savefig(output_file, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -9011,7 +9020,12 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     
     # Generate annealing diagrams for each replica
     if MATPLOTLIB_AVAILABLE:
-        print(f"\nGenerating annealing diagrams...")
+        # Only show messages if not in workflow mode
+        is_workflow = getattr(context, 'is_workflow', False)
+        
+        if not is_workflow:
+            print(f"\nGenerating annealing diagrams...")
+        
         diagrams_generated = 0
         all_tvse_files = []
         
@@ -9024,18 +9038,19 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         diagrams_generated += 1
                         all_tvse_files.append(tvse_file)
         
-        if diagrams_generated > 0:
+        if diagrams_generated > 0 and not is_workflow:
             print(f"  Generated {diagrams_generated} diagram(s)")
             
-            # Generate combined replica diagram in parent annealing directory
-            if len(all_tvse_files) > 1:
-                # Get parent directory (annealing/)
-                annealing_parent = os.path.dirname(context.annealing_dirs[0])
-                if not annealing_parent:
-                    annealing_parent = "annealing"
-                
-                combined_diagram = os.path.join(annealing_parent, f"tvse_r{num_replicas}.png")
-                if plot_combined_replicas_diagram(all_tvse_files, combined_diagram, num_replicas):
+        # Generate combined replica diagram in parent annealing directory
+        if len(all_tvse_files) > 1:
+            # Get parent directory (annealing/)
+            annealing_parent = os.path.dirname(context.annealing_dirs[0])
+            if not annealing_parent:
+                annealing_parent = "annealing"
+            
+            combined_diagram = os.path.join(annealing_parent, f"tvse_r{num_replicas}.png")
+            if plot_combined_replicas_diagram(all_tvse_files, combined_diagram, num_replicas):
+                if not is_workflow:
                     print(f"  Generated combined: {os.path.basename(combined_diagram)}")
     
     return 0
@@ -9249,7 +9264,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 normal_term = 'Normal termination of Gaussian' in output_content
                             
                             if normal_term:
-                                print(f"\r  Running: {input_file}... SUCCESS" + (f" (direct retry {attempt})" if attempt > 1 else ""))
+                                if attempt > 1:
+                                    # Format ordinal number (2nd, 3rd, 4th, etc.)
+                                    ordinal = f"{attempt}{'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
+                                    print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)")
+                                else:
+                                    print(f"\r  Running: {input_file}... ✓")
                                 num_completed += 1
                                 success = True
                                 
@@ -9398,7 +9418,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                         normal_term = 'Normal termination of Gaussian' in output_content
                                     
                                     if normal_term:
-                                        print(f"\r  Running: {input_file}... SUCCESS (geometry retry {geom_attempt})")
+                                        # Total attempts = direct retries + geometry retries
+                                        total_attempt = max_direct_retries + geom_attempt
+                                        ordinal = f"{total_attempt}{'th' if total_attempt >= 4 else 'nd' if total_attempt == 2 else 'rd' if total_attempt == 3 else 'st'}"
+                                        print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)")
                                         num_completed += 1
                                         success = True
                                         
@@ -9977,7 +10000,12 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         normal_term = 'Normal termination of Gaussian' in output_content
                     
                     if normal_term:
-                        print(f"\r  Running: {input_file}... SUCCESS" + (f" (direct retry {attempt})" if attempt > 1 else ""))
+                        if attempt > 1:
+                            # Format ordinal number (1st, 2nd, 3rd, 4th, etc.)
+                            ordinal = f"{attempt}{'st' if attempt == 1 else 'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
+                            print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)")
+                        else:
+                            print(f"\r  Running: {input_file}... ✓")
                         num_completed += 1
                         success = True
                         
@@ -10117,7 +10145,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                                 normal_term = 'Normal termination of Gaussian' in output_content
                             
                             if normal_term:
-                                print(f"\r  Running: {input_file}... SUCCESS (geometry retry {geom_attempt})")
+                                # Total attempts = direct retries + geometry retries
+                                total_attempt = max_direct_retries + geom_attempt
+                                ordinal = f"{total_attempt}{'st' if total_attempt == 1 else 'nd' if total_attempt == 2 else 'rd' if total_attempt == 3 else 'th'}"
+                                print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)")
                                 num_completed += 1
                                 success = True
                                 
