@@ -10,6 +10,14 @@ import numpy as np
 import os
 from pathlib import Path
 import pickle
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None  # type: ignore
 import random
 import re
 import shlex
@@ -1670,6 +1678,224 @@ def update_protocol_cache(stage_name: str, status: str, result: Optional[Dict[st
     cache['last_update'] = time.strftime('%Y-%m-%d %H:%M:%S')
     
     save_protocol_cache(cache, cache_file)
+
+
+def plot_annealing_diagrams(tvse_file: str, output_dir: str, scaled: bool = False):
+    """
+    Generate Energy vs Step and Energy vs Temperature diagrams from tvse_*.dat file.
+    
+    Args:
+        tvse_file: Path to tvse_*.dat file
+        output_dir: Directory to save the plots
+        scaled: If True, apply intelligent y-axis scaling (remove initial high-energy points)
+    """
+    if not MATPLOTLIB_AVAILABLE or plt is None:
+        return False
+    
+    if not os.path.exists(tvse_file):
+        return False
+    
+    try:
+        # Read tvse data file
+        # Format: Step Temperature Energy
+        steps = []
+        temperatures = []
+        energies = []
+        
+        with open(tvse_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        step = int(parts[0])
+                        temp = float(parts[1])
+                        energy = float(parts[2])
+                        steps.append(step)
+                        temperatures.append(temp)
+                        energies.append(energy)
+                    except ValueError:
+                        continue
+        
+        if not steps:
+            return False
+        
+        # Calculate intelligent y-axis scaling if requested
+        y_min = None
+        y_max = None
+        if scaled and energies:
+            sorted_energies = sorted(energies)
+            
+            # Find the minimum (most negative) energy - this is critical!
+            y_min = min(energies)
+            
+            # For y_max: exclude only the top 5% highest energies (initial hot configurations)
+            percentile_95_idx = int(len(sorted_energies) * 0.95)
+            y_max_candidate = sorted_energies[percentile_95_idx]
+            
+            # Add small margins for visualization
+            energy_range = y_max_candidate - y_min
+            y_min = y_min - 0.02 * abs(energy_range)  # 2% margin below minimum
+            y_max = y_max_candidate + 0.05 * abs(energy_range)  # 5% margin above 95th percentile
+        
+        # Create figure with two subplots with more separation
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 11), gridspec_kw={'hspace': 0.35})
+        
+        # Plot 1: Energy vs Step Number
+        ax1.plot(steps, energies, 'k-', linewidth=0.8, alpha=0.7)
+        ax1.set_xlabel('Step Number', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Energy [Hartrees]', fontsize=12, fontweight='bold')
+        ax1.set_title('Simulated Annealing: Energy Evolution', fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.2, linewidth=0.5)
+        ax1.tick_params(axis='both', which='major', labelsize=10)
+        # Make secondary axes less prominent
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # Apply scaled y-limits if requested
+        if y_min is not None and y_max is not None:
+            ax1.set_ylim(y_min, y_max)
+        
+        # Plot 2: Energy vs Temperature
+        ax2.scatter(temperatures, energies, c='black', s=10, alpha=0.5, edgecolors='none')
+        ax2.set_xlabel('Temperature [K]', fontsize=12, fontweight='bold')
+        ax2.set_ylabel('Energy [Hartrees]', fontsize=12, fontweight='bold')
+        ax2.set_title('Energy Distribution vs Temperature', fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.2, linewidth=0.5)
+        ax2.tick_params(axis='both', which='major', labelsize=10)
+        # Make secondary axes less prominent
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # Apply scaled y-limits to second plot if requested
+        if y_min is not None and y_max is not None:
+            ax2.set_ylim(y_min, y_max)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        basename = os.path.splitext(os.path.basename(tvse_file))[0]
+        output_file = os.path.join(output_dir, f"{basename}.png")
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return True
+        
+    except Exception as e:
+        return False
+
+
+def plot_combined_replicas_diagram(tvse_files: List[str], output_file: str, num_replicas: int):
+    """
+    Generate a single combined Energy vs Step diagram for all replicas.
+    
+    Args:
+        tvse_files: List of paths to tvse_*.dat files
+        output_file: Output path for the combined diagram
+        num_replicas: Number of replicas
+    """
+    if not MATPLOTLIB_AVAILABLE or plt is None:
+        return False
+    
+    if not tvse_files:
+        return False
+    
+    try:
+        # Create single plot
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        
+        # Collect all energies first to determine optimal y-axis range
+        all_energies = []
+        replica_data = []
+        
+        # Plot each replica and extract replica number from filename
+        for idx, tvse_file in enumerate(tvse_files, 1):
+            if not os.path.exists(tvse_file):
+                continue
+            
+            steps = []
+            energies = []
+            
+            with open(tvse_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            step = int(parts[0])
+                            energy = float(parts[2])
+                            steps.append(step)
+                            energies.append(energy)
+                            all_energies.append(energy)
+                        except ValueError:
+                            continue
+            
+            if steps:
+                # Extract replica number from path (e.g., "annealing_1" -> 1)
+                replica_label = f"ann_{idx}"
+                parent_dir = os.path.basename(os.path.dirname(tvse_file))
+                # Try to extract number from directory name
+                import re
+                match = re.search(r'_(\d+)$', parent_dir)
+                if match:
+                    replica_label = f"ann_{match.group(1)}"
+                
+                replica_data.append((steps, energies, replica_label))
+        
+        # Calculate optimal y-axis range by removing only initial high-energy points
+        # Keep ALL final energies (they show convergence to minima - very important!)
+        y_min = None
+        y_max = None
+        
+        if all_energies:
+            sorted_energies = sorted(all_energies)
+            
+            # Find the minimum (most negative) energy - this is critical!
+            y_min = min(all_energies)
+            
+            # For y_max: exclude only the top 5% highest energies (initial hot configurations)
+            # This removes the initial spike without affecting the convergence region
+            percentile_95_idx = int(len(sorted_energies) * 0.95)
+            y_max_candidate = sorted_energies[percentile_95_idx]
+            
+            # Add small margins for visualization
+            energy_range = y_max_candidate - y_min
+            y_min = y_min - 0.02 * abs(energy_range)  # 2% margin below minimum
+            y_max = y_max_candidate + 0.05 * abs(energy_range)  # 5% margin above 95th percentile
+        
+        # Now plot all replica data with labels
+        for steps, energies, label in replica_data:
+            ax.plot(steps, energies, linewidth=0.8, alpha=0.6, label=label)
+        
+        # Apply the calculated y-axis range
+        if y_min is not None and y_max is not None:
+            ax.set_ylim(y_min, y_max)
+        
+        ax.set_xlabel('Step Number', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Energy [Hartrees]', fontsize=12, fontweight='bold')
+        ax.set_title(f'Simulated Annealing: Energy Evolution (r{num_replicas})', fontsize=14, fontweight='bold')
+        ax.grid(True, alpha=0.2, linewidth=0.5)
+        ax.tick_params(axis='both', which='major', labelsize=10)
+        # Make secondary axes less prominent
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        
+        # Add legend at top right without box
+        if replica_data:
+            ax.legend(loc='upper right', frameon=False, fontsize=10)
+        
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return True
+        
+    except Exception as e:
+        return False
 
 
 def generate_protocol_summary(cache_file: str = "protocol_cache.pkl", 
@@ -4764,7 +4990,7 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
     
     # FIRST: Check for retry_input folder (structures from need_recalculation)
     if os.path.exists("retry_input"):
-        print("→ Found retry_input folder, using structures from previous similarity analysis")
+        print("Found retry_input folder, using structures from previous similarity analysis")
         for file in os.listdir("retry_input"):
             if file.endswith(".xyz"):
                 xyz_files.append(os.path.join("retry_input", file))
@@ -5585,6 +5811,10 @@ def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
         return False
     
     try:
+        # Ensure output directory exists
+        output_dir = os.path.dirname(output_filename)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
         # Sort files by the number in the filename for consistent ordering
         def get_sort_key(filepath):
             filename = os.path.basename(filepath)
@@ -6170,6 +6400,9 @@ def get_sort_key(filename):
     if match:
         return int(match.group(1))
     return float('inf')
+
+
+
 
 def combine_xyz_files(output_filename="combined_results.xyz", exclude_pattern="_trj.xyz"):
     """Combine all relevant .xyz files into a single .xyz file."""
@@ -6978,6 +7211,90 @@ def execute_similarity_analysis(*args):
         print(f"\nUnexpected error: {e}")
 
 
+def execute_diagram_generation(scaled: bool = False):
+    """
+    Generate or regenerate all annealing diagrams from tvse_*.dat files.
+    Searches for tvse_*.dat files in current directory and subdirectories,
+    creates individual diagrams, and generates combined replica diagrams.
+    
+    Args:
+        scaled: If True, apply intelligent y-axis scaling to remove initial high-energy clutter
+    """
+    if not MATPLOTLIB_AVAILABLE or plt is None:
+        print("Error: matplotlib is not available")
+        print("Install with: pip install matplotlib")
+        return
+    
+    print("=" * 60)
+    print("ASCEC Diagram Generation")
+    if scaled:
+        print("(Scaled mode: intelligent y-axis scaling enabled)")
+    print("=" * 60)
+    
+    # Find all tvse_*.dat files
+    tvse_files = []
+    for root, dirs, files in os.walk('.'):
+        for file in files:
+            if file.startswith('tvse_') and file.endswith('.dat'):
+                tvse_files.append(os.path.join(root, file))
+    
+    if not tvse_files:
+        print("No tvse_*.dat files found in current directory or subdirectories")
+        return
+    
+    print(f"Found {len(tvse_files)} tvse file(s)")
+    print()
+    
+    # Generate individual diagrams
+    diagrams_generated = 0
+    for tvse_file in tvse_files:
+        output_dir = os.path.dirname(tvse_file)
+        filename = os.path.basename(tvse_file)
+        seed = filename.replace('tvse_', '').replace('.dat', '')
+        
+        print(f"  {filename}...", end=" ", flush=True)
+        
+        if plot_annealing_diagrams(tvse_file, output_dir, scaled=scaled):
+            print(f"✓")
+            diagrams_generated += 1
+        else:
+            print(f"✗ Failed")
+    
+    print(f"\nGenerated {diagrams_generated} individual diagram(s)")
+    
+    # Check for replica groups (multiple tvse files in same parent directory)
+    # Group by parent directory
+    parent_dirs = {}
+    for tvse_file in tvse_files:
+        parent = os.path.dirname(os.path.dirname(tvse_file))
+        if parent not in parent_dirs:
+            parent_dirs[parent] = []
+        parent_dirs[parent].append(tvse_file)
+    
+    # Generate combined diagrams for parent directories with multiple replicas
+    combined_generated = 0
+    for parent_dir, files in parent_dirs.items():
+        if len(files) > 1:
+            # This looks like a replica group
+            num_replicas = len(files)
+            output_file = os.path.join(parent_dir, f"tvse_r{num_replicas}.png")
+            
+            print(f"\nGenerating combined diagram for {num_replicas} replica(s)...")
+            
+            if plot_combined_replicas_diagram(files, output_file, num_replicas):
+                print(f"  ✓ Created: {os.path.basename(output_file)}")
+                combined_generated += 1
+            else:
+                print(f"  ✗ Failed to create combined diagram")
+    
+    if combined_generated > 0:
+        print(f"\nGenerated {combined_generated} combined diagram(s)")
+    
+    print("\n" + "=" * 60)
+    print("Diagram generation completed")
+    print("=" * 60)
+
+
 def execute_box_analysis(input_file: str):
     """
     Analyze an input file and provide box length recommendations without running the simulation.
@@ -7066,6 +7383,11 @@ def print_all_commands():
     
     print("  Merge launcher scripts:")
     print("    python3 ascec-v04.py launcher                 # Merge all launcher scripts")
+    print()
+    
+    print("  Generate annealing diagrams:")
+    print("    python3 ascec-v04.py diagram                  # Generate/regenerate all diagrams")
+    print("    python3 ascec-v04.py diagram --scaled         # Generate with intelligent scaling")
     print()
     
     print("4. ANALYSIS COMMANDS:")
@@ -7510,18 +7832,18 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
                 # Single imaginary frequency: displace along the mode
                 if displace_along_imaginary_mode(out_file, calc_dir):
                     processed += 1
-                    print(f"      → Displaced structure created")
+                    print(f"      Displaced structure created")
                 else:
-                    print(f"      → Could not create displaced structure")
+                    print(f"      Could not create displaced structure")
             elif imag_count >= 2:
                 # Multiple imaginary frequencies: extract final geometry
                 if extract_final_geometry(out_file, calc_dir):
                     processed += 1
-                    print(f"      → Final geometry extracted for re-optimization")
+                    print(f"      Final geometry extracted for re-optimization")
                 else:
-                    print(f"      → Could not extract final geometry")
+                    print(f"      Could not extract final geometry")
         except Exception as e:
-            print(f"      → Error processing {os.path.basename(out_file)}: {e}")
+            print(f"      Error processing {os.path.basename(out_file)}: {e}")
     
     return processed
 
@@ -7874,12 +8196,77 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         if cache:
             from datetime import datetime
             start_time = cache.get('start_time', None)
-            if start_time:
+            completed_stages = cache.get('stages', {})
+            
+            # Check if protocol is completed
+            is_completed = cache.get('completed', False)
+            
+            if is_completed and completed_stages:
+                # Protocol was completed - offer resume from specific stage
+                print(f"\n{'='*70}")
+                print(f"Protocol was previously completed!")
+                if start_time:
+                    dt = datetime.fromtimestamp(start_time)
+                    time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"Original run started: {time_str}")
+                
+                # Show completed stages
+                print(f"\nCompleted stages:")
+                stage_list = []
+                for idx, (stage_key, stage_data) in enumerate(sorted(completed_stages.items()), 1):
+                    stage_type = stage_data.get('type', 'Unknown')
+                    stage_list.append((idx, stage_key, stage_type))
+                    print(f"  [{idx}] {stage_type}")
+                
+                print(f"\nOptions:")
+                print(f"  [0] Start from beginning (will use existing directories)")
+                for idx, _, stage_type in stage_list:
+                    print(f"  [{idx}] Resume from {stage_type}")
+                print(f"  [q] Quit")
+                
+                choice = input(f"\nSelect starting point [0-{len(stage_list)}, q]: ").strip().lower()
+                
+                if choice == 'q':
+                    print("Exiting...")
+                    sys.exit(0)
+                
+                try:
+                    choice_idx = int(choice)
+                    if choice_idx == 0:
+                        # Start from beginning - clear cache but keep directories
+                        print(f"Starting from beginning (existing directories will be reused)")
+                        cache = {}
+                        if protocol_text:
+                            cache['protocol_text'] = protocol_text
+                            save_protocol_cache(cache, cache_file)
+                    elif 1 <= choice_idx <= len(stage_list):
+                        # Resume from specific stage - mark previous stages as completed
+                        resume_stage_key = stage_list[choice_idx - 1][1]
+                        print(f"Resuming from stage: {stage_list[choice_idx - 1][2]}")
+                        print(f"Previous stages marked as completed")
+                        # Keep cache but mark as not completed (we're resuming)
+                        cache['completed'] = False
+                    else:
+                        print(f"Invalid choice. Starting from beginning.")
+                        cache = {}
+                        if protocol_text:
+                            cache['protocol_text'] = protocol_text
+                            save_protocol_cache(cache, cache_file)
+                except ValueError:
+                    print(f"Invalid input. Starting from beginning.")
+                    cache = {}
+                    if protocol_text:
+                        cache['protocol_text'] = protocol_text
+                        save_protocol_cache(cache, cache_file)
+                
+                print(f"{'='*70}\n")
+            elif start_time:
+                # Protocol in progress - just resume
                 dt = datetime.fromtimestamp(start_time)
                 time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                print(f"→ Resuming workflow (started: {time_str})")
+                print(f"Resuming workflow (started: {time_str})")
             else:
-                print(f"→ Resuming workflow")
+                print(f"Resuming workflow")
         else:
             # Store protocol text when first starting
             if protocol_text:
@@ -8030,16 +8417,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Show retry configuration
                     if max_critical is not None:
-                        print(f"→ Retry enabled: max {max_tries} attempts, critical ≤ {max_critical}%")
+                        print(f"  Retry enabled: max {max_tries} attempts, critical ≤ {max_critical}%")
                     elif max_skipped is not None:
-                        print(f"→ Retry enabled: max {max_tries} attempts, skipped ≤ {max_skipped}%")
+                        print(f"  Retry enabled: max {max_tries} attempts, skipped ≤ {max_skipped}%")
                     
                     # Retry loop for calc+similarity
                     final_attempt = 1
                     for attempt in range(1, max_tries + 1):
                         final_attempt = attempt
                         if attempt > 1:
-                            print(f"\n→ Retry {attempt}/{max_tries}")
+                            print(f"\nRetry {attempt}/{max_tries}")
                         
                         # Run calculation
                         result = execute_calculation_stage(context, stage)
@@ -8073,19 +8460,19 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 threshold_met = critical_pct <= max_critical
                                 
                                 if threshold_met:
-                                    print(f"✓ Threshold met (critical ≤ {max_critical}%)")
+                                    print(f"→ Threshold met (critical ≤ {max_critical}%)")
                                     break
                                 else:
-                                    print(f"✗ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
+                                    print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
                                     
                             elif max_skipped is not None:
                                 threshold_met = skipped_pct <= max_skipped
                                 
                                 if threshold_met:
-                                    print(f"✓ Threshold met (skipped ≤ {max_skipped}%)")
+                                    print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
                                     break
                                 else:
-                                    print(f"✗ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
+                                    print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
                             else:
                                 # No thresholds set - accept results
                                 break
@@ -8116,7 +8503,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         # Use only structures from need_recalculation
                                         xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
                                         if xyz_files:
-                                            print(f"\n→ Processing {len(xyz_files)} structure(s) from need_recalculation for retry")
+                                            print(f"\nProcessing {len(xyz_files)} structure(s) from need_recalculation for retry")
                                             
                                             # Save good structures (those NOT in need_recalculation)
                                             # These will be merged with retry results
@@ -8160,7 +8547,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                     
                                                     if imag_count == 1:
                                                         # Single imaginary: use orca_pltvib to displace
-                                                        print(f"  {basename}: 1 imaginary freq → displacing along mode")
+                                                        print(f"    {basename}: 1 imaginary freq, displacing along mode")
                                                         if displace_along_imaginary_mode(out_file, os.path.dirname(out_file)):
                                                             # Find and copy displaced structure
                                                             displaced_file = os.path.splitext(out_file)[0] + "_displaced.xyz"
@@ -8178,7 +8565,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                     
                                                     elif imag_count >= 2:
                                                         # Multiple imaginary: extract final geometry
-                                                        print(f"  {basename}: {imag_count} imaginary freqs → using final geometry")
+                                                        print(f"    {basename}: {imag_count} imaginary freqs, using final geometry")
                                                         if extract_final_geometry(out_file, os.path.dirname(out_file)):
                                                             # Find and copy final geometry
                                                             final_file = os.path.splitext(out_file)[0] + "_final.xyz"
@@ -8202,7 +8589,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                     shutil.copy(xyz_file, "retry_input")
                                                     processed_count += 1
                                             
-                                            print(f"  Prepared {processed_count} structure(s) for retry")
+                                            print(f"    Prepared {processed_count} structure(s) for retry")
                                             
                                             # Rename old folders to temporary names (don't delete yet)
                                             # This preserves them for debugging and allows retry to complete
@@ -8231,14 +8618,14 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                             shutil.rmtree("similarity")
                                     
                                 else:
-                                    print(f"→ Max attempts reached")
+                                    print(f"Max attempts reached")
                         else:
                             print("⚠ Warning: Could not find clustering_summary.txt")
                             break
                     
                     # After all retries, consolidate folders
                     if max_tries > 1:
-                        print(f"\n→ Consolidating results...")
+                        print(f"\nConsolidating results...")
                     import shutil
                     
                     # Get final similarity results for cache
@@ -8454,7 +8841,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     
     # Clean up temporary folders from retry attempts
     import shutil  # Ensure shutil is available
-    print("\n→ Cleaning up temporary folders...")
+    print("\nCleaning up temporary folders...")
     temp_folders_removed = 0
     for folder in glob.glob("calculation_tmp_*") + glob.glob("similarity_tmp_*"):
         if os.path.exists(folder):
@@ -8464,14 +8851,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     if temp_folders_removed > 0:
         print(f"  Removed {temp_folders_removed} temporary folder(s)")
     
-    # If using cache (protocol mode), generate summary and clean up
+    # If using cache (protocol mode), generate summary
+    # NOTE: Cache is NOT deleted to allow protocol resume
     if use_cache:
         generate_protocol_summary(cache_file=cache_file)
-        
-        # Clean up cache file
-        if os.path.exists(cache_file):
-            os.remove(cache_file)
-            print(f"→ Protocol cache cleaned up")
+        print(f"\n→ Protocol cache saved: {cache_file}")
+        print(f"→ You can resume this protocol by running ASCEC again with the same input file")
     
     return 0
 
@@ -8515,10 +8900,10 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     
     # Actually run the annealing simulations with retry logic
     if max_attempts > 1:
-        print(f"→ Running {num_replicas} annealing simulation(s)")
+        print(f"Running {num_replicas} annealing simulation(s)")
         print(f"  Retry enabled: max {max_attempts} attempts")
     else:
-        print(f"→ Running {num_replicas} annealing simulation(s)")
+        print(f"Running {num_replicas} annealing simulation(s)")
     
     failed_runs = []
     for i, input_file in enumerate(replicated_files, 1):
@@ -8617,6 +9002,35 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         print(f"\n✗ {len(failed_runs)} simulation(s) failed")
         return 1  # Fail the stage if any runs didn't complete
     
+    # Generate annealing diagrams for each replica
+    if MATPLOTLIB_AVAILABLE:
+        print(f"\nGenerating annealing diagrams...")
+        diagrams_generated = 0
+        all_tvse_files = []
+        
+        for annealing_dir in context.annealing_dirs:
+            # Find tvse_*.dat file in this directory
+            tvse_files = glob.glob(os.path.join(annealing_dir, 'tvse_*.dat'))
+            if tvse_files:
+                for tvse_file in tvse_files:
+                    if plot_annealing_diagrams(tvse_file, annealing_dir):
+                        diagrams_generated += 1
+                        all_tvse_files.append(tvse_file)
+        
+        if diagrams_generated > 0:
+            print(f"  Generated {diagrams_generated} diagram(s)")
+            
+            # Generate combined replica diagram in parent annealing directory
+            if len(all_tvse_files) > 1:
+                # Get parent directory (annealing/)
+                annealing_parent = os.path.dirname(context.annealing_dirs[0])
+                if not annealing_parent:
+                    annealing_parent = "annealing"
+                
+                combined_diagram = os.path.join(annealing_parent, f"tvse_r{num_replicas}.png")
+                if plot_combined_replicas_diagram(all_tvse_files, combined_diagram, num_replicas):
+                    print(f"  Generated combined: {os.path.basename(combined_diagram)}")
+    
     return 0
 
 def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
@@ -8630,7 +9044,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     max_critical = 0  # default: 0% critical structures allowed
     max_skipped = 100  # default: 100% skipped structures allowed (no limit)
     max_tries = 1  # default: no retries
-    auto_select = None
+    auto_select = 'combined'  # Workflow mode defaults to combining files (like -c flag)
     template_file = None
     launcher_file = None
     
@@ -8689,9 +9103,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     if calc_dir_exists and stage_was_started:
         calc_dir = "calculation"
         if completed_calcs:
-            print(f"\n→ Resuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
+            print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
         else:
-            print(f"\n→ Resuming: Using existing calculation directory\n")
+            print(f"\nResuming: Using existing calculation directory\n")
     else:
         # Run calculation system creation with auto_select (in workflow mode)
         result_msg = create_simple_calculation_system(template_file, launcher_file, auto_select=auto_select, workflow_mode=True)
@@ -8729,10 +9143,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 excluded_numbers = cache.get('excluded_calculations_2', [])
             
             if completed_calcs:
-                print(f"→ Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
+                print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
             
             if excluded_numbers:
-                print(f"→ Exclusions active: {excluded_numbers}")
+                print(f"Exclusions active: {excluded_numbers}")
                 print()
             
             # Read launcher script to get environment setup
@@ -9212,7 +9626,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     
     if os.path.exists(opt_dir) and stage_was_started:
         # Resuming - reuse existing directory
-        print("→ Resuming: Using existing optimization directory\n")
+        print("Resuming: Using existing optimization directory\n")
     else:
         # Not resuming - create fresh directory
         if os.path.exists(opt_dir):
@@ -9323,10 +9737,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         excluded_numbers = cache.get('excluded_optimizations', [])
         
         if completed_opts:
-            print(f"→ Resuming: {len(completed_opts)}/{num_inputs} optimizations already completed")
+            print(f"Resuming: {len(completed_opts)}/{num_inputs} optimizations already completed")
         
         if excluded_numbers:
-            print(f"→ Exclusions active: {excluded_numbers}")
+            print(f"Exclusions active: {excluded_numbers}")
             print()
         
         # Read launcher script to get environment setup
@@ -9817,7 +10231,7 @@ def main_ascec_integrated():
     # STANDARD SINGLE-COMMAND MODE (backward compatibility)
     # Setup argument parser - use parse_known_args to handle shell expansion
     parser = argparse.ArgumentParser(description="ASCEC: Annealing Simulation")
-    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'calc' to create calculation system, 'opt' to create optimization system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
+    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'diagram' to generate annealing diagrams, 'calc' to create calculation system, 'opt' to create optimization system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
     parser.add_argument("arg1", nargs='?', default=None, 
                        help="Second argument: replication mode (e.g., 'r3'), template file for calc, etc.")
     parser.add_argument("arg2", nargs='?', default=None,
@@ -9932,6 +10346,18 @@ def main_ascec_integrated():
     if args.command.lower() == "launcher":
         # Merge all launcher scripts in current directory and subfolders
         merge_launcher_scripts(".")
+        return
+    
+    # Check if diagram generation mode is requested
+    if args.command.lower() == "diagram":
+        # Check for --scaled flag in arg1 or unknown_args
+        scaled = False
+        if args.arg1 and args.arg1.lower() == "--scaled":
+            scaled = True
+        elif unknown_args and "--scaled" in [arg.lower() for arg in unknown_args]:
+            scaled = True
+        
+        execute_diagram_generation(scaled=scaled)
         return
     
     # For simulation mode, the command is the input file
@@ -10639,6 +11065,25 @@ def main_ascec_integrated():
         
         _print_verbose(f"\n--- .mol file conversions completed ---", 1, state)
 
+        # Generate annealing diagrams if this was an annealing simulation
+        if state.random_generate_config == 1 and tvse_file_path and os.path.exists(tvse_file_path):
+            # Check if we're in workflow mode (don't print messages if so)
+            in_workflow = hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None  # type: ignore[attr-defined]
+            
+            if MATPLOTLIB_AVAILABLE:
+                if not in_workflow:
+                    _print_verbose(f"\nGenerating annealing diagrams...", 0, state)
+                if plot_annealing_diagrams(tvse_file_path, run_dir):
+                    if not in_workflow:
+                        diagram_file = os.path.join(run_dir, f"tvse_{state.random_seed}.png")
+                        _print_verbose(f"  ✓ Created: {os.path.basename(diagram_file)}", 0, state)
+                else:
+                    if not in_workflow:
+                        _print_verbose(f"  ✗ Failed to generate diagrams", 1, state)
+            else:
+                if not in_workflow:
+                    _print_verbose(f"\nSkipping diagram generation (matplotlib not available)", 1, state)
+
         # Final cleanup of any lingering QM files (should be minimal with per-call cleanup)
         cleanup_qm_files(qm_files_to_clean, state) 
 
@@ -10758,11 +11203,11 @@ def analyze_box_length_from_xyz(xyz_file: str, num_molecules: int = 1) -> None:
             ratio = old_method_box / rec_30
             print(f"  Ratio (old/volume-based): {ratio:.2f}")
             if ratio > 1.5:
-                print(f"  → Old method may be wastefully large")
+                print(f"    Old method may be wastefully large")
             elif ratio < 0.7:
-                print(f"  → Old method may be too small")
+                print(f"    Old method may be too small")
             else:
-                print(f"  → Methods are reasonably consistent")
+                print(f"    Methods are reasonably consistent")
         
         print(f"\nRECOMMENDATIONS:")
         rec_20 = recommendations.get('20.0%', {}).get('box_length_A', 0)
