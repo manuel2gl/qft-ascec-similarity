@@ -7503,6 +7503,7 @@ class WorkflowContext:
     current_stage_key: str = ""  # Current stage key (e.g., "calculation_2")
     similarity_args: List[str] = dataclasses.field(default_factory=list)  # Store all similarity args
     is_workflow: bool = False  # True when running in workflow mode (with , or then separators)
+    max_attempts_per_calc: int = 5  # Maximum retry attempts per individual calculation/optimization (set by --attempt flag)
     # Data capture attributes for protocol summary
     annealing_box_size: Optional[float] = None
     annealing_packing: Optional[float] = None
@@ -9102,6 +9103,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     max_critical = 0  # default: 0% critical structures allowed
     max_skipped = 100  # default: 100% skipped structures allowed (no limit)
     max_tries = 1  # default: no retries
+    max_attempts_per_calc = 5  # default: 5 attempts per individual calculation
     auto_select = 'combined'  # Workflow mode defaults to combining files (like -c flag)
     template_file = None
     launcher_file = None
@@ -9119,6 +9121,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         elif arg.startswith('--tries='):
             # Keep backward compatibility
             max_tries = int(arg.split('=')[1])
+        elif arg.startswith('--attempt='):
+            max_attempts_per_calc = int(arg.split('=')[1])
         elif arg.startswith('--auto-select='):
             auto_select = arg.split('=')[1]
         elif arg == '-a':
@@ -9143,6 +9147,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         return 1
     
     context.max_tries = max_tries
+    context.max_attempts_per_calc = max_attempts_per_calc  # Store for this stage
     
     # Check if we're resuming and calculation directory already exists
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
@@ -9183,7 +9188,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             launcher_script = os.path.join(calc_dir, "launcher.sh")
         
         if os.path.exists(launcher_script):
-            print(f"\nExecuting calculations...\n")
+            # Get max attempts from context (set by --attempt flag, default 5)
+            max_attempts_display = getattr(context, 'max_attempts_per_calc', 5)
+            print(f"\nExecuting calculations (max {max_attempts_display} attempts per calculation)...\n")
             
             # Get list of input files to process
             input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
@@ -9219,8 +9226,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 num_completed = len(completed_calcs)
                 num_failed = 0
                 failed_calculations = []  # Track failed input files
-                max_direct_retries = 5  # Direct retries with same input
-                max_geometry_retries = 5  # Retries with extracted geometry
+                # Get max attempts from context (set by --attempt flag, default 5)
+                max_attempts = getattr(context, 'max_attempts_per_calc', 5)
+                max_direct_retries = max_attempts  # Direct retries with same input
+                max_geometry_retries = max_attempts  # Retries with extracted geometry
                 
                 for idx, input_file in enumerate(input_files):
                     # Skip already completed calculations
@@ -9244,13 +9253,48 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     
                     print(f"  Running: {input_file}...", end='', flush=True)
                     
-                    # Strategy 1: Direct retries (remove outputs, try same input)
+                    # Intelligent retry strategy:
+                    # - Try up to max_attempts total
+                    # - Use direct retry (same input) if "OPTIMIZATION HAS CONVERGED" but no normal termination
+                    # - Use geometry extraction if no convergence message
+                    # - Limit consecutive direct retries to 2 max
                     success = False
-                    for attempt in range(1, max_direct_retries + 1):
-                        # Update status on same line
-                        if attempt > 1:
-                            print(f"\r  Running: {input_file}... ↻ (direct retry {attempt})", end='', flush=True)
-                            # Remove previous output files to force fresh calculation
+                    consecutive_direct_retries = 0
+                    total_attempts = 0
+                    use_geometry_extraction = False
+                    
+                    while total_attempts < max_attempts and not success:
+                        total_attempts += 1
+                        
+                        # Decide strategy for this attempt
+                        if total_attempts > 1:
+                            # Check previous output to decide strategy
+                            if os.path.exists(output_path):
+                                with open(output_path, 'r') as f:
+                                    prev_output = f.read()
+                                
+                                has_convergence = 'THE OPTIMIZATION HAS CONVERGED' in prev_output
+                                has_normal_term = ('****ORCA TERMINATED NORMALLY****' in prev_output if qm_program == 'orca' 
+                                                 else 'Normal termination of Gaussian' in prev_output)
+                                
+                                # Intelligent decision:
+                                # - If converged but not terminated normally → try direct retry (up to 2 consecutive)
+                                # - If not converged → use geometry extraction
+                                # - If already did 2 consecutive direct retries → force geometry extraction
+                                if has_convergence and not has_normal_term and consecutive_direct_retries < 2:
+                                    use_geometry_extraction = False
+                                    consecutive_direct_retries += 1
+                                else:
+                                    use_geometry_extraction = True
+                                    consecutive_direct_retries = 0
+                            
+                            # Update status message
+                            if use_geometry_extraction:
+                                print(f"\r  Running: {input_file}... ↻ (geometry retry {total_attempts})", end='', flush=True)
+                            else:
+                                print(f"\r  Running: {input_file}... ↻ (direct retry {total_attempts})", end='', flush=True)
+                            
+                            # Remove previous output files
                             if os.path.exists(output_path):
                                 os.remove(output_path)
                             # Remove ORCA auxiliary files
@@ -9258,6 +9302,62 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 aux_file = os.path.join(calc_dir, basename + ext)
                                 if os.path.exists(aux_file):
                                     os.remove(aux_file)
+                        else:
+                            consecutive_direct_retries = 1  # First attempt counts as direct
+                        
+                        # If using geometry extraction, update the input file first
+                        if total_attempts > 1 and use_geometry_extraction:
+                            import re
+                            # Restore backup for geometry extraction
+                            if os.path.exists(backup_input):
+                                shutil.copy(backup_input, input_path)
+                            
+                            # Try to extract geometry from previous output
+                            success_extract = extract_final_geometry(output_path, calc_dir)
+                            final_xyz = os.path.join(calc_dir, basename + "_final.xyz")
+                            
+                            if not success_extract or not os.path.exists(final_xyz):
+                                # Geometry extraction failed, skip this attempt
+                                continue
+                            
+                            # Read extracted geometry and update input file
+                            with open(final_xyz, 'r') as f:
+                                xyz_lines = f.readlines()
+                            
+                            with open(backup_input, 'r') as f:
+                                input_content = f.read()
+                            
+                            # Update input with new geometry (ORCA or Gaussian format)
+                            if qm_program == 'orca':
+                                # Find * xyz line and replace coordinates
+                                match = re.search(r'\*\s+xyz\s+[-+]?\d+\s+\d+\s*\n(.*?)\*', input_content, re.DOTALL)
+                                if match:
+                                    # Extract just the coordinates from XYZ (skip first 2 lines)
+                                    new_coords = ''.join(xyz_lines[2:])
+                                    new_input = input_content[:match.start(1)] + new_coords + input_content[match.end(1):]
+                                    with open(input_path, 'w') as f:
+                                        f.write(new_input)
+                            else:
+                                # Gaussian format
+                                lines = input_content.split('\n')
+                                charge_mult_idx = None
+                                for i, line in enumerate(lines):
+                                    if re.match(r'^\s*[-+]?\d+\s+\d+\s*$', line):
+                                        charge_mult_idx = i
+                                        break
+                                
+                                if charge_mult_idx is not None:
+                                    # Replace geometry (skip first 2 lines of XYZ, keep until blank line)
+                                    new_coords = [l.strip() for l in xyz_lines[2:] if l.strip()]
+                                    # Find end of old geometry (blank line)
+                                    geom_end_idx = charge_mult_idx + 1
+                                    while geom_end_idx < len(lines) and lines[geom_end_idx].strip():
+                                        geom_end_idx += 1
+                                    
+                                    # Reconstruct input
+                                    new_lines = lines[:charge_mult_idx+1] + new_coords + lines[geom_end_idx:]
+                                    with open(input_path, 'w') as f:
+                                        f.write('\n'.join(new_lines))
                         
                         # Create temporary script with environment setup + single command
                         temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
@@ -9312,9 +9412,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 normal_term = 'Normal termination of Gaussian' in output_content
                             
                             if normal_term:
-                                if attempt > 1:
+                                if total_attempts > 1:
                                     # Format ordinal number (2nd, 3rd, 4th, etc.)
-                                    ordinal = f"{attempt}{'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
+                                    ordinal = f"{total_attempts}{'nd' if total_attempts == 2 else 'rd' if total_attempts == 3 else 'th'}"
                                     print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)\033[K", flush=True)
                                 else:
                                     print(f"\r  Running: {input_file}... ✓\033[K", flush=True)
@@ -9335,171 +9435,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                                     cache_file=cache_file)
                                 break
                     
-                    # Strategy 2: If direct retries failed, try with extracted geometry
-                    if not success and os.path.exists(output_path):
-                        # Restore original input for geometry extraction
-                        if os.path.exists(backup_input):
-                            shutil.copy(backup_input, input_path)
-                        
-                        # Try to extract final geometry from failed output
-                        print(f"\r  Running: {input_file}... ↻ (extracting geometry)", end='', flush=True)
-                        success_extract = extract_final_geometry(output_path, calc_dir)
-                        final_xyz = os.path.join(calc_dir, basename + "_final.xyz")
-                        
-                        if success_extract and os.path.exists(final_xyz):
-                            # Read the extracted geometry
-                            with open(final_xyz, 'r') as f:
-                                xyz_lines = f.readlines()
-                            
-                            # Read backup input to get template
-                            with open(backup_input, 'r') as f:
-                                input_content = f.read()
-                            
-                            # Create new input with extracted geometry
-                            if qm_program == 'orca':
-                                # For ORCA: find "* xyz" line and replace coordinates
-                                lines = input_content.split('\n')
-                                header_lines = []
-                                found_coords = False
-                                for line in lines:
-                                    if line.strip().startswith('* xyz'):
-                                        header_lines.append(line)
-                                        found_coords = True
-                                        break
-                                    header_lines.append(line)
-                                
-                                if found_coords:
-                                    # Write new input with geometry from _final.xyz
-                                    with open(input_path, 'w') as f:
-                                        f.write('\n'.join(header_lines) + '\n')
-                                        # Skip first 2 lines of XYZ (natoms and comment)
-                                        for coord_line in xyz_lines[2:]:
-                                            if coord_line.strip():
-                                                f.write(coord_line)
-                                        f.write("*\n")
-                            else:
-                                # For Gaussian: replace geometry section
-                                lines = input_content.split('\n')
-                                header_lines = []
-                                footer_lines = []
-                                in_geom = False
-                                geom_done = False
-                                
-                                for line in lines:
-                                    if not in_geom and not geom_done:
-                                        header_lines.append(line)
-                                        # Geometry starts after blank line following charge/multiplicity
-                                        if line.strip() and ' ' in line.strip() and len(line.strip().split()) == 2:
-                                            try:
-                                                int(line.strip().split()[0])  # charge
-                                                int(line.strip().split()[1])  # multiplicity
-                                                in_geom = True
-                                            except:
-                                                pass
-                                    elif in_geom and not geom_done:
-                                        # Skip old geometry until blank line
-                                        if not line.strip():
-                                            geom_done = True
-                                            footer_lines.append(line)
-                                    else:
-                                        footer_lines.append(line)
-                                
-                                # Write new input with extracted geometry
-                                with open(input_path, 'w') as f:
-                                    f.write('\n'.join(header_lines) + '\n')
-                                    # Skip first 2 lines of XYZ (natoms and comment)
-                                    for coord_line in xyz_lines[2:]:
-                                        if coord_line.strip():
-                                            f.write(coord_line)
-                                    f.write('\n'.join(footer_lines))
-                            
-                            # Remove the _final.xyz file
-                            os.remove(final_xyz)
-                            
-                            # Now try geometry-based retries
-                            for geom_attempt in range(1, max_geometry_retries + 1):
-                                print(f"\r  Running: {input_file}... ↻ (geometry retry {geom_attempt})", end='', flush=True)
-                                
-                                # Remove previous outputs
-                                if os.path.exists(output_path):
-                                    os.remove(output_path)
-                                for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt']:
-                                    aux_file = os.path.join(calc_dir, basename + ext)
-                                    if os.path.exists(aux_file):
-                                        os.remove(aux_file)
-                                
-                                # Create temporary script
-                                temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
-                                with open(temp_script, 'w') as f:
-                                    f.write(launcher_content.split('###')[0])
-                                    f.write("\n\n")
-                                    if qm_program == 'orca':
-                                        # Set unique scratch directory for ORCA to avoid conflicts in parallel runs
-                                        f.write(f"# Set unique scratch directory for this ORCA process\n")
-                                        f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
-                                        f.write(f"mkdir -p \"$TMPDIR\"\n")
-                                        f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                                        f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
-                                    else:
-                                        f.write(f"$G16_ROOT/g16 {input_file}\n")
-                                
-                                os.chmod(temp_script, 0o755)
-                                
-                                # Run the calculation
-                                try:
-                                    result = subprocess.run(
-                                        ['bash', os.path.basename(temp_script)],
-                                        cwd=calc_dir,
-                                        capture_output=True,
-                                        text=True,
-                                        timeout=3600
-                                    )
-                                except subprocess.TimeoutExpired:
-                                    continue
-                                finally:
-                                    if os.path.exists(temp_script):
-                                        os.remove(temp_script)
-                                    # Clean up ORCA temp directory if it exists
-                                    if qm_program == 'orca':
-                                        for tmp_dir in glob.glob(os.path.join(calc_dir, f'.orca_tmp_{basename}_*')):
-                                            try:
-                                                shutil.rmtree(tmp_dir)
-                                            except:
-                                                pass
-                                
-                                # Check for normal termination
-                                if os.path.exists(output_path):
-                                    with open(output_path, 'r') as f:
-                                        output_content = f.read()
-                                    
-                                    if qm_program == 'orca':
-                                        normal_term = '****ORCA TERMINATED NORMALLY****' in output_content
-                                    else:
-                                        normal_term = 'Normal termination of Gaussian' in output_content
-                                    
-                                    if normal_term:
-                                        # Total attempts = direct retries + geometry retries
-                                        total_attempt = max_direct_retries + geom_attempt
-                                        ordinal = f"{total_attempt}{'th' if total_attempt >= 4 else 'nd' if total_attempt == 2 else 'rd' if total_attempt == 3 else 'st'}"
-                                        print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)\033[K")
-                                        num_completed += 1
-                                        success = True
-                                        
-                                        # Remove backup
-                                        if os.path.exists(backup_input):
-                                            os.remove(backup_input)
-                                        
-                                        # Update cache
-                                        completed_calcs.append(input_file)
-                                        stage_key = getattr(context, 'current_stage_key', 'calculation')
-                                        update_protocol_cache(stage_key, 'in_progress', 
-                                                            result={'completed_files': completed_calcs,
-                                                                   'total_files': num_inputs,
-                                                                   'num_completed': num_completed},
-                                                            cache_file=cache_file)
-                                        break
-                    
-                    # If still not successful, mark as failed and continue to next
+                    # If all attempts failed, mark as failed
                     if not success:
                         print(f"\r  Running: {input_file}... ✗\033[K")
                         num_failed += 1
@@ -9790,6 +9726,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     max_tries = 1
     max_critical = None
     max_skipped = None
+    max_attempts_per_calc = 5  # default: 5 attempts per individual optimization
     
     args = stage.get('args', [])
     template_inp = stage.get('template_inp')
@@ -9802,6 +9739,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
             max_skipped = float(arg.split('=')[1])
+        elif arg.startswith('--attempt='):
+            max_attempts_per_calc = int(arg.split('=')[1])
+    
+    # Store in context for this stage
+    context.max_attempts_per_calc = max_attempts_per_calc
     
     if not template_inp or not launcher_sh:
         print("Error: Optimization requires template input and launcher script")
@@ -9941,7 +9883,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     
     # Execute the optimization calculations
     if os.path.exists("optimization/launcher_orca.sh") or os.path.exists("optimization/launcher_gaussian.sh"):
-        print("\nExecuting optimization calculations...")
+        # Get max attempts from context (set by --attempt flag, default 5)
+        max_attempts_display = getattr(context, 'max_attempts_per_calc', 5)
+        print(f"\nExecuting optimization calculations (max {max_attempts_display} attempts per calculation)...")
         
         # Determine launcher name and QM program
         if os.path.exists("optimization/launcher_orca.sh"):
@@ -9980,8 +9924,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         num_completed = len(completed_opts)
         num_failed = 0
         failed_optimizations = []  # Track failed input files
-        max_direct_retries = 5  # Direct retries with same input
-        max_geometry_retries = 5  # Retries with extracted geometry
+        # Get max attempts from context (set by --attempt flag, default 5)
+        max_attempts = getattr(context, 'max_attempts_per_calc', 5)
+        max_direct_retries = max_attempts  # Direct retries with same input
+        max_geometry_retries = max_attempts  # Retries with extracted geometry
         
         for input_file in input_files:
             # Skip already completed optimizations
@@ -10531,7 +10477,9 @@ def main_ascec_integrated():
         sys.exit(0)
     
     # CHECK FOR PROTOCOL MODE (workflow embedded in input file)
-    if len(sys.argv) == 3 and sys.argv[2].lower() == "protocol":
+    # Check for protocol mode
+    # Syntax: ascec04 input.in protocol
+    if len(sys.argv) >= 3 and sys.argv[2].lower() == "protocol":
         input_file = sys.argv[1]
         
         # Check if input file exists
