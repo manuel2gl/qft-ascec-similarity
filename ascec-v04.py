@@ -8957,11 +8957,7 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     context.annealing_dirs = [os.path.dirname(f) for f in replicated_files]
     
     # Actually run the annealing simulations with retry logic
-    if max_retries > 1:
-        print(f"Running {num_replicas} annealing simulation(s)")
-        print(f"  Retry enabled: will retry each run up to {max_retries} times if it fails")
-    else:
-        print(f"Running {num_replicas} annealing simulation(s)")
+    print(f"Running {num_replicas} annealing simulation(s)")
     
     failed_runs = []
     for i, input_file in enumerate(replicated_files, 1):
@@ -9193,9 +9189,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             launcher_script = os.path.join(calc_dir, "launcher.sh")
         
         if os.path.exists(launcher_script):
-            # Get max retries from context (set by --retry flag, default 5)
-            max_retries_display = getattr(context, 'max_attempts_per_calc', 5)
-            print(f"\nExecuting calculations (will retry each up to {max_retries_display} times)...\n")
+            print(f"\nExecuting calculations...\n")
             
             # Get list of input files to process
             input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
@@ -9891,9 +9885,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     
     # Execute the optimization calculations
     if os.path.exists("optimization/launcher_orca.sh") or os.path.exists("optimization/launcher_gaussian.sh"):
-        # Get max retries from context (set by --retry flag, default 5)
-        max_retries_display = getattr(context, 'max_attempts_per_calc', 5)
-        print(f"\nExecuting optimization calculations (will retry each up to {max_retries_display} times)...")
+        print(f"\nExecuting optimization calculations...")
         
         # Determine launcher name and QM program
         if os.path.exists("optimization/launcher_orca.sh"):
