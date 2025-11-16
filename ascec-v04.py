@@ -1660,13 +1660,22 @@ def update_protocol_cache(stage_name: str, status: str, result: Optional[Dict[st
     if 'protocol_file' not in cache:
         cache['protocol_file'] = cache_file  # Store which cache file this is
     
-    # For in_progress: record start time
+    # For in_progress: record start time or update existing entry
     if status == 'in_progress':
+        # Get existing stage data if it exists
+        existing_stage = cache['stages'].get(stage_name, {})
+        existing_result = existing_stage.get('result', {})
+        
+        # Merge new result with existing result
+        merged_result = existing_result.copy()
+        if result:
+            merged_result.update(result)
+        
         cache['stages'][stage_name] = {
             'status': status,
-            'start_time': time.time(),
+            'start_time': existing_stage.get('start_time', time.time()),
             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-            'result': result or {}
+            'result': merged_result
         }
     else:
         # For completed/failed: calculate wall time
@@ -8200,15 +8209,42 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
     
-    # Use protocol-specific cache filename to support parallel protocols
-    protocol_basename = os.path.splitext(os.path.basename(input_file))[0]
-    cache_file = f"protocol_cache_{protocol_basename}.pkl"
+    # Use protocol-specific cache filename with random seed to support parallel protocols
+    # First, check if there's an existing protocol cache file for THIS input file
+    import glob
+    existing_caches = sorted(glob.glob("protocol_*.pkl"))
+    cache_file = None
+    
+    if existing_caches and use_cache:
+        # Look for cache that matches this input file
+        for cache_path in existing_caches:
+            test_cache = load_protocol_cache(cache_path)
+            if test_cache and test_cache.get('input_file') == input_file:
+                cache_file = cache_path
+                print(f"Found existing protocol cache: {cache_file} (for {input_file})")
+                break
+    
+    if cache_file is None:
+        # Generate new random 6-digit seed (similar to annealing seed)
+        import random
+        protocol_seed = random.randint(100000, 999999)
+        cache_file = f"protocol_{protocol_seed}.pkl"
+        print(f"Creating new protocol cache: {cache_file} (for {input_file})")
+    
     context.cache_file = cache_file  # Store in context for use by stages
     
     # Load cache if in protocol mode
     cache = {}
     if use_cache:
         cache = load_protocol_cache(cache_file)
+        # Always ensure input_file is stored in cache
+        if not cache:
+            cache = {}
+        if 'input_file' not in cache:
+            cache['input_file'] = input_file
+            # Save immediately so the association is recorded
+            with open(cache_file, 'wb') as f:
+                pickle.dump(cache, f)
         if cache:
             from datetime import datetime
             start_time = cache.get('start_time', None)
@@ -9279,9 +9315,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 if attempt > 1:
                                     # Format ordinal number (2nd, 3rd, 4th, etc.)
                                     ordinal = f"{attempt}{'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
-                                    print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)", flush=True)
+                                    print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)\033[K", flush=True)
                                 else:
-                                    print(f"\r  Running: {input_file}... ✓", flush=True)
+                                    print(f"\r  Running: {input_file}... ✓\033[K", flush=True)
                                 num_completed += 1
                                 success = True
                                 
@@ -9445,7 +9481,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                         # Total attempts = direct retries + geometry retries
                                         total_attempt = max_direct_retries + geom_attempt
                                         ordinal = f"{total_attempt}{'th' if total_attempt >= 4 else 'nd' if total_attempt == 2 else 'rd' if total_attempt == 3 else 'st'}"
-                                        print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)")
+                                        print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)\033[K")
                                         num_completed += 1
                                         success = True
                                         
@@ -9465,7 +9501,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     
                     # If still not successful, mark as failed and continue to next
                     if not success:
-                        print(f"\r  Running: {input_file}... ✗")
+                        print(f"\r  Running: {input_file}... ✗\033[K")
                         num_failed += 1
                         failed_calculations.append(input_file)
                         
@@ -10039,9 +10075,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         if attempt > 1:
                             # Format ordinal number (1st, 2nd, 3rd, 4th, etc.)
                             ordinal = f"{attempt}{'st' if attempt == 1 else 'nd' if attempt == 2 else 'rd' if attempt == 3 else 'th'}"
-                            print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)", flush=True)
+                            print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt)\033[K", flush=True)
                         else:
-                            print(f"\r  Running: {input_file}... ✓", flush=True)
+                            print(f"\r  Running: {input_file}... ✓\033[K", flush=True)
                         num_completed += 1
                         success = True
                         
@@ -10196,7 +10232,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                                 # Total attempts = direct retries + geometry retries
                                 total_attempt = max_direct_retries + geom_attempt
                                 ordinal = f"{total_attempt}{'st' if total_attempt == 1 else 'nd' if total_attempt == 2 else 'rd' if total_attempt == 3 else 'th'}"
-                                print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)")
+                                print(f"\r  Running: {input_file}... ✓ ({ordinal} Attempt, geometry extraction)\033[K")
                                 num_completed += 1
                                 success = True
                                 
@@ -10216,7 +10252,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             
             # If still not successful, mark as failed and continue
             if not success:
-                print(f"\r  Running: {input_file}... ✗")
+                print(f"\r  Running: {input_file}... ✗\033[K")
                 num_failed += 1
                 failed_optimizations.append(input_file)
                 
@@ -10359,14 +10395,35 @@ def main_ascec_integrated():
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "exclude":
         # Syntax: ascec04 <protocol.in> exclude [stage] [pattern]
         protocol_file = sys.argv[1]
-        protocol_basename = os.path.splitext(os.path.basename(protocol_file))[0]
-        cache_file = f"protocol_cache_{protocol_basename}.pkl"
         
-        if not os.path.exists(cache_file):
-            print(f"Error: No active protocol found for '{protocol_file}'")
-            print(f"Cache file not found: {cache_file}")
+        # Find existing protocol cache file for this input file
+        import glob
+        existing_caches = sorted(glob.glob("protocol_*.pkl"))
+        
+        if not existing_caches:
+            print(f"Error: No active protocol found")
+            print(f"No protocol_*.pkl cache files found in current directory")
             print("This command is used to exclude calculations from a paused protocol.")
             sys.exit(1)
+        
+        # Find cache that matches this protocol file
+        cache_file = None
+        for cache_path in existing_caches:
+            test_cache = load_protocol_cache(cache_path)
+            if test_cache and test_cache.get('input_file') == protocol_file:
+                cache_file = cache_path
+                break
+        
+        if cache_file is None:
+            print(f"Error: No protocol cache found for {protocol_file}")
+            print(f"\nAvailable protocol caches:")
+            for cache_path in existing_caches:
+                test_cache = load_protocol_cache(cache_path)
+                associated_input = test_cache.get('input_file', 'unknown')
+                print(f"  {cache_path} -> {associated_input}")
+            sys.exit(1)
+        
+        print(f"Using cache file: {cache_file} (for {protocol_file})\n")
         
         # Load cache
         cache = load_protocol_cache(cache_file)
