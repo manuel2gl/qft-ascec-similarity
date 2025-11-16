@@ -7528,15 +7528,19 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
     Supports both space-separated and comma-attached formats.
     
     Examples:
-        ascec04 at_annealing.in , r3 , calc --critical=0 preopt.inp launcher.sh , similarity --th=2
-        ascec04 at_annealing.in, r3, calc --critical=0 preopt.inp launcher.sh, similarity --th=2
-        ascec04 .in, r3 --retry=5, calc -c preopt.inp launcher.sh, similarity --th=2
+        ascec04 at_annealing.in , r3 , calc --redo=3 --retry=10 preopt.inp launcher.sh , similarity --th=2
+        ascec04 at_annealing.in, r3, calc --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
+        ascec04 .in, r3 --retry=5, calc -c --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
         
         With auto-selection flags:
-        ascec04 at_annealing.in , r3 , calc -a --critical=0 preopt.inp launcher.sh
+        ascec04 at_annealing.in , r3 , calc -a --redo=3 --retry=10 preopt.inp launcher.sh
             (-a: Process all result_*.xyz files separately)
-        ascec04 at_annealing.in , r3 , calc -c --critical=0 preopt.inp launcher.sh
+        ascec04 at_annealing.in , r3 , calc -c --redo=3 --retry=10 preopt.inp launcher.sh
             (-c: Combine all result_*.xyz into combined_r{N}.xyz first, then process)
+        
+        Flag meanings:
+            --retry=N: Retry each individual calculation/optimization up to N times
+            --redo=N: Redo entire stage (calc+similarity or opt+similarity) up to N times
     
     Returns:
         List of stage dictionaries with 'type' and 'args' keys
@@ -8449,15 +8453,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                      stages[stage_idx + 1]['type'] == 'similarity')
                 
                 if next_is_similarity:
-                    # Extract retry parameters from calc stage
+                    # Extract redo parameters from calc stage
                     calc_args = stage['args']
-                    max_tries = 1
+                    max_redos = 1
                     max_critical = None  # Not set by default
                     max_skipped = None   # Not set by default
                     
                     for arg in calc_args:
-                        if arg.startswith('--retry='):
-                            max_tries = int(arg.split('=')[1])
+                        if arg.startswith('--redo='):
+                            max_redos = int(arg.split('=')[1])
                         elif arg.startswith('--critical='):
                             max_critical = float(arg.split('=')[1])
                         elif arg.startswith('--skipped='):
@@ -8468,18 +8472,19 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         print("✗ Error: Cannot use both --critical and --skipped flags")
                         return 1
                     
-                    # Show retry configuration
-                    if max_critical is not None:
-                        print(f"  Retry enabled: max {max_tries} attempts, critical ≤ {max_critical}%")
-                    elif max_skipped is not None:
-                        print(f"  Retry enabled: max {max_tries} attempts, skipped ≤ {max_skipped}%")
+                    # Show redo configuration
+                    if max_redos > 1:
+                        if max_critical is not None:
+                            print(f"  Stage redo enabled: max {max_redos} attempts, target critical ≤ {max_critical}%")
+                        elif max_skipped is not None:
+                            print(f"  Stage redo enabled: max {max_redos} attempts, target skipped ≤ {max_skipped}%")
                     
-                    # Retry loop for calc+similarity
+                    # Redo loop for calc+similarity
                     final_attempt = 1
-                    for attempt in range(1, max_tries + 1):
+                    for attempt in range(1, max_redos + 1):
                         final_attempt = attempt
                         if attempt > 1:
-                            print(f"\nRetry {attempt}/{max_tries}")
+                            print(f"\nRedo attempt {attempt}/{max_redos}")
                         
                         # Run calculation
                         result = execute_calculation_stage(context, stage)
@@ -8530,9 +8535,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 # No thresholds set - accept results
                                 break
                             
-                            # If threshold not met and attempts remain, continue to retry logic below
+                            # If threshold not met and attempts remain, continue to redo logic below
                             if not threshold_met:
-                                if attempt < max_tries:
+                                if attempt < max_redos:
                                     import shutil
                                     import tempfile
                                     
@@ -8676,8 +8681,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             print("⚠ Warning: Could not find clustering_summary.txt")
                             break
                     
-                    # After all retries, consolidate folders
-                    if max_tries > 1:
+                    # After all redo attempts, consolidate folders
+                    if max_redos > 1:
                         print(f"\nConsolidating results...")
                     import shutil
                     
@@ -8690,7 +8695,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Find the last calculation directory (calculation, calculation_2, calculation_3, etc.)
                     last_calc_dir = None
-                    for i in range(max_tries, 0, -1):
+                    for i in range(max_redos, 0, -1):
                         if i == 1:
                             test_dir = "calculation"
                         else:
@@ -8708,7 +8713,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Clean up intermediate calculation folders
                         removed_count = 0
-                        for i in range(2, max_tries + 1):
+                        for i in range(2, max_redos + 1):
                             old_dir = f"calculation_{i}"
                             if old_dir != last_calc_dir and os.path.exists(old_dir):
                                 shutil.rmtree(old_dir)
@@ -8718,7 +8723,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Find the last similarity directory (similarity, similarity_2, similarity_3, etc.)
                     last_sim_dir = None
-                    for i in range(max_tries, 0, -1):
+                    for i in range(max_redos, 0, -1):
                         if i == 1:
                             test_dir = "similarity"
                         else:
@@ -8736,7 +8741,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Clean up intermediate similarity folders
                         removed_count = 0
-                        for i in range(2, max_tries + 1):
+                        for i in range(2, max_redos + 1):
                             old_dir = f"similarity_{i}"
                             if old_dir != last_sim_dir and os.path.exists(old_dir):
                                 shutil.rmtree(old_dir)
@@ -8751,7 +8756,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         calc_result: Dict[str, Any] = {
                             'attempts': final_attempt,
-                            'max_tries': max_tries,
+                            'max_redos': max_redos,
                         }
                         if max_critical is not None:
                             calc_result['critical_threshold'] = max_critical
@@ -8919,12 +8924,12 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     context.num_replicas = num_replicas
     
     # Parse --retry and --box flags from stage args
-    max_attempts = 3  # Default maximum attempts per run
+    max_retries = 3  # Default: retry each annealing run up to 3 times
     box_size_override = None
     args = stage.get('args', [])
     for arg in args:
         if arg.startswith('--retry='):
-            max_attempts = int(arg.split('=')[1])
+            max_retries = int(arg.split('=')[1])
         elif arg.startswith('--box'):
             # Extract packing percentage from flag (e.g., --box10 -> 10%)
             try:
@@ -8952,9 +8957,9 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     context.annealing_dirs = [os.path.dirname(f) for f in replicated_files]
     
     # Actually run the annealing simulations with retry logic
-    if max_attempts > 1:
+    if max_retries > 1:
         print(f"Running {num_replicas} annealing simulation(s)")
-        print(f"  Retry enabled: max {max_attempts} attempts")
+        print(f"  Retry enabled: will retry each run up to {max_retries} times if it fails")
     else:
         print(f"Running {num_replicas} annealing simulation(s)")
     
@@ -8970,7 +8975,7 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         success = False
         last_error = None
         
-        for attempt in range(1, max_attempts + 1):
+        for attempt in range(1, max_retries + 1):
             try:
                 # Run as subprocess in the run directory
                 # Use python3 explicitly to ensure correct interpreter
@@ -9102,8 +9107,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     # Parse flags
     max_critical = 0  # default: 0% critical structures allowed
     max_skipped = 100  # default: 100% skipped structures allowed (no limit)
-    max_tries = 1  # default: no retries
-    max_attempts_per_calc = 5  # default: 5 attempts per individual calculation
+    max_stage_redos = 1  # default: no stage redos (--redo: redo entire calc+similarity)
+    max_calc_retries = 5  # default: 5 retries per calculation (--retry: retry individual calcs)
     auto_select = 'combined'  # Workflow mode defaults to combining files (like -c flag)
     template_file = None
     launcher_file = None
@@ -9116,13 +9121,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
             max_skipped = float(arg.split('=')[1])
+        elif arg.startswith('--redo='):
+            max_stage_redos = int(arg.split('=')[1])
         elif arg.startswith('--retry='):
-            max_tries = int(arg.split('=')[1])
-        elif arg.startswith('--tries='):
-            # Keep backward compatibility
-            max_tries = int(arg.split('=')[1])
+            max_calc_retries = int(arg.split('=')[1])
         elif arg.startswith('--attempt='):
-            max_attempts_per_calc = int(arg.split('=')[1])
+            # Deprecated alias for --retry
+            max_calc_retries = int(arg.split('=')[1])
         elif arg.startswith('--auto-select='):
             auto_select = arg.split('=')[1]
         elif arg == '-a':
@@ -9146,8 +9151,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         print("Error: No template file specified for calculation stage")
         return 1
     
-    context.max_tries = max_tries
-    context.max_attempts_per_calc = max_attempts_per_calc  # Store for this stage
+    context.max_tries = max_stage_redos  # For compatibility with existing code
+    context.max_attempts_per_calc = max_calc_retries  # Store for this stage
     
     # Check if we're resuming and calculation directory already exists
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
@@ -9188,9 +9193,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             launcher_script = os.path.join(calc_dir, "launcher.sh")
         
         if os.path.exists(launcher_script):
-            # Get max attempts from context (set by --attempt flag, default 5)
-            max_attempts_display = getattr(context, 'max_attempts_per_calc', 5)
-            print(f"\nExecuting calculations (max {max_attempts_display} attempts per calculation)...\n")
+            # Get max retries from context (set by --retry flag, default 5)
+            max_retries_display = getattr(context, 'max_attempts_per_calc', 5)
+            print(f"\nExecuting calculations (will retry each up to {max_retries_display} times)...\n")
             
             # Get list of input files to process
             input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
@@ -9723,27 +9728,30 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     sys._current_workflow_context = context  # type: ignore[attr-defined]
     
     # Parse arguments
-    max_tries = 1
+    max_stage_redos = 1  # --redo: redo entire opt+similarity
     max_critical = None
     max_skipped = None
-    max_attempts_per_calc = 5  # default: 5 attempts per individual optimization
+    max_opt_retries = 5  # --retry: retry individual optimizations (default: 5)
     
     args = stage.get('args', [])
     template_inp = stage.get('template_inp')
     launcher_sh = stage.get('launcher_sh')
     
     for arg in args:
-        if arg.startswith('--retry='):
-            max_tries = int(arg.split('=')[1])
+        if arg.startswith('--redo='):
+            max_stage_redos = int(arg.split('=')[1])
         elif arg.startswith('--critical='):
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
             max_skipped = float(arg.split('=')[1])
+        elif arg.startswith('--retry='):
+            max_opt_retries = int(arg.split('=')[1])
         elif arg.startswith('--attempt='):
-            max_attempts_per_calc = int(arg.split('=')[1])
+            # Deprecated alias for --retry
+            max_opt_retries = int(arg.split('=')[1])
     
     # Store in context for this stage
-    context.max_attempts_per_calc = max_attempts_per_calc
+    context.max_attempts_per_calc = max_opt_retries
     
     if not template_inp or not launcher_sh:
         print("Error: Optimization requires template input and launcher script")
@@ -9883,9 +9891,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     
     # Execute the optimization calculations
     if os.path.exists("optimization/launcher_orca.sh") or os.path.exists("optimization/launcher_gaussian.sh"):
-        # Get max attempts from context (set by --attempt flag, default 5)
-        max_attempts_display = getattr(context, 'max_attempts_per_calc', 5)
-        print(f"\nExecuting optimization calculations (max {max_attempts_display} attempts per calculation)...")
+        # Get max retries from context (set by --retry flag, default 5)
+        max_retries_display = getattr(context, 'max_attempts_per_calc', 5)
+        print(f"\nExecuting optimization calculations (will retry each up to {max_retries_display} times)...")
         
         # Determine launcher name and QM program
         if os.path.exists("optimization/launcher_orca.sh"):
@@ -10495,8 +10503,11 @@ def main_ascec_integrated():
             print("Expected format in input file:")
             print(".in,")
             print("r1 --retry=5 --box10,")
-            print("calc -c --critical=0 --retry=3 ../preopt_input.inp ../launcher_orca.sh,")
+            print("calc -c --redo=3 --retry=10 ../preopt_input.inp ../launcher_orca.sh,")
             print("similarity --th=2")
+            print("\nFlag meanings:")
+            print("  --retry=N: Retry each individual calculation up to N times")
+            print("  --redo=N: Redo entire stage (calc+similarity) up to N times")
             sys.exit(1)
         
         # Print ASCII logo
