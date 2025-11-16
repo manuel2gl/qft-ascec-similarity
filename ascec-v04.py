@@ -9229,6 +9229,11 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             f.write(launcher_content.split('###')[0])  # Environment setup
                             f.write("\n\n")
                             if qm_program == 'orca':
+                                # Set unique scratch directory for ORCA to avoid conflicts in parallel runs
+                                f.write(f"# Set unique scratch directory for this ORCA process\n")
+                                f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
+                                f.write(f"mkdir -p \"$TMPDIR\"\n")
+                                f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                                 f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
                             else:
                                 f.write(f"$G16_ROOT/g16 {input_file}\n")
@@ -9251,6 +9256,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             # Remove temp script
                             if os.path.exists(temp_script):
                                 os.remove(temp_script)
+                            # Clean up ORCA temp directory if it exists
+                            if qm_program == 'orca':
+                                for tmp_dir in glob.glob(os.path.join(calc_dir, f'.orca_tmp_{basename}_*')):
+                                    try:
+                                        shutil.rmtree(tmp_dir)
+                                    except:
+                                        pass
                         
                         # Check if output file was created and contains normal termination
                         if os.path.exists(output_path):
@@ -9386,6 +9398,11 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                     f.write(launcher_content.split('###')[0])
                                     f.write("\n\n")
                                     if qm_program == 'orca':
+                                        # Set unique scratch directory for ORCA to avoid conflicts in parallel runs
+                                        f.write(f"# Set unique scratch directory for this ORCA process\n")
+                                        f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
+                                        f.write(f"mkdir -p \"$TMPDIR\"\n")
+                                        f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                                         f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
                                     else:
                                         f.write(f"$G16_ROOT/g16 {input_file}\n")
@@ -9406,6 +9423,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 finally:
                                     if os.path.exists(temp_script):
                                         os.remove(temp_script)
+                                    # Clean up ORCA temp directory if it exists
+                                    if qm_program == 'orca':
+                                        for tmp_dir in glob.glob(os.path.join(calc_dir, f'.orca_tmp_{basename}_*')):
+                                            try:
+                                                shutil.rmtree(tmp_dir)
+                                            except:
+                                                pass
                                 
                                 # Check for normal termination
                                 if os.path.exists(output_path):
@@ -9965,6 +9989,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     f.write(launcher_content.split('###')[0])  # Environment setup
                     f.write("\n\n")
                     if qm_program == 'orca':
+                        # Set unique scratch directory for ORCA to avoid conflicts in parallel runs
+                        f.write(f"# Set unique scratch directory for this ORCA process\n")
+                        f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
+                        f.write(f"mkdir -p \"$TMPDIR\"\n")
+                        f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                         f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
                     else:
                         f.write(f"$G16_ROOT/g16 {input_file}\n")
@@ -9987,6 +10016,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     # Remove temp script
                     if os.path.exists(temp_script):
                         os.remove(temp_script)
+                    # Clean up ORCA temp directory if it exists
+                    if qm_program == 'orca':
+                        for tmp_dir in glob.glob(os.path.join("optimization", f'.orca_tmp_{basename}_*')):
+                            try:
+                                shutil.rmtree(tmp_dir)
+                            except:
+                                pass
                 
                 # Check if output file was created and contains normal termination
                 if os.path.exists(output_path):
@@ -10114,6 +10150,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             f.write(launcher_content.split('###')[0])
                             f.write("\n\n")
                             if qm_program == 'orca':
+                                # Set unique scratch directory for ORCA to avoid conflicts in parallel runs
+                                f.write(f"# Set unique scratch directory for this ORCA process\n")
+                                f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
+                                f.write(f"mkdir -p \"$TMPDIR\"\n")
+                                f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                                 f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
                             else:
                                 f.write(f"$G16_ROOT/g16 {input_file}\n")
@@ -10133,6 +10174,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         finally:
                             if os.path.exists(temp_script):
                                 os.remove(temp_script)
+                            # Clean up ORCA temp directory if it exists
+                            if qm_program == 'orca':
+                                for tmp_dir in glob.glob(os.path.join("optimization", f'.orca_tmp_{basename}_*')):
+                                    try:
+                                        shutil.rmtree(tmp_dir)
+                                    except:
+                                        pass
                         
                         # Check for normal termination
                         if os.path.exists(output_path):
