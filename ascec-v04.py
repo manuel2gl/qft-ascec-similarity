@@ -4895,7 +4895,8 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
     if os.path.exists("retry_input"):
         print("Found retry_input folder, using structures from previous similarity analysis")
         for file in os.listdir("retry_input"):
-            if file.endswith(".xyz"):
+            # Skip combined files - only process individual structures
+            if file.endswith(".xyz") and not file.startswith("combined"):
                 xyz_files.append(os.path.join("retry_input", file))
     else:
         # Normal flow: Check for combined files in current directory
@@ -8498,21 +8499,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             shutil.rmtree("calculation")
                         os.rename(last_calc_dir, "calculation")
                         context.calculation_dir = "calculation"
-                        
-                        # Clean up intermediate calculation folders (both numbered and tmp)
-                        removed_count = 0
-                        for i in range(2, max_redos + 1):
-                            old_dir = f"calculation_{i}"
-                            if old_dir != last_calc_dir and os.path.exists(old_dir):
-                                shutil.rmtree(old_dir)
-                                removed_count += 1
-                        # Also clean up tmp folders
-                        for tmp_dir in glob.glob("calculation_tmp_*"):
-                            if os.path.exists(tmp_dir):
-                                shutil.rmtree(tmp_dir)
-                                removed_count += 1
-                        if removed_count > 0:
-                            print(f"  Cleaned {removed_count} intermediate calculation folder(s)")
+                    
+                    # Clean up ALL intermediate calculation folders (both numbered and tmp)
+                    removed_count = 0
+                    for i in range(2, max_redos + 1):
+                        old_dir = f"calculation_{i}"
+                        if old_dir != last_calc_dir and os.path.exists(old_dir):
+                            shutil.rmtree(old_dir)
+                            removed_count += 1
+                    # Also clean up tmp folders
+                    for tmp_dir in glob.glob("calculation_tmp_*"):
+                        if os.path.exists(tmp_dir):
+                            shutil.rmtree(tmp_dir)
+                            removed_count += 1
+                    if removed_count > 0:
+                        print(f"  Cleaned {removed_count} intermediate calculation folder(s)")
                     
                     # Find the last similarity directory (similarity, similarity_2, similarity_3, etc.)
                     last_sim_dir = None
@@ -8531,21 +8532,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             shutil.rmtree("similarity")
                         os.rename(last_sim_dir, "similarity")
                         context.similarity_dir = "similarity"
-                        
-                        # Clean up intermediate similarity folders (both numbered and tmp)
-                        removed_count = 0
-                        for i in range(2, max_redos + 1):
-                            old_dir = f"similarity_{i}"
-                            if old_dir != last_sim_dir and os.path.exists(old_dir):
-                                shutil.rmtree(old_dir)
-                                removed_count += 1
-                        # Also clean up tmp folders
-                        for tmp_dir in glob.glob("similarity_tmp_*"):
-                            if os.path.exists(tmp_dir):
-                                shutil.rmtree(tmp_dir)
-                                removed_count += 1
-                        if removed_count > 0:
-                            print(f"  Cleaned {removed_count} intermediate similarity folder(s)")
+                    
+                    # Clean up ALL intermediate similarity folders (both numbered and tmp)
+                    removed_count = 0
+                    for i in range(2, max_redos + 1):
+                        old_dir = f"similarity_{i}"
+                        if old_dir != last_sim_dir and os.path.exists(old_dir):
+                            shutil.rmtree(old_dir)
+                            removed_count += 1
+                    # Also clean up tmp folders
+                    for tmp_dir in glob.glob("similarity_tmp_*"):
+                        if os.path.exists(tmp_dir):
+                            shutil.rmtree(tmp_dir)
+                            removed_count += 1
+                    if removed_count > 0:
+                        print(f"  Cleaned {removed_count} intermediate similarity folder(s)")
                     
                     # Update cache for both calculation and similarity stages
                     if use_cache:
@@ -8695,16 +8696,19 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     print("✓ Workflow completed")
     print(f"{'-' * 60}")
     
-    # Clean up temporary folders from retry attempts
-    print("\nCleaning up temporary folders...")
-    temp_folders_removed = 0
-    for folder in glob.glob("calculation_tmp_*") + glob.glob("similarity_tmp_*"):
-        if os.path.exists(folder):
-            shutil.rmtree(folder)
-            temp_folders_removed += 1
+    # Clean up temporary folders from retry attempts (final safety cleanup)
+    temp_calc_folders = glob.glob("calculation_tmp_*")
+    temp_sim_folders = glob.glob("similarity_tmp_*")
+    retry_input = ["retry_input"] if os.path.exists("retry_input") else []
+    all_temp = temp_calc_folders + temp_sim_folders + retry_input
     
-    if temp_folders_removed > 0:
-        print(f"  Removed {temp_folders_removed} temporary folder(s)")
+    if all_temp:
+        print("\nCleaning up temporary folders...")
+        for folder in all_temp:
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+                print(f"  Removed: {folder}")
+        print(f"  Cleaned {len(all_temp)} temporary folder(s)")
     
     # If using cache (protocol mode), generate summary
     # NOTE: Cache is NOT deleted to allow protocol resume
@@ -10155,8 +10159,8 @@ def main_ascec_integrated():
         protocol_file = sys.argv[1]
         
         # Find existing protocol cache file for this input file
-        import glob
-        existing_caches = sorted(glob.glob("protocol_*.pkl"))
+        # (glob is already imported at module level)
+        existing_caches = sorted(glob.glob("protocol_*.pkl"))  # type: ignore[name-defined]
         
         if not existing_caches:
             print(f"Error: No active protocol found")
@@ -10642,6 +10646,25 @@ def main_ascec_integrated():
         
         result = update_existing_input_files(args.arg1, target_pattern)
         print(result)
+        return
+    
+    # Check if cleanup mode is requested
+    if args.command.lower() == "cleanup":
+        print("Cleaning up temporary folders from previous retry attempts...")
+        temp_calc_folders = glob.glob("calculation_tmp_*")  # type: ignore[name-defined]
+        temp_sim_folders = glob.glob("similarity_tmp_*")  # type: ignore[name-defined]
+        retry_input = ["retry_input"] if os.path.exists("retry_input") else []
+        good_structures = ["good_structures"] if os.path.exists("good_structures") else []
+        all_temp = temp_calc_folders + temp_sim_folders + retry_input + good_structures
+        
+        if all_temp:
+            for folder in all_temp:
+                if os.path.exists(folder):
+                    shutil.rmtree(folder)
+                    print(f"  Removed: {folder}")
+            print(f"\n✓ Cleaned {len(all_temp)} temporary folder(s)")
+        else:
+            print("  No temporary folders found")
         return
     
     # Check if launcher merge mode is requested
