@@ -8169,11 +8169,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     print('-' * 60)
                     stage_idx += 1
                     if stage_type == 'calculation':
-                        # Check if next stage is similarity - skip both if cached
+                        # Check if next stage is similarity AND it's also cached - skip both if both cached
                         next_is_similarity = (stage_idx < len(stages) and 
                                             stages[stage_idx]['type'] == 'similarity')
                         if next_is_similarity:
-                            stage_idx += 1
+                            # Check if the similarity stage is also cached
+                            next_stage_num = stage_idx + 1
+                            next_stage_key = f"similarity_{next_stage_num}"
+                            if next_stage_key in cache.get('stages', {}) and \
+                               cache['stages'][next_stage_key].get('status') == 'completed':
+                                stage_idx += 1
                     continue
         
         # Display name for stage (Annealing instead of Replication)
@@ -8507,12 +8512,19 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if old_dir != last_calc_dir and os.path.exists(old_dir):
                             shutil.rmtree(old_dir)
                             removed_count += 1
-                    # Also clean up tmp folders
+                    # Also clean up tmp folders (always clean these after consolidation)
                     for tmp_dir in glob.glob("calculation_tmp_*"):
                         if os.path.exists(tmp_dir):
+                            print(f"  Removing {tmp_dir}/")
                             shutil.rmtree(tmp_dir)
                             removed_count += 1
-                    if removed_count > 0:
+                    # Also clean up retry_input and good_structures from this stage
+                    for cleanup_dir in ["retry_input", "good_structures"]:
+                        if os.path.exists(cleanup_dir):
+                            print(f"  Removing {cleanup_dir}/")
+                            shutil.rmtree(cleanup_dir)
+                            removed_count += 1
+                    if removed_count > 0 and max_redos > 1:
                         print(f"  Cleaned {removed_count} intermediate calculation folder(s)")
                     
                     # Find the last similarity directory (similarity, similarity_2, similarity_3, etc.)
@@ -8540,12 +8552,13 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if old_dir != last_sim_dir and os.path.exists(old_dir):
                             shutil.rmtree(old_dir)
                             removed_count += 1
-                    # Also clean up tmp folders
+                    # Also clean up tmp folders (always clean these after consolidation)
                     for tmp_dir in glob.glob("similarity_tmp_*"):
                         if os.path.exists(tmp_dir):
+                            print(f"  Removing {tmp_dir}/")
                             shutil.rmtree(tmp_dir)
                             removed_count += 1
-                    if removed_count > 0:
+                    if removed_count > 0 and max_redos > 1:
                         print(f"  Cleaned {removed_count} intermediate similarity folder(s)")
                     
                     # Update cache for both calculation and similarity stages
@@ -8981,6 +8994,14 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
         else:
             print(f"\nResuming: Using existing calculation directory\n")
+        
+        # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
+        for old_inp in glob.glob(os.path.join(calc_dir, "*.inp")) + glob.glob(os.path.join(calc_dir, "*.com")):
+            # Only remove if a corresponding subdirectory exists (calculation was run)
+            basename = os.path.basename(old_inp).replace('.inp', '').replace('.com', '')
+            subdir = os.path.join(calc_dir, basename)
+            if os.path.isdir(subdir):
+                os.remove(old_inp)
     else:
         # Run calculation system creation with auto_select (in workflow mode)
         result_msg = create_simple_calculation_system(template_file, launcher_file, auto_select=auto_select, workflow_mode=True)
@@ -10153,14 +10174,17 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     return 0
 
 def main_ascec_integrated():
+    # Ensure glob is accessible throughout this function (imported at module level)
+    import glob as _glob_module
+    glob = _glob_module  # type: ignore[assignment]
+    
     # CHECK FOR EXCLUDE COMMAND (pause protocol and add exclusions)
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "exclude":
         # Syntax: ascec04 <protocol.in> exclude [stage] [pattern]
         protocol_file = sys.argv[1]
         
         # Find existing protocol cache file for this input file
-        # (glob is already imported at module level)
-        existing_caches = sorted(glob.glob("protocol_*.pkl"))  # type: ignore[name-defined]
+        existing_caches = sorted(glob.glob("protocol_*.pkl"))
         
         if not existing_caches:
             print(f"Error: No active protocol found")
@@ -10491,9 +10515,41 @@ def main_ascec_integrated():
                         pickle.dump(cache, f)
                     print(f"Cache updated: {cache_file}\n")
                 else:
-                    print(f"\nWarning: No matching stage found for '{restart_stage}'")
-                    print(f"Available stages in cache: {', '.join(cache.get('stages', {}).keys())}")
-                    sys.exit(1)
+                    # Stage not found in cache - check if we can infer what to do
+                    print(f"\nWarning: Stage '{restart_stage}' not found in cache")
+                    print(f"Available stages in cache: {', '.join(sorted(cache.get('stages', {}).keys()))}")
+                    
+                    # Try to find the next stage after the requested one
+                    try:
+                        requested_num = int(restart_stage)
+                        all_stage_keys = sorted(cache.get('stages', {}).keys(), 
+                                               key=lambda k: int(k.split('_')[1]))
+                        
+                        # Find stages after the requested number
+                        later_stages = [k for k in all_stage_keys if int(k.split('_')[1]) > requested_num]
+                        
+                        if later_stages:
+                            # Delete all stages from requested number onwards
+                            print(f"\nInterpreting as: delete cache from stage {requested_num} onwards")
+                            stages_to_remove = [k for k in all_stage_keys 
+                                              if int(k.split('_')[1]) >= requested_num]
+                            
+                            print(f"  → Clearing cache entries: {', '.join(stages_to_remove)}")
+                            for stage_key in stages_to_remove:
+                                del cache['stages'][stage_key]
+                            
+                            # Save modified cache
+                            with open(cache_file, 'wb') as f:
+                                pickle.dump(cache, f)
+                            print(f"Cache updated: {cache_file}\n")
+                        else:
+                            print(f"\nError: No stages found at or after stage {requested_num}")
+                            print("Tip: Use 'ascec04 at_annealing.in protocol' to resume from where it left off")
+                            sys.exit(1)
+                    except ValueError:
+                        print(f"\nError: Could not parse stage number from '{restart_stage}'")
+                        print("Tip: Use 'ascec04 at_annealing.in protocol' to resume from where it left off")
+                        sys.exit(1)
             else:
                 print(f"\nError: No protocol cache found for {input_file}")
                 print("Run the protocol first before trying to restart a stage")
@@ -10651,8 +10707,8 @@ def main_ascec_integrated():
     # Check if cleanup mode is requested
     if args.command.lower() == "cleanup":
         print("Cleaning up temporary folders from previous retry attempts...")
-        temp_calc_folders = glob.glob("calculation_tmp_*")  # type: ignore[name-defined]
-        temp_sim_folders = glob.glob("similarity_tmp_*")  # type: ignore[name-defined]
+        temp_calc_folders = glob.glob("calculation_tmp_*")
+        temp_sim_folders = glob.glob("similarity_tmp_*")
         retry_input = ["retry_input"] if os.path.exists("retry_input") else []
         good_structures = ["good_structures"] if os.path.exists("good_structures") else []
         all_temp = temp_calc_folders + temp_sim_folders + retry_input + good_structures
