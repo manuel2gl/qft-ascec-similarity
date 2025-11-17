@@ -2217,12 +2217,19 @@ QM_PROGRAM_DETAILS = {
 }
 
 # Helper function to preserve QM files from last accepted configuration
-def preserve_last_qm_files(state: SystemState, run_dir: str):
+def preserve_last_qm_files(state: SystemState, run_dir: str, call_id: Optional[int] = None, for_debug: bool = False):
     """
     Preserve the QM input and output files from the most recent QM calculation
     by copying them to special "last_accepted" filenames for debugging purposes.
+    
+    Args:
+        state: SystemState object
+        run_dir: Run directory
+        call_id: Optional specific call ID to preserve (defaults to state.qm_call_count)
+        for_debug: If True, adds "for debugging" to verbose messages
     """
-    call_id = state.qm_call_count
+    if call_id is None:
+        call_id = state.qm_call_count
     
     # Source files (from the most recent calculation)
     source_input = os.path.join(run_dir, f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
@@ -2234,59 +2241,35 @@ def preserve_last_qm_files(state: SystemState, run_dir: str):
     dest_output = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
     dest_chk = os.path.join(run_dir, "anneal.chk") if state.qm_program == "gaussian" else None
     
+    # Set message suffix based on debug flag
+    msg_suffix = " for debugging" if for_debug else ""
+    
     # Copy files if they exist
     try:
         if os.path.exists(source_input):
-            import shutil
             shutil.copy2(source_input, dest_input)
-            _print_verbose(f"  Preserved QM input file: {os.path.basename(dest_input)}", 2, state)
+            _print_verbose(f"  Preserved QM input file{msg_suffix}: {os.path.basename(dest_input)}", 2, state)
         
         if os.path.exists(source_output):
-            import shutil
             shutil.copy2(source_output, dest_output)
-            _print_verbose(f"  Preserved QM output file: {os.path.basename(dest_output)}", 2, state)
+            _print_verbose(f"  Preserved QM output file{msg_suffix}: {os.path.basename(dest_output)}", 2, state)
             
         if source_chk and dest_chk and os.path.exists(source_chk):
-            import shutil
             shutil.copy2(source_chk, dest_chk)
-            _print_verbose(f"  Preserved QM checkpoint file: {os.path.basename(dest_chk)}", 2, state)
+            _print_verbose(f"  Preserved QM checkpoint file{msg_suffix}: {os.path.basename(dest_chk)}", 2, state)
     except Exception as e:
-        _print_verbose(f"  Warning: Could not preserve QM files: {e}", 1, state)
+        _print_verbose(f"  Warning: Could not preserve QM files{msg_suffix}: {e}", 1, state)
 
 # Helper function to preserve QM files for debugging (last attempt, successful or failed)
 def preserve_last_qm_files_debug(state: SystemState, run_dir: str, call_id: int, status: int):
     """
     Preserve the QM input and output files from the most recent calculation attempt
     for debugging purposes. This preserves files from both successful and failed calculations.
+    
+    Note: This is a wrapper for preserve_last_qm_files() with for_debug=True for backward compatibility.
+    The status parameter is kept for API compatibility but not used.
     """
-    # Source files (from the most recent calculation)
-    source_input = os.path.join(run_dir, f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
-    source_output = os.path.join(run_dir, f"qm_output_{call_id}{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
-    source_chk = os.path.join(run_dir, f"qm_chk_{call_id}.chk") if state.qm_program == "gaussian" else None
-    
-    # Destination files (preserved versions for debugging)
-    dest_input = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
-    dest_output = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
-    dest_chk = os.path.join(run_dir, f"anneal.chk") if source_chk else None
-    
-    # Copy files if they exist
-    try:
-        if os.path.exists(source_input):
-            import shutil
-            shutil.copy2(source_input, dest_input)
-            _print_verbose(f"  Preserved QM input file for debugging: {os.path.basename(dest_input)}", 2, state)
-        
-        if os.path.exists(source_output):
-            import shutil
-            shutil.copy2(source_output, dest_output)
-            _print_verbose(f"  Preserved QM output file for debugging: {os.path.basename(dest_output)}", 2, state)
-            
-        if source_chk and dest_chk and os.path.exists(source_chk):
-            import shutil
-            shutil.copy2(source_chk, dest_chk)
-            _print_verbose(f"  Preserved QM checkpoint file for debugging: {os.path.basename(dest_chk)}", 2, state)
-    except Exception as e:
-        _print_verbose(f"  Warning: Could not preserve QM files for debugging: {e}", 1, state)
+    preserve_last_qm_files(state, run_dir, call_id=call_id, for_debug=True)
 
 def preserve_failed_initial_qm_files(state: SystemState, run_dir: str, attempt_num: int):
     """
@@ -4205,113 +4188,8 @@ def interactive_directory_selection_with_pattern(input_ext: str, pattern: str = 
             return []
 
 
-def interactive_directory_selection(input_ext: str) -> List[str]:
-    """
-    Provides interactive directory selection for updating input files.
-    Shows only directories that contain files and lets user choose.
-    
-    Args:
-        input_ext (str): File extension to search for
-    
-    Returns:
-        List[str]: List of selected input file paths
-    """
-    print("\n" + "=" * 60)
-    print("Directory selection".center(60))
-    print("=" * 60)
-    
-    # Scan for directories with matching files
-    directories_with_files = {}
-    all_files = []
-    
-    # Find all matching files recursively
-    for root, dirs, files in os.walk("."):
-        matching_files_in_dir = []
-        for file in files:
-            if file.endswith(input_ext):
-                full_path = os.path.join(root, file)
-                matching_files_in_dir.append(full_path)
-                all_files.append(full_path)
-        
-        # Only include directories that have matching files
-        if matching_files_in_dir:
-            # Normalize directory path for display
-            dir_display = root if root != "." else "Current working directory"
-            if root.startswith("./"):
-                dir_display = root[2:] + "/"
-            elif root == ".":
-                dir_display = "Current working directory"
-            else:
-                dir_display = root + "/"
-            
-            directories_with_files[dir_display] = matching_files_in_dir
-    
-    if not directories_with_files:
-        print("No input files found in any directory.")
-        return []
-    
-    # Display options - only directories with files
-    print("\nDirectories with matching files:")
-    print("-" * 40 + "\n")
-
-    # Create numbered options
-    options = {}
-    option_num = 1
-    
-    for dir_name, files in directories_with_files.items():
-        options[str(option_num)] = (dir_name, files)
-        print(f"{option_num}. {dir_name}: {len(files)} files")
-        
-        # Show first few files as examples
-        examples = files[:3]
-        for example in examples:
-            filename = os.path.basename(example)
-            print(f"   - {filename}")
-        if len(files) > 3:
-            print(f"   ... and {len(files) - 3} more")
-        print()
-        option_num += 1
-    
-    # Add "all" option if there are multiple directories
-    if len(directories_with_files) > 1:
-        options["a"] = ("All directories", all_files)
-        print(f"a. All directories: {len(all_files)} files total")
-        print()
-    
-    # Get user choice
-    while True:
-        try:
-            valid_options = list(options.keys()) + ['q']
-            # Build a cleaner prompt with explicit 'a' for all description
-            option_parts = []
-            for opt in valid_options[:-1]:  # Exclude 'q'
-                if opt == 'a':
-                    option_parts.append("'a' for all")
-                else:
-                    option_parts.append(opt)
-            choice = input(f"Select option ({', '.join(option_parts)}, or 'q' to quit): ").strip().lower()
-            
-            if choice == 'q':
-                print("Update cancelled.")
-                return []
-            
-            if choice in options:
-                selected_files = options[choice][1]
-                dir_name = options[choice][0]
-                
-                print(f"\nSelected: {dir_name}")
-                print(f"Files to update: {len(selected_files)}")
-                
-                return selected_files
-            else:
-                print(f"Invalid option. Please choose {', '.join(valid_options[:-1])}, or 'q' to quit.")
-                
-        except KeyboardInterrupt:
-            print("\nUpdate cancelled by user.")
-            return []
-        except EOFError:
-            print("\nUpdate cancelled.")
-            return []
+# REMOVED: Duplicate of interactive_directory_selection_with_pattern (use that with pattern="")
+# This function had identical logic to the _with_pattern variant
 
 
 def find_files_by_pattern(pattern: str, input_ext: str) -> List[str]:
@@ -5570,24 +5448,40 @@ def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str =
             return []
 
 
-def execute_merge_command():
+def execute_merge_command(result_files_only=False):
     """
     Execute the merge command functionality.
     Shows directories with XYZ files and allows user to merge them.
+    
+    Args:
+        result_files_only (bool): If True, only show result_*.xyz files. 
+                                   If False, show all XYZ files except _trj, combined_results, and combined_r
     """
+    # Set title and file filter based on mode
+    if result_files_only:
+        title = "Result XYZ Files Merge System"
+        file_descriptor = "result XYZ"
+    else:
+        title = "XYZ Files Merge System"
+        file_descriptor = "XYZ"
+    
     print("\n" + "=" * 60)
-    print("XYZ Files Merge System".center(60))
+    print(title.center(60))
     print("=" * 60)
     
-    # Scan for directories with XYZ files (excluding _trj.xyz files)
+    # Scan for directories with XYZ files based on filter
     directories_with_xyz = {}
     
     # Check current directory
     current_xyz = []
     for file in os.listdir("."):
-        if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
-            not file.startswith("combined_results") and not file.startswith("combined_r")):
-            current_xyz.append(file)
+        if result_files_only:
+            if file.startswith("result_") and file.endswith(".xyz"):
+                current_xyz.append(file)
+        else:
+            if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
+                not file.startswith("combined_results") and not file.startswith("combined_r")):
+                current_xyz.append(file)
     
     if current_xyz:
         directories_with_xyz["."] = current_xyz
@@ -5599,19 +5493,26 @@ def execute_merge_command():
             
         xyz_files = []
         for file in files:
-            if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
-                not file.startswith("combined_results") and not file.startswith("combined_r")):
-                xyz_files.append(os.path.join(root, file))
+            if result_files_only:
+                if file.startswith("result_") and file.endswith(".xyz"):
+                    xyz_files.append(os.path.join(root, file))
+            else:
+                if (file.endswith(".xyz") and not file.endswith("_trj.xyz") and 
+                    not file.startswith("combined_results") and not file.startswith("combined_r")):
+                    xyz_files.append(os.path.join(root, file))
         
         if xyz_files:
             directories_with_xyz[root] = xyz_files
     
     if not directories_with_xyz:
-        print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz, combined_results, and combined_r files).")
+        if result_files_only:
+            print("No result_*.xyz files found in current directory or subdirectories.")
+        else:
+            print("No .xyz files found in current directory or subdirectories (excluding _trj.xyz, combined_results, and combined_r files).")
         return
 
     # Display options
-    print("\nDirectories with XYZ files:")
+    print(f"\nDirectories with {file_descriptor} files:")
     print("-" * 40)
     
     options = {}
@@ -5660,22 +5561,26 @@ def execute_merge_command():
                 
                 if choice == "a":
                     output_file = "combined_results.xyz"
-                    print(f"\nMerging {len(files_to_merge)} files from all directories...")
+                    merge_msg = f"result files" if result_files_only else "files"
+                    print(f"\nMerging {len(files_to_merge)} {merge_msg} from all directories...")
                 else:
                     if dir_path == ".":
                         output_file = "combined_results.xyz"
-                        print(f"\nMerging {len(files_to_merge)} files from current directory...")
+                        merge_msg = f"result files" if result_files_only else "files"
+                        print(f"\nMerging {len(files_to_merge)} {merge_msg} from current directory...")
                     else:
                         dir_name = os.path.basename(dir_path)
                         output_file = f"combined_results_{dir_name}.xyz"
-                        print(f"\nMerging {len(files_to_merge)} files from {dir_path}...")
+                        merge_msg = f"result files" if result_files_only else "files"
+                        print(f"\nMerging {len(files_to_merge)} {merge_msg} from {dir_path}...")
                 
                 # Perform the merge
                 success = merge_xyz_files(files_to_merge, output_file)
                 
                 if success:
                     print(f"✓ Successfully created {output_file}")
-                    print(f"  Combined {len(files_to_merge)} XYZ files")
+                    file_type = "result XYZ files" if result_files_only else "XYZ files"
+                    print(f"  Combined {len(files_to_merge)} {file_type}")
                     
                     # Check if .mol file was also created
                     mol_file = output_file.replace('.xyz', '.mol')
@@ -5698,126 +5603,10 @@ def execute_merge_command():
 
 def execute_merge_result_command():
     """
-    Execute the merge result command functionality (original behavior).
+    Execute the merge result command (wrapper for backward compatibility).
     Shows directories with result_*.xyz files and allows user to merge them.
     """
-    print("\n" + "=" * 60)
-    print("Result XYZ Files Merge System".center(60))
-    print("=" * 60)
-    
-    # Scan for directories with result_*.xyz files only
-    directories_with_xyz = {}
-    
-    # Check current directory
-    current_xyz = []
-    for file in os.listdir("."):
-        if file.startswith("result_") and file.endswith(".xyz"):
-            current_xyz.append(file)
-    
-    if current_xyz:
-        directories_with_xyz["."] = current_xyz
-    
-    # Check subdirectories
-    for root, dirs, files in os.walk("."):
-        if root == ".":
-            continue
-            
-        xyz_files = []
-        for file in files:
-            if file.startswith("result_") and file.endswith(".xyz"):
-                xyz_files.append(os.path.join(root, file))
-        
-        if xyz_files:
-            directories_with_xyz[root] = xyz_files
-    
-    if not directories_with_xyz:
-        print("No result_*.xyz files found in current directory or subdirectories.")
-        return
-
-    # Display options
-    print("\nDirectories with result XYZ files:")
-    print("-" * 40)
-    
-    options = {}
-    option_num = 1
-    
-    total_files = 0
-    for dir_path, xyz_files in directories_with_xyz.items():
-        dir_display = "Current directory" if dir_path == "." else dir_path
-        options[str(option_num)] = (dir_path, xyz_files)
-        file_count = len(xyz_files)
-        total_files += file_count
-        
-        print(f"{option_num}. {dir_display}: {file_count} files")
-        
-        # Show first few files as examples
-        examples = xyz_files[:3]
-        for example in examples:
-            filename = os.path.basename(example)
-            print(f"   - {filename}")
-        if len(xyz_files) > 3:
-            print(f"   ... and {len(xyz_files) - 3} more")
-        print()
-        option_num += 1
-    
-    # Add "all" option if there are multiple directories
-    if len(directories_with_xyz) > 1:
-        all_files = []
-        for files in directories_with_xyz.values():
-            all_files.extend(files)
-        options["a"] = ("All directories", all_files)
-        print(f"a. All directories: {total_files} files total")
-        print()
-    
-    # Get user choice
-    while True:
-        try:
-            valid_options = list(options.keys()) + ['q']
-            choice = input(f"Select option (1-{len(directories_with_xyz)}, 'a' for all, or 'q' to quit): ").strip().lower()
-            
-            if choice == 'q':
-                print("Merge operation cancelled.")
-                return
-            
-            if choice in options:
-                dir_path, files_to_merge = options[choice]
-                
-                if choice == "a":
-                    output_file = "combined_results.xyz"
-                    print(f"\nMerging {len(files_to_merge)} result files from all directories...")
-                else:
-                    if dir_path == ".":
-                        output_file = "combined_results.xyz"
-                        print(f"\nMerging {len(files_to_merge)} result files from current directory...")
-                    else:
-                        dir_name = os.path.basename(dir_path)
-                        output_file = f"combined_results_{dir_name}.xyz"
-                        print(f"\nMerging {len(files_to_merge)} result files from {dir_path}...")
-                
-                # Perform the merge
-                success = merge_xyz_files(files_to_merge, output_file)
-                
-                if success:
-                    print(f"✓ Successfully created {output_file}")
-                    print(f"  Combined {len(files_to_merge)} result XYZ files")
-                    
-                    # Check if .mol file was also created
-                    mol_file = output_file.replace('.xyz', '.mol')
-                    if os.path.exists(mol_file):
-                        print(f"  Also created {mol_file}")
-                else:
-                    print(f"✗ Failed to create {output_file}")
-                
-                return
-            else:
-                print(f"Invalid option. Please select 1-{len(directories_with_xyz)}, 'a', or 'q'.")
-                
-        except KeyboardInterrupt:
-            print("\nMerge operation cancelled by user.")
-            return
-        except EOFError:
-            print("\nMerge operation cancelled.")
-            return
+    execute_merge_command(result_files_only=True)
 
 
 def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
@@ -8539,7 +8328,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             # If threshold not met and attempts remain, continue to redo logic below
                             if not threshold_met:
                                 if attempt < max_redos:
-                                    import shutil
                                     import tempfile
                                     
                                     # ═══════════════════════════════════════════════════════════════
@@ -8685,7 +8473,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     # After all redo attempts, consolidate folders
                     if max_redos > 1:
                         print(f"\nConsolidating results...")
-                    import shutil
                     
                     # Get final similarity results for cache
                     final_critical = None
@@ -8909,7 +8696,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     print(f"{'-' * 60}")
     
     # Clean up temporary folders from retry attempts
-    import shutil  # Ensure shutil is available
     print("\nCleaning up temporary folders...")
     temp_folders_removed = 0
     for folder in glob.glob("calculation_tmp_*") + glob.glob("similarity_tmp_*"):
@@ -10620,29 +10406,23 @@ def main_ascec_integrated():
             if cache_file:
                 cache = load_protocol_cache(cache_file)
                 
-                # Find matching stage(s) to restart
+                # Find matching stage(s) to restart by stage number
                 stages_to_restart = []
-                for stage_key in cache.get('stages', {}).keys():
-                    # Match calc, calc1, calc2, opt, opt1, opt2
-                    if restart_stage == 'calc' and stage_key.startswith('calculation_'):
-                        stages_to_restart.append(stage_key)
-                    elif restart_stage.startswith('calc') and len(restart_stage) > 4:
-                        # calc1, calc2, etc.
-                        stage_num = restart_stage[4:]
-                        if stage_key == f'calculation_{stage_num}':
+                
+                # Check if restart_stage is a number (e.g., "2", "3", "4")
+                try:
+                    stage_num = int(restart_stage)
+                    # Find all stages with this number
+                    for stage_key in cache.get('stages', {}).keys():
+                        key_num = int(stage_key.split('_')[1])
+                        if key_num == stage_num:
                             stages_to_restart.append(stage_key)
-                    elif restart_stage == 'opt' and stage_key.startswith('optimization_'):
-                        stages_to_restart.append(stage_key)
-                    elif restart_stage.startswith('opt') and len(restart_stage) > 3:
-                        # opt1, opt2, etc.
-                        stage_num = restart_stage[3:]
-                        if stage_key == f'optimization_{stage_num}':
-                            stages_to_restart.append(stage_key)
+                except ValueError:
+                    # Not a number, ignore for now (could add name-based matching later if needed)
+                    pass
                 
                 if stages_to_restart:
                     print(f"\nRestarting stage(s): {', '.join(stages_to_restart)}")
-                    
-                    import shutil
                     
                     # Find the minimum stage number to restart
                     min_restart_num = min([int(key.split('_')[1]) for key in stages_to_restart])

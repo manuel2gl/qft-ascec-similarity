@@ -1,30 +1,4 @@
-"""
-Similarity v01 - Structure Clustering and Analysis
-==================================================
-
-MULTI-SOFTWARE SUPPORT: Works with both ORCA and Gaussian
----------------------------------------------------------
-
-FUNCTIONALITY:
-=============
-- Clusters optimized structures based on energy and geometry similarity
-- Identifies structures with imaginary frequencies
-- Separates structures into:
-  * clustered_with_normal: Safe to ignore (clustered with true minima)
-  * need_recalculation: Require retry (not clustered, potential missing motifs)
-
-OUTPUT FOR RETRY WORKFLOW:
-=========================
-For structures in need_recalculation/:
-  - Original output files (.out/.log)
-  - Individual XYZ geometries (.xyz)
-  - Combined XYZ file (combined_need_recalc.xyz)
-
-These files are used by ASCEC's intelligent retry system to:
-  1. Identify good vs failed structures
-  2. Process failed structures (displacement or final geometry extraction)
-  3. Recalculate only what needs fixing
-"""
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -1344,18 +1318,22 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
                             'basename': basename
                         })
             
-            # Create combined XYZ file with all structures needing recalculation
+            # Create combined XYZ file only if there are 2+ structures needing recalculation
             if xyz_data_list:
-                combined_xyz = os.path.join(need_recalc_dir, "combined_need_recalc.xyz")
-                with open(combined_xyz, 'w') as f:
-                    for data in xyz_data_list:
-                        f.write(f"{data['natoms']}\n")
-                        f.write(f"{data['basename']} - needs recalculation\n")
-                        for symbol, coord in zip(data['symbols'], data['coords']):
-                            f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
-                
-                vprint(f"  Created combined XYZ file: {combined_xyz}")
-                vprint(f"  Extracted {len(xyz_data_list)} individual XYZ files")
+                if len(xyz_data_list) >= 2:
+                    combined_xyz = os.path.join(need_recalc_dir, "combined_need_recalc.xyz")
+                    with open(combined_xyz, 'w') as f:
+                        for data in xyz_data_list:
+                            f.write(f"{data['natoms']}\n")
+                            f.write(f"{data['basename']} - needs recalculation\n")
+                            for symbol, coord in zip(data['symbols'], data['coords']):
+                                f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
+                    
+                    vprint(f"  Created combined XYZ file: {combined_xyz}")
+                    vprint(f"  Extracted {len(xyz_data_list)} individual XYZ files")
+                else:
+                    vprint(f"  Single file needing recalculation - no combined file created")
+                    vprint(f"  Extracted {len(xyz_data_list)} individual XYZ file")
         
         total_skipped = len(skipped_clustered_with_normal) + len(skipped_need_recalc)
         print_step(f"\nProcessed {total_skipped} structures with imaginary frequencies:")
