@@ -7540,6 +7540,7 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
         
         Flag meanings:
             --retry=N: Retry each individual calculation/optimization up to N times
+            --retry: Retry until all succeed (unlimited attempts)
             --redo=N: Redo entire stage (calc+similarity or opt+similarity) up to N times
     
     Returns:
@@ -8711,12 +8712,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         os.rename(last_calc_dir, "calculation")
                         context.calculation_dir = "calculation"
                         
-                        # Clean up intermediate calculation folders
+                        # Clean up intermediate calculation folders (both numbered and tmp)
                         removed_count = 0
                         for i in range(2, max_redos + 1):
                             old_dir = f"calculation_{i}"
                             if old_dir != last_calc_dir and os.path.exists(old_dir):
                                 shutil.rmtree(old_dir)
+                                removed_count += 1
+                        # Also clean up tmp folders
+                        for tmp_dir in glob.glob("calculation_tmp_*"):
+                            if os.path.exists(tmp_dir):
+                                shutil.rmtree(tmp_dir)
                                 removed_count += 1
                         if removed_count > 0:
                             print(f"  Cleaned {removed_count} intermediate calculation folder(s)")
@@ -8739,12 +8745,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         os.rename(last_sim_dir, "similarity")
                         context.similarity_dir = "similarity"
                         
-                        # Clean up intermediate similarity folders
+                        # Clean up intermediate similarity folders (both numbered and tmp)
                         removed_count = 0
                         for i in range(2, max_redos + 1):
                             old_dir = f"similarity_{i}"
                             if old_dir != last_sim_dir and os.path.exists(old_dir):
                                 shutil.rmtree(old_dir)
+                                removed_count += 1
+                        # Also clean up tmp folders
+                        for tmp_dir in glob.glob("similarity_tmp_*"):
+                            if os.path.exists(tmp_dir):
+                                shutil.rmtree(tmp_dir)
                                 removed_count += 1
                         if removed_count > 0:
                             print(f"  Cleaned {removed_count} intermediate similarity folder(s)")
@@ -8928,8 +8939,13 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     box_size_override = None
     args = stage.get('args', [])
     for arg in args:
-        if arg.startswith('--retry='):
-            max_retries = int(arg.split('=')[1])
+        if arg.startswith('--retry'):
+            # --retry=N: retry each run up to N times
+            # --retry (no number): retry until all succeed (unlimited)
+            if '=' in arg:
+                max_retries = int(arg.split('=')[1])
+            else:
+                max_retries = 999999  # Effectively unlimited
         elif arg.startswith('--box'):
             # Extract packing percentage from flag (e.g., --box10 -> 10%)
             try:
@@ -9119,8 +9135,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             max_skipped = float(arg.split('=')[1])
         elif arg.startswith('--redo='):
             max_stage_redos = int(arg.split('=')[1])
-        elif arg.startswith('--retry='):
-            max_calc_retries = int(arg.split('=')[1])
+        elif arg.startswith('--retry'):
+            # --retry=N: retry each calc up to N times
+            # --retry (no number): retry until all succeed (unlimited)
+            if '=' in arg:
+                max_calc_retries = int(arg.split('=')[1])
+            else:
+                max_calc_retries = 999999  # Effectively unlimited
         elif arg.startswith('--attempt='):
             # Deprecated alias for --retry
             max_calc_retries = int(arg.split('=')[1])
@@ -9738,8 +9759,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
             max_skipped = float(arg.split('=')[1])
-        elif arg.startswith('--retry='):
-            max_opt_retries = int(arg.split('=')[1])
+        elif arg.startswith('--retry'):
+            # --retry=N: retry each opt up to N times
+            # --retry (no number): retry until all succeed (unlimited)
+            if '=' in arg:
+                max_opt_retries = int(arg.split('=')[1])
+            else:
+                max_opt_retries = 999999  # Effectively unlimited
         elif arg.startswith('--attempt='):
             # Deprecated alias for --retry
             max_opt_retries = int(arg.split('=')[1])
@@ -10477,10 +10503,21 @@ def main_ascec_integrated():
         sys.exit(0)
     
     # CHECK FOR PROTOCOL MODE (workflow embedded in input file)
-    # Check for protocol mode
-    # Syntax: ascec04 input.in protocol
+    # Check for protocol mode with optional stage restart
+    # Syntax: ascec04 input.in protocol [stage]
+    # Examples: 
+    #   ascec04 input.in protocol          # Run full protocol
+    #   ascec04 input.in protocol calc     # Restart calculation stage
+    #   ascec04 input.in protocol calc1    # Restart first calc stage
+    #   ascec04 input.in protocol calc2    # Restart second calc stage
+    #   ascec04 input.in protocol opt      # Restart optimization stage
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "protocol":
         input_file = sys.argv[1]
+        restart_stage = None
+        
+        # Check for stage restart argument
+        if len(sys.argv) >= 4:
+            restart_stage = sys.argv[3].lower()
         
         # Check if input file exists
         if not os.path.exists(input_file):
@@ -10492,14 +10529,20 @@ def main_ascec_integrated():
         
         if protocol is None:
             print("Error: No protocol found in input file")
-            print("Expected format in input file:")
+            print("\nExpected format in input file:")
             print(".in,")
             print("r1 --retry=5 --box10,")
             print("calc -c --redo=3 --retry=10 ../preopt_input.inp ../launcher_orca.sh,")
             print("similarity --th=2")
             print("\nFlag meanings:")
             print("  --retry=N: Retry each individual calculation up to N times")
+            print("  --retry: Retry until all calculations succeed (unlimited)")
             print("  --redo=N: Redo entire stage (calc+similarity) up to N times")
+            print("\nStage restart:")
+            print("  ascec04 input.in protocol calc   - Restart calculation stage")
+            print("  ascec04 input.in protocol calc1  - Restart first calc stage")
+            print("  ascec04 input.in protocol calc2  - Restart second calc stage")
+            print("  ascec04 input.in protocol opt    - Restart optimization stage")
             sys.exit(1)
         
         # Print ASCII logo
@@ -10559,6 +10602,118 @@ def main_ascec_integrated():
         if not stages:
             print("Error: No valid workflow stages found in protocol")
             sys.exit(1)
+        
+        # Handle stage restart if specified
+        if restart_stage:
+            # Find and modify cache to mark stage as incomplete
+            import glob
+            existing_caches = sorted(glob.glob("protocol_*.pkl"))
+            cache_file = None
+            
+            if existing_caches:
+                for cache_path in existing_caches:
+                    test_cache = load_protocol_cache(cache_path)
+                    if test_cache and test_cache.get('input_file') == input_file:
+                        cache_file = cache_path
+                        break
+            
+            if cache_file:
+                cache = load_protocol_cache(cache_file)
+                
+                # Find matching stage(s) to restart
+                stages_to_restart = []
+                for stage_key in cache.get('stages', {}).keys():
+                    # Match calc, calc1, calc2, opt, opt1, opt2
+                    if restart_stage == 'calc' and stage_key.startswith('calculation_'):
+                        stages_to_restart.append(stage_key)
+                    elif restart_stage.startswith('calc') and len(restart_stage) > 4:
+                        # calc1, calc2, etc.
+                        stage_num = restart_stage[4:]
+                        if stage_key == f'calculation_{stage_num}':
+                            stages_to_restart.append(stage_key)
+                    elif restart_stage == 'opt' and stage_key.startswith('optimization_'):
+                        stages_to_restart.append(stage_key)
+                    elif restart_stage.startswith('opt') and len(restart_stage) > 3:
+                        # opt1, opt2, etc.
+                        stage_num = restart_stage[3:]
+                        if stage_key == f'optimization_{stage_num}':
+                            stages_to_restart.append(stage_key)
+                
+                if stages_to_restart:
+                    print(f"\nRestarting stage(s): {', '.join(stages_to_restart)}")
+                    
+                    import shutil
+                    
+                    # Find the minimum stage number to restart
+                    min_restart_num = min([int(key.split('_')[1]) for key in stages_to_restart])
+                    
+                    print(f"  → Deleting all directories and cache entries from stage {min_restart_num} onwards\n")
+                    
+                    # Delete directories based on stage type
+                    # Map of directories to delete based on restart stage
+                    if 'calculation' in [k.split('_')[0] for k in stages_to_restart]:
+                        # Restarting calculation: delete calculation/, similarity/, optimization/
+                        for dir_name in ['calculation', 'similarity', 'optimization']:
+                            if os.path.exists(dir_name):
+                                print(f"     Removing {dir_name}/")
+                                shutil.rmtree(dir_name)
+                        # Also remove numbered variants
+                        for pattern in ['calculation_*', 'similarity_*', 'optimization_*']:
+                            for dir_path in glob.glob(pattern):
+                                if os.path.isdir(dir_path):
+                                    print(f"     Removing {dir_path}/")
+                                    shutil.rmtree(dir_path)
+                    
+                    elif 'optimization' in [k.split('_')[0] for k in stages_to_restart]:
+                        # Restarting optimization: delete optimization/ and later similarity/
+                        for dir_name in ['optimization']:
+                            if os.path.exists(dir_name):
+                                print(f"     Removing {dir_name}/")
+                                shutil.rmtree(dir_name)
+                        # Also remove numbered variants
+                        for pattern in ['optimization_*']:
+                            for dir_path in glob.glob(pattern):
+                                if os.path.isdir(dir_path):
+                                    print(f"     Removing {dir_path}/")
+                                    shutil.rmtree(dir_path)
+                        # Remove similarity folders that come after optimization
+                        similarity_dirs = sorted(glob.glob('similarity*'))
+                        for sim_dir in similarity_dirs:
+                            if os.path.isdir(sim_dir):
+                                # Check if it's similarity_N where N > calc similarity number
+                                if '_' in sim_dir:
+                                    try:
+                                        sim_num = int(sim_dir.split('_')[1])
+                                        if sim_num > min_restart_num:
+                                            print(f"     Removing {sim_dir}/")
+                                            shutil.rmtree(sim_dir)
+                                    except:
+                                        pass
+                    
+                    # Clear cache entries from restart stage onwards
+                    all_stage_keys = sorted(cache.get('stages', {}).keys(), 
+                                           key=lambda k: int(k.split('_')[1]))
+                    
+                    stages_to_remove = [k for k in all_stage_keys 
+                                       if int(k.split('_')[1]) >= min_restart_num]
+                    
+                    if stages_to_remove:
+                        print(f"\n  → Clearing cache entries: {', '.join(stages_to_remove)}")
+                        for stage_key in stages_to_remove:
+                            del cache['stages'][stage_key]
+                    
+                    # Save modified cache
+                    with open(cache_file, 'wb') as f:
+                        pickle.dump(cache, f)
+                    print(f"Cache updated: {cache_file}\n")
+                else:
+                    print(f"\nWarning: No matching stage found for '{restart_stage}'")
+                    print(f"Available stages in cache: {', '.join(cache.get('stages', {}).keys())}")
+                    sys.exit(1)
+            else:
+                print(f"\nError: No protocol cache found for {input_file}")
+                print("Run the protocol first before trying to restart a stage")
+                sys.exit(1)
         
         # Execute workflow with caching enabled
         result = execute_workflow_stages(input_file, stages, use_cache=True, protocol_text=protocol_text)
