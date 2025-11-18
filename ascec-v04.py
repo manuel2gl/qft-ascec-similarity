@@ -9437,56 +9437,60 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         # If using geometry extraction, update the input file first
                         if total_attempts > 1 and use_geometry_extraction:
                             import re
-                            # Restore backup for geometry extraction
-                            if os.path.exists(backup_input):
-                                shutil.copy(backup_input, input_path)
-                            
-                            # Try to extract geometry from previous output
-                            success_extract = extract_final_geometry(output_path, calc_dir)
-                            final_xyz = os.path.join(calc_dir, basename + "_final.xyz")
-                            
-                            if not success_extract or not os.path.exists(final_xyz):
-                                # Geometry extraction failed, skip this attempt
-                                continue
-                            
-                            # Read extracted geometry and update input file
-                            with open(final_xyz, 'r') as f:
-                                xyz_lines = f.readlines()
-                            
-                            with open(backup_input, 'r') as f:
-                                input_content = f.read()
-                            
-                            # Update input with new geometry (ORCA or Gaussian format)
-                            if qm_program == 'orca':
-                                # Find * xyz line and replace coordinates
-                                match = re.search(r'\*\s+xyz\s+[-+]?\d+\s+\d+\s*\n(.*?)\*', input_content, re.DOTALL)
-                                if match:
-                                    # Extract just the coordinates from XYZ (skip first 2 lines)
-                                    new_coords = ''.join(xyz_lines[2:])
-                                    new_input = input_content[:match.start(1)] + new_coords + input_content[match.end(1):]
-                                    with open(input_path, 'w') as f:
-                                        f.write(new_input)
+                            # Check if previous output exists and has content
+                            if not os.path.exists(output_path):
+                                # No output file from previous attempt - cannot extract geometry
+                                # Just run with original input
+                                if os.path.exists(backup_input):
+                                    shutil.copy(backup_input, input_path)
                             else:
-                                # Gaussian format
-                                lines = input_content.split('\n')
-                                charge_mult_idx = None
-                                for i, line in enumerate(lines):
-                                    if re.match(r'^\s*[-+]?\d+\s+\d+\s*$', line):
-                                        charge_mult_idx = i
-                                        break
+                                # Restore backup for geometry extraction
+                                if os.path.exists(backup_input):
+                                    shutil.copy(backup_input, input_path)
                                 
-                                if charge_mult_idx is not None:
-                                    # Replace geometry (skip first 2 lines of XYZ, keep until blank line)
-                                    new_coords = [l.strip() for l in xyz_lines[2:] if l.strip()]
-                                    # Find end of old geometry (blank line)
-                                    geom_end_idx = charge_mult_idx + 1
-                                    while geom_end_idx < len(lines) and lines[geom_end_idx].strip():
-                                        geom_end_idx += 1
+                                # Try to extract geometry from previous output
+                                success_extract = extract_final_geometry(output_path, calc_dir)
+                                final_xyz = os.path.join(calc_dir, basename + "_final.xyz")
+                                
+                                if success_extract and os.path.exists(final_xyz):
+                                    # Read extracted geometry and update input file
+                                    with open(final_xyz, 'r') as f:
+                                        xyz_lines = f.readlines()
                                     
-                                    # Reconstruct input
-                                    new_lines = lines[:charge_mult_idx+1] + new_coords + lines[geom_end_idx:]
-                                    with open(input_path, 'w') as f:
-                                        f.write('\n'.join(new_lines))
+                                    with open(backup_input, 'r') as f:
+                                        input_content = f.read()
+                                    
+                                    # Update input with new geometry (ORCA or Gaussian format)
+                                    if qm_program == 'orca':
+                                        # Find * xyz line and replace coordinates
+                                        match = re.search(r'\*\s+xyz\s+[-+]?\d+\s+\d+\s*\n(.*?)\*', input_content, re.DOTALL)
+                                        if match:
+                                            # Extract just the coordinates from XYZ (skip first 2 lines)
+                                            new_coords = ''.join(xyz_lines[2:])
+                                            new_input = input_content[:match.start(1)] + new_coords + input_content[match.end(1):]
+                                            with open(input_path, 'w') as f:
+                                                f.write(new_input)
+                                    else:
+                                        # Gaussian format
+                                        lines = input_content.split('\n')
+                                        charge_mult_idx = None
+                                        for i, line in enumerate(lines):
+                                            if re.match(r'^\s*[-+]?\d+\s+\d+\s*$', line):
+                                                charge_mult_idx = i
+                                                break
+                                        
+                                        if charge_mult_idx is not None:
+                                            # Replace geometry (skip first 2 lines of XYZ, keep until blank line)
+                                            new_coords = [l.strip() for l in xyz_lines[2:] if l.strip()]
+                                            # Find end of old geometry (blank line)
+                                            geom_end_idx = charge_mult_idx + 1
+                                            while geom_end_idx < len(lines) and lines[geom_end_idx].strip():
+                                                geom_end_idx += 1
+                                            
+                                            # Reconstruct input
+                                            new_lines = lines[:charge_mult_idx+1] + new_coords + lines[geom_end_idx:]
+                                            with open(input_path, 'w') as f:
+                                                f.write('\n'.join(new_lines))
                         
                         # Create temporary script with environment setup + single command
                         temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
