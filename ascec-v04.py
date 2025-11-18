@@ -9362,15 +9362,19 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # Skip if output already exists AND is successfully completed
                     # This handles redo scenarios where failed .out files were deleted
                     if os.path.exists(output_path):
-                        with open(output_path, 'r') as f:
-                            output_content = f.read()
-                        if qm_program == 'orca':
-                            is_complete = '****ORCA TERMINATED NORMALLY****' in output_content
-                        else:
-                            is_complete = 'Normal termination of Gaussian' in output_content
-                        
-                        if is_complete:
-                            continue
+                        try:
+                            with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                output_content = f.read()
+                            if qm_program == 'orca':
+                                is_complete = '****ORCA TERMINATED NORMALLY****' in output_content
+                            else:
+                                is_complete = 'Normal termination of Gaussian' in output_content
+                            
+                            if is_complete:
+                                continue
+                        except Exception:
+                            # File is corrupted or unreadable, treat as incomplete
+                            pass
                     
                     # For display, use just the filename
                     display_name = os.path.basename(input_file)
@@ -9399,21 +9403,26 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         if total_attempts > 1:
                             # Check previous output to decide strategy
                             if os.path.exists(output_path):
-                                with open(output_path, 'r') as f:
-                                    prev_output = f.read()
-                                
-                                has_convergence = 'THE OPTIMIZATION HAS CONVERGED' in prev_output
-                                has_normal_term = ('****ORCA TERMINATED NORMALLY****' in prev_output if qm_program == 'orca' 
-                                                 else 'Normal termination of Gaussian' in prev_output)
-                                
-                                # Intelligent decision:
-                                # - If converged but not terminated normally → try direct retry (up to 2 consecutive)
-                                # - If not converged → use geometry extraction
-                                # - If already did 2 consecutive direct retries → force geometry extraction
-                                if has_convergence and not has_normal_term and consecutive_direct_retries < 2:
-                                    use_geometry_extraction = False
-                                    consecutive_direct_retries += 1
-                                else:
+                                try:
+                                    with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                        prev_output = f.read()
+                                    
+                                    has_convergence = 'THE OPTIMIZATION HAS CONVERGED' in prev_output
+                                    has_normal_term = ('****ORCA TERMINATED NORMALLY****' in prev_output if qm_program == 'orca' 
+                                                     else 'Normal termination of Gaussian' in prev_output)
+                                    
+                                    # Intelligent decision:
+                                    # - If converged but not terminated normally → try direct retry (up to 2 consecutive)
+                                    # - If not converged → use geometry extraction
+                                    # - If already did 2 consecutive direct retries → force geometry extraction
+                                    if has_convergence and not has_normal_term and consecutive_direct_retries < 2:
+                                        use_geometry_extraction = False
+                                        consecutive_direct_retries += 1
+                                    else:
+                                        use_geometry_extraction = True
+                                        consecutive_direct_retries = 0
+                                except Exception:
+                                    # File is corrupted/unreadable, use geometry extraction
                                     use_geometry_extraction = True
                                     consecutive_direct_retries = 0
                             
@@ -9531,14 +9540,18 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         # Check if output file was created and contains normal termination
                         if os.path.exists(output_path):
-                            with open(output_path, 'r') as f:
-                                output_content = f.read()
-                            
-                            # Check for normal termination
-                            if qm_program == 'orca':
-                                normal_term = '****ORCA TERMINATED NORMALLY****' in output_content
-                            else:
-                                normal_term = 'Normal termination of Gaussian' in output_content
+                            try:
+                                with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                    output_content = f.read()
+                                
+                                # Check for normal termination
+                                if qm_program == 'orca':
+                                    normal_term = '****ORCA TERMINATED NORMALLY****' in output_content
+                                else:
+                                    normal_term = 'Normal termination of Gaussian' in output_content
+                            except Exception:
+                                # File is corrupted/unreadable
+                                normal_term = False
                             
                             if normal_term:
                                 if total_attempts > 1:
