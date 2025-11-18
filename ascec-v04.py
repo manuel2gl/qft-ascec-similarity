@@ -9642,47 +9642,59 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 if num_completed > 0 and context.is_workflow:
                     saved_cwd = os.getcwd()
                     try:
-                        # Merge good structures back if they exist (from retry)
-                        if os.path.exists("good_structures"):
-                            for folder in os.listdir("good_structures"):
-                                src_folder = os.path.join("good_structures", folder)
-                                if os.path.isdir(src_folder):
-                                    dest_folder = os.path.join(calc_dir, folder)
-                                    if not os.path.exists(dest_folder):
-                                        shutil.copytree(src_folder, dest_folder)
-                            # Clean up good_structures folder
-                            shutil.rmtree("good_structures")
+                        # Check if files are already organized (similarity folder exists at parent level)
+                        parent_dir = os.path.dirname(os.getcwd())
+                        already_organized = os.path.exists(os.path.join(parent_dir, "similarity"))
                         
-                        os.chdir(calc_dir)
-                        
-                        # Group files by base names into subfolders (silent in workflow)
-                        import io
-                        import contextlib
-                        f = io.StringIO()
-                        with contextlib.redirect_stdout(f):
-                            group_files_by_base_with_tracking(".")
-                            combine_xyz_files()
-                            create_combined_mol()
-                            create_summary_with_tracking(".")
-                            similarity_folder = collect_out_files_with_tracking()
-                        
-                        # Extract key info from output
-                        output = f.getvalue()
-                        if 'Summary written to' in output:
-                            print("\nSummary written to orca_summary.txt")
-                        if 'Copied' in output and 'similarity' in output:
-                            # Extract the copy message and similarity folder
-                            for line in output.split('\n'):
-                                if 'Copied' in line and '.out files to' in line:
-                                    print(line)
-                                    # Extract similarity folder name (e.g., "similarity/orca_out_3")
-                                    import re
-                                    match = re.search(r'to\s+(similarity[^\s]*)', line)
-                                    if match:
-                                        context.calc_sim_folder = match.group(1)
-                                    break
-                        
-                        print(f"\n✓ Files organized and sorted")
+                        if already_organized:
+                            print("\n✓ Files already organized (resuming from cache)")
+                            # Find the existing similarity folder
+                            sim_folders = [f for f in os.listdir(parent_dir) 
+                                         if f.startswith("similarity") and os.path.isdir(os.path.join(parent_dir, f))]
+                            if sim_folders:
+                                context.calc_sim_folder = sim_folders[0]
+                        else:
+                            # Merge good structures back if they exist (from retry)
+                            if os.path.exists("good_structures"):
+                                for folder in os.listdir("good_structures"):
+                                    src_folder = os.path.join("good_structures", folder)
+                                    if os.path.isdir(src_folder):
+                                        dest_folder = os.path.join(calc_dir, folder)
+                                        if not os.path.exists(dest_folder):
+                                            shutil.copytree(src_folder, dest_folder)
+                                # Clean up good_structures folder
+                                shutil.rmtree("good_structures")
+                            
+                            os.chdir(calc_dir)
+                            
+                            # Group files by base names into subfolders (silent in workflow)
+                            import io
+                            import contextlib
+                            f = io.StringIO()
+                            with contextlib.redirect_stdout(f):
+                                group_files_by_base_with_tracking(".")
+                                combine_xyz_files()
+                                create_combined_mol()
+                                create_summary_with_tracking(".")
+                                similarity_folder = collect_out_files_with_tracking()
+                            
+                            # Extract key info from output
+                            output = f.getvalue()
+                            if 'Summary written to' in output:
+                                print("\nSummary written to orca_summary.txt")
+                            if 'Copied' in output and 'similarity' in output:
+                                # Extract the copy message and similarity folder
+                                for line in output.split('\n'):
+                                    if 'Copied' in line and '.out files to' in line:
+                                        print(line)
+                                        # Extract similarity folder name (e.g., "similarity/orca_out_3")
+                                        import re
+                                        match = re.search(r'to\s+(similarity[^\s]*)', line)
+                                        if match:
+                                            context.calc_sim_folder = match.group(1)
+                                        break
+                            
+                            print(f"\n✓ Files organized and sorted")
                             
                     except Exception as e:
                         print(f"⚠ Warning: Could not organize files: {e}")
