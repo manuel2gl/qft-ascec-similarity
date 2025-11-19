@@ -6783,6 +6783,41 @@ def capture_current_state(directory):
     return state
 
 
+def unsort_directory(directory='.'):
+    """
+    Reverse the sort operation: move all files from subdirectories back to root.
+    This is the opposite of group_files_by_base_with_tracking.
+    """
+    if not os.path.exists(directory):
+        return 0
+    
+    moved_count = 0
+    subdirs = [d for d in os.listdir(directory) 
+              if os.path.isdir(os.path.join(directory, d)) and not d.startswith('.')]
+    
+    for subdir in subdirs:
+        subdir_path = os.path.join(directory, subdir)
+        try:
+            # Move all files from subdir to parent directory
+            for item in os.listdir(subdir_path):
+                src = os.path.join(subdir_path, item)
+                if os.path.isfile(src):
+                    dst = os.path.join(directory, item)
+                    # If destination exists, remove it first (overwrite)
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.move(src, dst)
+                    moved_count += 1
+            
+            # Remove empty subdirectory
+            if not os.listdir(subdir_path):
+                os.rmdir(subdir_path)
+        except Exception as e:
+            print(f"    Warning: Could not unsort {subdir}: {e}")
+    
+    return moved_count
+
+
 def group_files_by_base_with_tracking(directory='.'):
     """Group files by base name and track what was moved."""
     files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
@@ -7838,25 +7873,23 @@ def count_imaginary_frequencies(out_file: str) -> int:
     except:
         return 0
 
-def displace_along_imaginary_mode(out_file: str, calc_dir: str) -> bool:
+def displace_along_imaginary_mode(out_file: str, calc_dir: str):
     """
     Create displaced structure along imaginary mode.
     
     MULTI-SOFTWARE SUPPORT (ORCA & Gaussian):
     ==========================================
-    For ORCA: Uses native orca_pltvib tool to generate trajectory along mode
+    For ORCA: Directly extracts normal mode from output and applies displacement
     For Gaussian: Manually extracts and applies normal mode displacement vectors
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory
+        calc_dir: Calculation directory (unused, kept for compatibility)
         
     Returns:
-        True if displaced structure was created successfully
+        List of XYZ lines if successful, None otherwise
     """
     try:
-        base_name = os.path.splitext(out_file)[0]
-        
         # Check if this is ORCA or Gaussian
         with open(out_file, 'r') as f:
             first_lines = ''.join(f.readlines()[:50])
@@ -7864,54 +7897,189 @@ def displace_along_imaginary_mode(out_file: str, calc_dir: str) -> bool:
             is_gaussian = 'Gaussian' in first_lines
         
         if is_orca:
-            # ORCA: Use orca_pltvib tool
-            hess_file = base_name + ".hess"
-            
-            if not os.path.exists(hess_file):
-                return False
-            
-            # Run orca_pltvib to generate trajectory for mode 0 (imaginary mode)
-            result = subprocess.run(
-                ['orca_pltvib', hess_file, '0', '-i'],
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-            
-            if result.returncode != 0:
-                return False
-            
-            # Find the generated trajectory file (usually basename.out.v000.xyz or similar)
-            traj_file = None
-            dir_name = os.path.dirname(out_file)
-            for f in os.listdir(dir_name):
-                if f.endswith('.xyz') and '.v0' in f:
-                    traj_file = os.path.join(dir_name, f)
-                    break
-            
-            if not traj_file or not os.path.exists(traj_file):
-                return False
-            
-            # Extract the maximally displaced structure (usually frame 10 or 11)
-            displaced_xyz = extract_displaced_frame(traj_file, frame=10)
-            
-            if displaced_xyz:
-                # Save the displaced structure
-                displaced_file = base_name + "_displaced.xyz"
-                with open(displaced_file, 'w') as f:
-                    f.write(displaced_xyz)
-                return True
+            # ORCA: Parse normal modes directly from output file
+            return displace_orca_imaginary_mode(out_file)
         
         elif is_gaussian:
             # Gaussian: Manually displace along imaginary mode
             return displace_gaussian_imaginary_mode(out_file)
         
-        return False
+        return None
         
     except Exception as e:
-        return False
+        return None
 
-def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float = 0.3) -> bool:
+def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5):
+    """
+    Manually displace geometry along imaginary mode for ORCA output.
+    Extracts geometry and normal mode directly from output, then creates displaced structure.
+    
+    This function parses the ORCA output to find:
+    1. The final optimized geometry from "CARTESIAN COORDINATES (ANGSTROEM)" section
+    2. The imaginary frequency mode number and vectors from "NORMAL MODES" section
+    3. Applies displacement along the imaginary mode
+    
+    Args:
+        out_file: ORCA output file (.out)
+        displacement_factor: Scaling factor for displacement (default: 0.5 Angstrom)
+                           This is larger than Gaussian default because ORCA modes
+                           are mass-weighted and normalized
+    
+    Returns:
+        List of lines in XYZ format (including header) if successful, None otherwise
+    """
+    try:
+        with open(out_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Step 1: Extract final geometry from last "CARTESIAN COORDINATES (ANGSTROEM)" section
+        geometry = []
+        coord_start = None
+        for i in range(len(lines)-1, -1, -1):
+            if 'CARTESIAN COORDINATES (ANGSTROEM)' in lines[i]:
+                coord_start = i + 2  # Skip header lines
+                break
+        
+        if coord_start is None:
+            return False
+        
+        for i in range(coord_start, len(lines)):
+            line = lines[i].strip()
+            if not line or line.startswith('---') or line.startswith('='):
+                break
+            parts = line.split()
+            if len(parts) >= 4:
+                symbol = parts[0]
+                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                geometry.append((symbol, x, y, z))
+        
+        if not geometry:
+            return False
+        
+        # Step 2: Find imaginary frequency mode number
+        # Look in VIBRATIONAL FREQUENCIES section for "***imaginary mode***"
+        imaginary_mode_idx = None
+        imaginary_freq = None
+        for i, line in enumerate(lines):
+            if 'VIBRATIONAL FREQUENCIES' in line:
+                # Search next 200 lines for imaginary mode
+                for j in range(i, min(i+200, len(lines))):
+                    if '***imaginary mode***' in lines[j]:
+                        # Extract mode number and frequency
+                        # Format: "   6:       -16.68 cm**-1 ***imaginary mode***"
+                        parts = lines[j].split(':')
+                        if len(parts) >= 2:
+                            try:
+                                imaginary_mode_idx = int(parts[0].strip())
+                                # Extract frequency value
+                                freq_parts = parts[1].split()
+                                if freq_parts:
+                                    imaginary_freq = float(freq_parts[0])
+                                break
+                            except ValueError:
+                                continue
+                break
+        
+        if imaginary_mode_idx is None:
+            return False
+        
+        # Step 3: Find NORMAL MODES section and extract displacement vectors for imaginary mode
+        mode_section_start = None
+        for i, line in enumerate(lines):
+            if 'NORMAL MODES' in line and '---' in lines[i+1] if i+1 < len(lines) else False:
+                mode_section_start = i
+                break
+        
+        if mode_section_start is None:
+            return False
+        
+        # ORCA prints normal modes in blocks of 6 columns at a time
+        # Format:
+        #                   0          1          2          3          4          5    
+        #       0       0.000000   0.000000   0.000000   0.000000   0.000000   0.000000
+        #       1       0.000000   0.000000   0.000000   0.000000   0.000000   0.000000
+        #       ...
+        #                   6          7          8          9         10         11    
+        #       0       0.009579   0.124156  -0.111529   0.004374   0.071995  -0.017842
+        #       1      -0.002790   0.086907   0.114308   0.093436  -0.112979   0.018752
+        
+        displacements = []
+        in_mode_block = False
+        mode_column_idx = None
+        
+        for i in range(mode_section_start + 5, len(lines)):  # Skip header lines
+            line = lines[i]
+            
+            # Check if this is a mode header line (contains only mode numbers)
+            stripped = line.strip()
+            if not stripped:
+                continue
+            
+            # Mode header: line with only integers separated by spaces
+            parts = stripped.split()
+            if parts and all(p.isdigit() for p in parts):
+                mode_nums = [int(p) for p in parts]
+                if imaginary_mode_idx in mode_nums:
+                    # Found the block containing our imaginary mode
+                    mode_column_idx = mode_nums.index(imaginary_mode_idx)
+                    in_mode_block = True
+                    displacements = []
+                    continue
+                else:
+                    in_mode_block = False
+            
+            # Read displacement vectors if we're in the right block
+            if in_mode_block and mode_column_idx is not None:
+                # Data line format: "     0       0.009579   0.124156  -0.111529 ..."
+                # First column is row index, rest are displacement values
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        row_idx = int(parts[0])
+                        # Get the value for our mode (column index + 1 to skip row number)
+                        if len(parts) > mode_column_idx + 1:
+                            value = float(parts[mode_column_idx + 1])
+                            displacements.append(value)
+                    except (ValueError, IndexError):
+                        continue
+                
+                # Check if we have all displacements (3 * num_atoms)
+                if len(displacements) == len(geometry) * 3:
+                    break
+        
+        # Verify we got the right number of displacements
+        if len(displacements) != len(geometry) * 3:
+            return False
+        
+        # Step 4: Apply displacement to geometry
+        displaced_geometry = []
+        for atom_idx, (symbol, x, y, z) in enumerate(geometry):
+            dx = displacements[atom_idx * 3]
+            dy = displacements[atom_idx * 3 + 1]
+            dz = displacements[atom_idx * 3 + 2]
+            
+            new_x = x + dx * displacement_factor
+            new_y = y + dy * displacement_factor
+            new_z = z + dz * displacement_factor
+            displaced_geometry.append((symbol, new_x, new_y, new_z))
+        
+        # Step 5: Return displaced structure as XYZ lines (no file creation)
+        xyz_lines = []
+        xyz_lines.append(f"{len(displaced_geometry)}\n")
+        # Include frequency in header for verification
+        if imaginary_freq is not None:
+            xyz_lines.append(f"Displaced along imaginary mode {imaginary_mode_idx} ({imaginary_freq:.2f} cm**-1, factor={displacement_factor:.2f} A)\n")
+        else:
+            xyz_lines.append(f"Displaced along imaginary mode {imaginary_mode_idx} (factor={displacement_factor:.2f} A)\n")
+        for symbol, x, y, z in displaced_geometry:
+            xyz_lines.append(f"{symbol:2s}  {x:15.8f}  {y:15.8f}  {z:15.8f}\n")
+        
+        return xyz_lines
+        
+    except Exception as e:
+        return None
+
+def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float = 0.3):
     """
     Manually displace geometry along imaginary mode for Gaussian output.
     Extracts geometry and normal mode, then creates displaced structure.
@@ -7921,7 +8089,7 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
         displacement_factor: Scaling factor for displacement (default: 0.3)
     
     Returns:
-        True if displaced structure was created successfully
+        List of lines in XYZ format (including header) if successful, None otherwise
     """
     try:
         with open(out_file, 'r') as f:
@@ -8008,20 +8176,17 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
             new_z = z + dz * displacement_factor
             displaced_geometry.append((symbol, new_x, new_y, new_z))
         
-        # Write displaced structure to XYZ file
-        base_name = os.path.splitext(out_file)[0]
-        displaced_file = base_name + "_displaced.xyz"
+        # Return displaced structure as XYZ lines (no file creation)
+        xyz_lines = []
+        xyz_lines.append(f"{len(displaced_geometry)}\n")
+        xyz_lines.append(f"Displaced along imaginary mode (factor={displacement_factor})\n")
+        for symbol, x, y, z in displaced_geometry:
+            xyz_lines.append(f"{symbol:2s}  {x:15.8f}  {y:15.8f}  {z:15.8f}\n")
         
-        with open(displaced_file, 'w') as f:
-            f.write(f"{len(displaced_geometry)}\n")
-            f.write(f"Displaced along imaginary mode (factor={displacement_factor})\n")
-            for symbol, x, y, z in displaced_geometry:
-                f.write(f"{symbol:2s}  {x:15.8f}  {y:15.8f}  {z:15.8f}\n")
-        
-        return True
+        return xyz_lines
         
     except Exception as e:
-        return False
+        return None
 
 def extract_displaced_frame(traj_file: str, frame: int = 10) -> Optional[str]:
     """Extract a specific frame from an XYZ trajectory file."""
@@ -8048,7 +8213,7 @@ def extract_displaced_frame(traj_file: str, frame: int = 10) -> Optional[str]:
     except:
         return None
 
-def extract_final_geometry(out_file: str, calc_dir: str) -> bool:
+def extract_final_geometry(out_file: str, calc_dir: str):
     """
     Extract final optimized geometry from output file.
     
@@ -8059,12 +8224,11 @@ def extract_final_geometry(out_file: str, calc_dir: str) -> bool:
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory
+        calc_dir: Calculation directory (unused, kept for compatibility)
         
     Returns:
-        True if final geometry was extracted successfully
+        List of XYZ lines if successful, None otherwise
     """
-    """Extract final optimized geometry from ORCA or Gaussian output file."""
     try:
         with open(out_file, 'r') as f:
             lines = f.readlines()
@@ -8084,7 +8248,7 @@ def extract_final_geometry(out_file: str, calc_dir: str) -> bool:
                     break
             
             if coord_start is None:
-                return False
+                return None
             
             # Extract coordinates until blank line
             for i in range(coord_start, len(lines)):
@@ -8102,7 +8266,7 @@ def extract_final_geometry(out_file: str, calc_dir: str) -> bool:
                     break
             
             if coord_start is None:
-                return False
+                return None
             
             # Extract coordinates until separator line
             for i in range(coord_start, len(lines)):
@@ -8123,24 +8287,21 @@ def extract_final_geometry(out_file: str, calc_dir: str) -> bool:
                     coords.append(f"{symbol}  {x}  {y}  {z}")
         
         if not coords:
-            return False
+            return None
         
-        # Write to new XYZ file
-        base_name = os.path.splitext(out_file)[0]
-        final_xyz = base_name + "_final.xyz"
+        # Return as XYZ lines (no file creation)
+        xyz_lines = []
+        xyz_lines.append(f"{len(coords)}\n")
+        xyz_lines.append("Final geometry for re-optimization\n")
+        for line in coords:
+            parts = line.split()
+            if len(parts) >= 4:
+                xyz_lines.append(f"{parts[0]:2s}  {parts[1]:>12s}  {parts[2]:>12s}  {parts[3]:>12s}\n")
         
-        with open(final_xyz, 'w') as f:
-            f.write(f"{len(coords)}\n")
-            f.write("Final geometry for re-optimization\n")
-            for line in coords:
-                parts = line.split()
-                if len(parts) >= 4:
-                    f.write(f"{parts[0]:2s}  {parts[1]:>12s}  {parts[2]:>12s}  {parts[3]:>12s}\n")
-        
-        return True
+        return xyz_lines
         
     except Exception as e:
-        return False
+        return None
 
 def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]], 
                            use_cache: bool = False, protocol_text: str = "") -> int:
@@ -8526,70 +8687,84 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                             print(f"\nPreparing {len(xyz_files)} structure(s) for retry")
                                             
                                             calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                                            need_recalc_basenames = set(os.path.splitext(os.path.basename(f))[0] for f in xyz_files)
+                                            # Build basenames but filter out combined files (these are for user convenience only)
+                                            need_recalc_basenames = [os.path.splitext(os.path.basename(f))[0] for f in xyz_files]
+                                            filtered_basenames = []
+                                            for b in need_recalc_basenames:
+                                                low = b.lower()
+                                                # Skip files that are clearly combined outputs created by similarity
+                                                if low.startswith('combined') or 'combined_' in low or low == 'combined':
+                                                    print(f"    Skipping combined file from similarity: {b}")
+                                                    continue
+                                                filtered_basenames.append(b)
+                                            need_recalc_basenames = filtered_basenames
                                             
                                             # Step 2: UNSORT - Move files from subdirectories back to calculation root
                                             if os.path.exists(calc_dir):
                                                 print(f"  Unsorting {calc_dir}/ (moving files from subdirs to root)")
-                                                subdirs = [d for d in os.listdir(calc_dir) 
-                                                          if os.path.isdir(os.path.join(calc_dir, d)) and not d.startswith('.')]
-                                                for subdir in subdirs:
-                                                    subdir_path = os.path.join(calc_dir, subdir)
-                                                    for item in os.listdir(subdir_path):
-                                                        src = os.path.join(subdir_path, item)
-                                                        dst = os.path.join(calc_dir, item)
-                                                        if os.path.isfile(src):
-                                                            shutil.move(src, dst)
-                                                    os.rmdir(subdir_path)
+                                                unsort_directory(calc_dir)
                                             
                                             # Step 3: Process failed structures - extract/update geometries
                                             processed_count = 0
-                                            for xyz_file in xyz_files:
-                                                basename = os.path.splitext(os.path.basename(xyz_file))[0]
+                                            processed_basenames = []
+                                            for basename in need_recalc_basenames:
+                                                xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
                                                 out_file = os.path.join(calc_dir, f"{basename}.out")
                                                 inp_file = os.path.join(calc_dir, f"{basename}.inp")
-                                                
+
                                                 if not os.path.exists(inp_file):
                                                     print(f"    Warning: {basename}.inp not found, skipping")
                                                     continue
-                                                
+
                                                 # Read existing .inp to get template structure
                                                 with open(inp_file, 'r') as f:
                                                     inp_content = f.read()
-                                                
+
                                                 # Determine new geometry based on imaginary frequencies
                                                 new_geometry = None
                                                 if os.path.exists(out_file):
                                                     imag_count = count_imaginary_frequencies(out_file)
-                                                    
+
                                                     if imag_count == 1:
                                                         # Single imaginary: displace along mode
-                                                        print(f"    {basename}: 1 imaginary freq, displacing along mode")
-                                                        if displace_along_imaginary_mode(out_file, calc_dir):
-                                                            displaced_file = os.path.join(calc_dir, f"{basename}_displaced.xyz")
-                                                            if os.path.exists(displaced_file):
-                                                                with open(displaced_file, 'r') as f:
-                                                                    new_geometry = f.readlines()[2:]  # Skip first 2 lines
-                                                    
+                                                        print(f"    {basename}: 1 imaginary freq, displacing along mode", end='')
+                                                        xyz_lines = displace_along_imaginary_mode(out_file, calc_dir)
+                                                        if xyz_lines:
+                                                            # Verify the returned data has proper format
+                                                            try:
+                                                                natoms = int(xyz_lines[0].strip())
+                                                                if len(xyz_lines) >= natoms + 2:
+                                                                    new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                                                                    print(f" ✓")
+                                                                else:
+                                                                    print(f" ✗ (malformed XYZ)")
+                                                            except (ValueError, IndexError):
+                                                                print(f" ✗ (invalid XYZ format)")
+                                                        else:
+                                                            print(f" ✗ (displacement failed)")
+
                                                     elif imag_count >= 2:
                                                         # Multiple imaginary: extract final geometry
-                                                        print(f"    {basename}: {imag_count} imaginary freqs, using final geometry")
-                                                        if extract_final_geometry(out_file, calc_dir):
-                                                            final_file = os.path.join(calc_dir, f"{basename}_final.xyz")
-                                                            if os.path.exists(final_file):
-                                                                with open(final_file, 'r') as f:
-                                                                    new_geometry = f.readlines()[2:]  # Skip first 2 lines
+                                                        print(f"    {basename}: {imag_count} imaginary freqs, using final geometry", end='')
+                                                        xyz_lines = extract_final_geometry(out_file, calc_dir)
+                                                        if xyz_lines:
+                                                            new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                                                            print(f" ✓")
+                                                        else:
+                                                            print(f" ✗ (extraction failed)")
                                                     else:
                                                         # No imaginary - use XYZ from similarity
                                                         print(f"    {basename}: No imaginary freqs, using similarity XYZ")
-                                                        with open(xyz_file, 'r') as f:
-                                                            new_geometry = f.readlines()[2:]
+                                                        if os.path.exists(xyz_file):
+                                                            with open(xyz_file, 'r') as f:
+                                                                new_geometry = f.readlines()[2:]
                                                 else:
                                                     # No .out file - use XYZ from similarity
                                                     print(f"    {basename}: Using geometry from similarity")
-                                                    with open(xyz_file, 'r') as f:
-                                                        new_geometry = f.readlines()[2:]
-                                                
+                                                    if os.path.exists(xyz_file):
+                                                        with open(xyz_file, 'r') as f:
+                                                            new_geometry = f.readlines()[2:]
+
                                                 # Step 4: Update .inp file with new geometry
                                                 if new_geometry:
                                                     # Update inp file geometry (ORCA format: * xyz charge mult ... *)
@@ -8610,16 +8785,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                             # Already added * above
                                                         elif not in_coords:
                                                             new_inp.append(line)
-                                                    
+
                                                     with open(inp_file, 'w') as f:
                                                         f.write('\n'.join(new_inp))
                                                     processed_count += 1
+                                                    processed_basenames.append(basename)
                                             
                                             print(f"  Updated {processed_count} input file(s) with new geometries")
-                                            
-                                            # Step 5: Delete .out files for structures that need recalculation
+
+                                            # Step 5: Delete .out files only for structures that we actually prepared
                                             print(f"  Removing output files for structures needing recalculation")
-                                            for basename in need_recalc_basenames:
+                                            for basename in processed_basenames:
                                                 out_file = os.path.join(calc_dir, f"{basename}.out")
                                                 if os.path.exists(out_file):
                                                     os.remove(out_file)
@@ -8627,7 +8803,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                 for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.engrad']:
                                                     aux_file = os.path.join(calc_dir, f"{basename}{ext}")
                                                     if os.path.exists(aux_file):
-                                                        os.remove(aux_file)
+                                                        try:
+                                                            os.remove(aux_file)
+                                                        except:
+                                                            pass
                                             
                                             # Step 6: Remove similarity/ folder (will be regenerated by sort after recalc)
                                             # This happens AFTER we get the info but BEFORE the next iteration
@@ -8855,16 +9034,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         # UNSORT optimization folder
                                         if os.path.exists(opt_dir):
                                             print(f"  Unsorting {opt_dir}/ (moving files from subdirs to root)")
-                                            subdirs = [d for d in os.listdir(opt_dir) 
-                                                      if os.path.isdir(os.path.join(opt_dir, d)) and not d.startswith('.')]
-                                            for subdir in subdirs:
-                                                subdir_path = os.path.join(opt_dir, subdir)
-                                                for item in os.listdir(subdir_path):
-                                                    src = os.path.join(subdir_path, item)
-                                                    dst = os.path.join(opt_dir, item)
-                                                    if os.path.isfile(src):
-                                                        shutil.move(src, dst)
-                                                os.rmdir(subdir_path)
+                                            unsort_directory(opt_dir)
                                         
                                         # Process and update .inp files (same logic as calculation)
                                         # Delete .out files for failed structures
@@ -9256,6 +9426,28 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     
     if calc_dir_exists and stage_was_started:
         calc_dir = "calculation"
+        
+        # Get current input files from calculation directory to filter completed_calcs
+        # This ensures completed_calcs only includes files that still exist
+        current_input_files = []
+        # Check root level
+        for f in os.listdir(calc_dir):
+            if f.endswith(('.inp', '.com', '.gjf')):
+                current_input_files.append(f)
+        # Check subdirectories (if files were sorted)
+        if not current_input_files:
+            for item in os.listdir(calc_dir):
+                item_path = os.path.join(calc_dir, item)
+                if os.path.isdir(item_path):
+                    for f in os.listdir(item_path):
+                        if f.endswith(('.inp', '.com', '.gjf')):
+                            current_input_files.append(os.path.join(item, f))
+        
+        # Filter completed_calcs to only include files that currently exist
+        # Extract just the basename for comparison (handles both root and subdir paths)
+        current_basenames = set(os.path.basename(f) for f in current_input_files)
+        completed_calcs = [f for f in completed_calcs if os.path.basename(f) in current_basenames]
+        
         if completed_calcs:
             print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
         else:
@@ -9306,8 +9498,6 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 input_files.append(os.path.join(item, f))
                 input_files = sorted(input_files, key=natural_sort_key)
             
-            num_inputs = len(input_files)
-            
             # Determine QM program from input files (check first file)
             if input_files:
                 first_file = os.path.basename(input_files[0])
@@ -9322,6 +9512,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 excluded_numbers = cache.get('excluded_calculations', [])
             else:
                 excluded_numbers = cache.get('excluded_calculations_2', [])
+            
+            # Apply exclusion filtering to completed_calcs and input_files
+            # (completed_calcs was already filtered for file existence earlier)
+            completed_calcs = [f for f in completed_calcs if not match_exclusion(f, excluded_numbers)]
+            
+            # Count only non-excluded files for accurate total
+            num_inputs = sum(1 for f in input_files if not match_exclusion(f, excluded_numbers))
             
             if completed_calcs:
                 print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
@@ -9395,13 +9592,15 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     consecutive_direct_retries = 0
                     total_attempts = 0
                     use_geometry_extraction = False
+                    last_attempt_time = 0
+                    rapid_failure_count = 0
                     
                     while total_attempts < max_attempts and not success:
                         total_attempts += 1
                         
                         # Decide strategy for this attempt
                         if total_attempts > 1:
-                            # Check previous output to decide strategy
+                            # Check previous output to decide strategy BEFORE deleting it
                             if os.path.exists(output_path):
                                 try:
                                     with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -9431,15 +9630,6 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 print(f"\r  Running: {display_name}... ↻ (geometry retry {total_attempts})\033[K", end='', flush=True)
                             else:
                                 print(f"\r  Running: {display_name}... ↻ (direct retry {total_attempts})\033[K", end='', flush=True)
-                            
-                            # Remove previous output files
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                            # Remove ORCA auxiliary files
-                            for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt']:
-                                aux_file = os.path.join(calc_dir, basename + ext)
-                                if os.path.exists(aux_file):
-                                    os.remove(aux_file)
                         else:
                             consecutive_direct_retries = 1  # First attempt counts as direct
                         
@@ -9458,13 +9648,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                     shutil.copy(backup_input, input_path)
                                 
                                 # Try to extract geometry from previous output
-                                success_extract = extract_final_geometry(output_path, calc_dir)
-                                final_xyz = os.path.join(calc_dir, basename + "_final.xyz")
+                                xyz_lines = extract_final_geometry(output_path, calc_dir)
                                 
-                                if success_extract and os.path.exists(final_xyz):
-                                    # Read extracted geometry and update input file
-                                    with open(final_xyz, 'r') as f:
-                                        xyz_lines = f.readlines()
+                                if xyz_lines:
                                     
                                     with open(backup_input, 'r') as f:
                                         input_content = f.read()
@@ -9501,6 +9687,24 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                             with open(input_path, 'w') as f:
                                                 f.write('\n'.join(new_lines))
                         
+                        # Remove previous output and auxiliary files before running
+                        if os.path.exists(output_path):
+                            try:
+                                os.remove(output_path)
+                            except Exception as e:
+                                print(f"\r  Warning: Could not remove {output_file}: {e}\033[K")
+                                # If we can't remove the output, we can't retry properly
+                                break
+                        
+                        # Remove ORCA auxiliary files
+                        for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt']:
+                            aux_file = os.path.join(calc_dir, basename + ext)
+                            if os.path.exists(aux_file):
+                                try:
+                                    os.remove(aux_file)
+                                except:
+                                    pass
+                        
                         # Create temporary script with environment setup + single command
                         temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
                         with open(temp_script, 'w') as f:
@@ -9518,6 +9722,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         os.chmod(temp_script, 0o755)
                         
+                        # Track execution time to detect rapid failures
+                        start_time = time.time()
+                        
                         # Run the calculation (no timeout - runs until completion)
                         result = subprocess.run(
                             ['bash', os.path.basename(temp_script)],
@@ -9525,6 +9732,23 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             capture_output=True,
                             text=True
                         )
+                        
+                        execution_time = time.time() - start_time
+                        
+                        # Detect rapid failures (execution < 2 seconds suggests instant crash)
+                        if execution_time < 2.0 and total_attempts > 1:
+                            rapid_failure_count += 1
+                            if rapid_failure_count >= 3:
+                                print(f"\r  Running: {display_name}... ✗ (rapid failures detected)\033[K")
+                                print(f"    Calculation failing instantly ({execution_time:.1f}s). Possible issues:")
+                                print(f"    - Environment variables not set correctly")
+                                print(f"    - QM program not found or not executable")
+                                print(f"    - Severe input file error")
+                                break
+                        else:
+                            rapid_failure_count = 0
+                        
+                        last_attempt_time = execution_time
                         
                         # Cleanup after run
                         # Remove temp script
@@ -9599,16 +9823,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 # Handle failed calculations
                 if failed_calculations:
                     print(f"Failed calculations: {len(failed_calculations)}/{num_inputs}")
-                    
-                    # Write failed_calc.txt
-                    failed_list_file = os.path.join(calc_dir, "failed_calc.txt")
-                    with open(failed_list_file, 'w') as f:
-                        f.write(f"# Failed calculations: {len(failed_calculations)}/{num_inputs}\n")
-                        f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                        for failed_file in sorted(failed_calculations, key=natural_sort_key):
-                            f.write(f"{failed_file}\n")
-                    
-                    print(f"Failed calculations list written to: {failed_list_file}")
+                    print(f"Failed files: {', '.join(sorted(failed_calculations, key=natural_sort_key))}")
                     
                     # Create launcher_failed.sh for manual retry
                     failed_launcher = os.path.join(calc_dir, "launcher_failed.sh")
@@ -10226,13 +10441,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     shutil.copy(backup_input, input_path)
                 
                 print(f"\r  Running: {display_name}... ↻ (extracting geometry)", end='', flush=True)
-                success_extract = extract_final_geometry(output_path, "optimization")
-                final_xyz = os.path.join("optimization", basename + "_final.xyz")
+                xyz_lines = extract_final_geometry(output_path, "optimization")
                 
-                if success_extract and os.path.exists(final_xyz):
-                    # Read extracted geometry
-                    with open(final_xyz, 'r') as f:
-                        xyz_lines = f.readlines()
+                if xyz_lines:
                     
                     # Read backup input to get template
                     with open(backup_input, 'r') as f:
@@ -10288,9 +10499,6 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                                 if coord_line.strip():
                                     f.write(coord_line)
                             f.write('\n'.join(footer_lines))
-                    
-                    # Remove temp xyz file
-                    os.remove(final_xyz)
                     
                     # Now retry with extracted geometry
                     for geom_attempt in range(1, max_geometry_retries + 1):
