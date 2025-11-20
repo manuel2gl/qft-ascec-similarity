@@ -1,23 +1,13 @@
 #!/usr/bin/env python3
 
 import argparse
-from collections import Counter, defaultdict
 import dataclasses
 import glob
 import json
 import math
-import numpy as np
+import multiprocessing
 import os
-from pathlib import Path
 import pickle
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # Use non-interactive backend
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
-    plt = None  # type: ignore
 import random
 import re
 import shlex
@@ -27,10 +17,24 @@ import sys
 import tempfile
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Tuple 
-from datetime import datetime, timedelta
+from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-import multiprocessing
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+# Third-Party Imports
+import numpy as np
+
+# Optional / Conditional Imports
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Set backend before importing pyplot
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    plt = None  # type: ignore
 
 # Set multiprocessing start method for better compatibility
 if __name__ == '__main__':
@@ -41,193 +45,34 @@ if __name__ == '__main__':
         pass
 
 # Global Constants
-MAX_ATOM = 1000 # Increase this if your systems are larger than 1000 atoms
-MAX_MOLE = 100  # Increase this if you have more than 100 molecules
+max_mole = 100  # Increase this if you have more than 100 molecules
 B2 = 3.166811563e-6   # Boltzmann constant in Hartree/K (approx. 3.166811563 × 10^-6 Hartree/K)
 
 # Constants for overlap prevention during initial configuration generation (in config_molecules)
-OVERLAP_SCALE_FACTOR = 0.7 # Factor to make overlap check slightly more lenient (e.g., allow partial overlap)
+overlap_scale_factor = 0.7 # Factor to make overlap check slightly more lenient (e.g., allow partial overlap)
 
-def natural_sort_key(s):
-    """
-    Generate a sort key for natural (numerical) sorting.
-    Converts 'opt_conf_10.inp' to ['opt_conf_', 10, '.inp'] for proper numerical sorting.
-    """
-    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
-def get_optimal_workers(task_type: str, num_items: int) -> int:
-    """
-    Calculate optimal number of workers for different task types.
-    
-    Args:
-        task_type: Type of task ('cpu_intensive', 'io_intensive', 'mixed')
-        num_items: Number of items to process
-    
-    Returns:
-        Optimal number of workers
-    """
-    cpu_count = multiprocessing.cpu_count()
-    
-    if task_type == 'cpu_intensive':
-        # For CPU-intensive tasks like parsing files
-        return min(cpu_count, num_items, 8)
-    elif task_type == 'io_intensive':
-        # For I/O-intensive tasks like file copying
-        return min(cpu_count * 2, num_items, 6)  
-    elif task_type == 'mixed':
-        # For mixed tasks like file creation
-        return min(cpu_count, num_items, 4)
-    else:
-        return min(cpu_count, num_items, 4)  # Default
-
-def show_parallel_progress(completed: int, total: int, prefix: str = "Progress"):
-    """
-    Show progress during parallel processing.
-    
-    Args:
-        completed: Number of completed tasks
-        total: Total number of tasks
-        prefix: Prefix for progress message
-    """
-    if total > 0:
-        percent = int(100 * completed / total)
-        bar_length = 30
-        filled_length = int(bar_length * completed / total)
-        bar = '█' * filled_length + '-' * (bar_length - filled_length)
-        print(f'\r{prefix}: |{bar}| {percent}% ({completed}/{total})', end='', flush=True)
-        if completed == total:
-            print()  # New line when complete
-
-def _process_xyz_file_for_calc(xyz_file_data):
-    """
-    Process a single XYZ file for calculation system creation.
-    This is a module-level function to support multiprocessing.
-    Used by both simple and standard calculation workflows.
-    """
-    xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
-    
-    # Extract configurations
-    configurations = extract_configurations_from_xyz(xyz_file)
-    if not configurations:
-        return [], f"Warning: No configurations found in {xyz_file}"
-    
-    # Determine the run number from the directory name
-    dir_name = os.path.dirname(xyz_file)
-    if dir_name == ".":
-        run_num = 1
-    else:
-        # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
-        parts = os.path.basename(dir_name).split('_')
-        run_num = 1
-        for part in reversed(parts):
-            try:
-                run_num = int(part)
-                break
-            except ValueError:
-                continue
-    
-    file_input_files = []
-    source_name = os.path.basename(xyz_file).replace('.xyz', '')
-    
-    # Create input files for each configuration
-    for config in configurations:
-        # Clean up the comment to remove temperature and add source info
-        original_comment = config['comment']
-        energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
-        config_match = re.search(r'Configuration: (\d+)', original_comment)
-        
-        energy = energy_match.group(1) if energy_match else "unknown"
-        config_num = config_match.group(1) if config_match else config['config_num']
-        
-        # Create new comment without temperature, with source info
-        if energy == "unknown":
-            config['comment'] = f"Configuration: {config_num} | {source_name}"
-        else:
-            config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
-        
-        # Use simpler naming when using -c flag OR only one XYZ file
-        if use_combined_naming or total_xyz_files == 1:
-            input_name = f"opt_conf_{config['config_num']}{input_ext}"
-        else:
-            input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
-        input_path = os.path.join(calc_dir, input_name)
-        
-        if create_qm_input_file(config, template_content, input_path, qm_program):
-            file_input_files.append(input_name)
-        
-    # Include run number in message only if there are multiple files
-    if total_xyz_files == 1:
-        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
-    else:
-        return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
-
-def _process_xyz_file_for_opt(xyz_file_data):
-    """
-    Process a single XYZ file for optimization system creation.
-    This is a module-level function to support multiprocessing.
-    """
-    xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
-    
-    # Extract configurations
-    configurations = extract_configurations_from_xyz(xyz_file)
-    if not configurations:
-        return [], f"Warning: No configurations found in {xyz_file}"
-    
-    file_input_files = []
-    base_name = os.path.basename(xyz_file).replace('.xyz', '')
-    
-    # Create input files for each configuration
-    for config in configurations:
-        # Extract motif name from comment if available, otherwise use base filename
-        import re
-        comment = config['comment']
-        motif_match = re.search(r'[Mm]otif_(\d+)', comment)
-        
-        # If not found in comment, try to extract from filename
-        if not motif_match:
-            motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
-        
-        if motif_match:
-            # Use motif name from comment or filename
-            motif_num = int(motif_match.group(1))
-            input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
-            source_name = f"motif_{motif_num:0>2}"
-        else:
-            # For non-motif files, use simple opt_conf_X naming
-            input_name = f"opt_conf_{config['config_num']}{input_ext}"
-            source_name = base_name
-        
-        input_path = os.path.join(opt_dir, input_name)
-        
-        # Update config comment with source file info
-        config['comment'] = f"Configuration: {config['config_num']} | Source: {source_name}"
-        
-        # Create input file
-        if create_qm_input_file(config, template_content, input_path, qm_program):
-            file_input_files.append(input_name)
-    
-    return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
-MAX_OVERLAP_PLACEMENT_ATTEMPTS = 100000 # Max attempts to place a single molecule without significant overlap
+max_overlap_placement_attempts = 100000 # Max attempts to place a single molecule without significant overlap
 
 # Set this to True to create a SEPARATE COPY of the XYZ file
 # (e.g., mtobox_seed.xyz) which will include 8 dummy 'X' atoms for
 # visualizing the box in programs like GaussView.
 # If False, only the original XYZ file (mto_seed.xyz) will be generated.
 # This can be overridden by the --nobox command line flag.
-CREATE_BOX_XYZ_COPY = True 
+create_box_xyz_copy = True 
 
 version = "* ASCEC-v04: Nov-2025 *"  # Version of the ASCEC script
 
 # Symbol for dummy atoms used to mark box corners.
 
 # WARNING: 'X' is not a standard element.
-DUMMY_ATOM_SYMBOL = "X"
+dummy_atom_symbol = "X"
 
 # Atomic radii - Used in some initial configurations for overlap prevention
 # These are typical Covalent Radii (single bond, in Angstroms).
 # If your Fortran Ratom array uses different values or a specific parameterized set,
 # please ensure consistency with that source.
-R_ATOM = {
+r_atom = {
     # Covalent radii for elements in Angstroms (for volume calculations and steric interactions)
     # Based on Cordero et al. (2008) "Covalent radii revisited" Dalton Trans. 2832-2838
     # and optimized values from previous ASCEC usage
@@ -339,7 +184,7 @@ R_ATOM = {
 
 # Element Symbol to Atomic Number Mapping
 # This dictionary will be used to convert element symbols from the input to atomic numbers.
-ELEMENT_SYMBOLS = {
+element_symbols = {
     "H": 1, "He": 2, "Li": 3, "Be": 4, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9, "Ne": 10,
     "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17, "Ar": 18, "K": 19, "Ca": 20,
     "Sc": 21, "Ti": 22, "V": 23, "Cr": 24, "Mn": 25, "Fe": 26, "Co": 27, "Ni": 28, "Cu": 29, "Zn": 30,
@@ -354,9 +199,9 @@ ELEMENT_SYMBOLS = {
     "Rg": 111, "Cn": 112, "Nh": 113, "Fl": 114, "Mc": 115, "Lv": 116, "Ts": 117, "Og": 118
 }
 
-# Atomic Number to Element Symbol Mapping (reverse of ELEMENT_SYMBOLS)
+# Atomic Number to Element Symbol Mapping (reverse of element_symbols)
 # This dictionary will be used to convert atomic numbers to element symbols for output.
-ATOMIC_NUMBER_TO_SYMBOL = {
+atomic_number_to_symbol = {
     1: "H", 2: "He", 3: "Li", 4: "Be", 5: "B", 6: "C", 7: "N", 8: "O", 9: "F", 10: "Ne",
     11: "Na", 12: "Mg", 13: "Al", 14: "Si", 15: "P", 16: "S", 17: "Cl", 18: "Ar", 19: "K", 20: "Ca",
     21: "Sc", 22: "Ti", 23: "V", 24: "Cr", 25: "Mn", 26: "Fe", 27: "Co", 28: "Ni", 29: "Cu", 30: "Zn",
@@ -372,7 +217,7 @@ ATOMIC_NUMBER_TO_SYMBOL = {
 }
 
 # Atomic Weights for elements (Global Constant) - used for center of mass calculations
-ATOMIC_WEIGHTS = {
+atomic_weights = {
     1: 1.008,   2: 4.0026,   3: 6.94,    4: 9.012,   5: 10.81,
     6: 12.011,  7: 14.007,   8: 15.999,  9: 18.998, 10: 20.180,
     11: 22.990, 12: 24.305,  13: 26.982, 14: 28.085, 15: 30.974,
@@ -400,7 +245,7 @@ ATOMIC_WEIGHTS = {
 }
 
 # Electronegativity for elements (used for sorting molecular formula strings)
-ELECTRONEGATIVITY_VALUES = {
+electronegativity_values = {
     'H': 2.20, 'He': 0.0, 
     'Li': 0.98, 'Be': 1.57, 'B': 2.04, 'C': 2.55, 'N': 3.04, 'O': 3.44, 'F': 3.98,
     'Ne': 0.0,
@@ -468,17 +313,17 @@ class SystemState:
         self.openbabel_alias = "obabel"           # Default Open Babel executable name
         
         # Add these from global constants
-        self.R_ATOM = R_ATOM.copy() 
-        self.OVERLAP_SCALE_FACTOR = OVERLAP_SCALE_FACTOR
-        self.MAX_OVERLAP_PLACEMENT_ATTEMPTS = 100000 # Max attempts to place a single molecule without significant overlap
+        self.r_atom = r_atom.copy() 
+        self.overlap_scale_factor = overlap_scale_factor
+        self.max_overlap_placement_attempts = 100000 # Max attempts to place a single molecule without significant overlap
 
-        # --- Random number generator state (internal to ran0_method) ---
+        # Random number generator state (internal to ran0_method)
         # This MUST be an integer. It will be updated by ran0_method.
         self.random_seed: int = -1
         self.IY: int = 0                          # Internal state for ran0_method
         self.IVEC: List[int] = [0] * 32           # Internal state for ran0_method (NTAB=32 from ran0_method)
 
-        # --- Simulation State Variables (updated during simulation) ---
+        # Simulation State Variables (updated during simulation)
         self.nstep: int = 0                        # Total energy evaluation steps (Fortran's cycle)
         self.icount: int = 0                       # Counter for steps at current temperature (Fortran's icount)
         self.iboltz: int = 0                       # Count of configurations accepted by Boltzmann (Fortran's iboltz)
@@ -503,10 +348,10 @@ class SystemState:
         # New variable to track the global QM call count at the last history line written
         self.last_history_qm_call_count: int = 0
 
-        # --- Molecular and Atomic Data ---
+        # Molecular and Atomic Data
         self.rp: np.ndarray = np.empty((0, 3), dtype=np.float64) # Current atomic coordinates
         self.rf: np.ndarray = np.empty((0, 3), dtype=np.float64) # Proposed atomic coordinates (not directly used as state, but as return value)
-        self.rcm: np.ndarray = np.empty((MAX_MOLE, 3), dtype=np.float64) # Center of mass for each molecule
+        self.rcm: np.ndarray = np.empty((max_mole, 3), dtype=np.float64) # Center of mass for each molecule
         self.imolec: List[int] = []               # Indices defining molecules (which atoms belong to which molecule)
         self.iznu: List[int] = []                 # Atomic numbers for each atom in the system
         self.all_molecule_definitions: List['MoleculeData'] = [] # Stores parsed molecule data from input
@@ -517,7 +362,7 @@ class SystemState:
 
         # Element Maps
         self.atomic_number_to_symbol: Dict[int, str] = {}
-        self.atomic_number_to_weight: Dict[int, float] = {} # Populated from ATOMIC_WEIGHTS
+        self.atomic_number_to_weight: Dict[int, float] = {} # Populated from atomic_weights
         self.atomic_number_to_mass: Dict[int, float] = {}   # Alias for atomic_number_to_weight, used for clarity in COM calcs
 
         # These Fortran-style arrays might be redundant if the dicts above are the primary source.
@@ -618,6 +463,148 @@ def _print_verbose(message: str, level: int, state: Optional[SystemState], file=
         print(message, file=file)
         file.flush()
 
+def natural_sort_key(s):
+    """
+    Generate a sort key for natural (numerical) sorting.
+    Converts 'opt_conf_10.inp' to ['opt_conf_', 10, '.inp'] for proper numerical sorting.
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
+def get_optimal_workers(task_type: str, num_items: int) -> int:
+    """
+    Calculate optimal number of workers for different task types.
+    
+    Args:
+        task_type: Type of task ('cpu_intensive', 'io_intensive', 'mixed')
+        num_items: Number of items to process
+    
+    Returns:
+        Optimal number of workers
+    """
+    cpu_count = multiprocessing.cpu_count()
+    
+    if task_type == 'cpu_intensive':
+        # For CPU-intensive tasks like parsing files
+        return min(cpu_count, num_items, 8)
+    elif task_type == 'io_intensive':
+        # For I/O-intensive tasks like file copying
+        return min(cpu_count * 2, num_items, 6)  
+    elif task_type == 'mixed':
+        # For mixed tasks like file creation
+        return min(cpu_count, num_items, 4)
+    else:
+        return min(cpu_count, num_items, 4)  # Default
+
+
+def _process_xyz_file_for_calc(xyz_file_data):
+    """
+    Process a single XYZ file for calculation system creation.
+    This is a module-level function to support multiprocessing.
+    Used by both simple and standard calculation workflows.
+    """
+    xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
+    
+    # Extract configurations
+    configurations = extract_configurations_from_xyz(xyz_file)
+    if not configurations:
+        return [], f"Warning: No configurations found in {xyz_file}"
+    
+    # Determine the run number from the directory name
+    dir_name = os.path.dirname(xyz_file)
+    if dir_name == ".":
+        run_num = 1
+    else:
+        # Extract number from directory name (e.g., w6_annealing4_1 -> 1)
+        parts = os.path.basename(dir_name).split('_')
+        run_num = 1
+        for part in reversed(parts):
+            try:
+                run_num = int(part)
+                break
+            except ValueError:
+                continue
+    
+    file_input_files = []
+    source_name = os.path.basename(xyz_file).replace('.xyz', '')
+    
+    # Create input files for each configuration
+    for config in configurations:
+        # Clean up the comment to remove temperature and add source info
+        original_comment = config['comment']
+        energy_match = re.search(r'E = ([-\d.]+) a\.u\.', original_comment)
+        config_match = re.search(r'Configuration: (\d+)', original_comment)
+        
+        energy = energy_match.group(1) if energy_match else "unknown"
+        config_num = config_match.group(1) if config_match else config['config_num']
+        
+        # Create new comment without temperature, with source info
+        if energy == "unknown":
+            config['comment'] = f"Configuration: {config_num} | {source_name}"
+        else:
+            config['comment'] = f"Configuration: {config_num} | E = {energy} a.u. | {source_name}"
+        
+        # Use simpler naming when using -c flag OR only one XYZ file
+        if use_combined_naming or total_xyz_files == 1:
+            input_name = f"opt_conf_{config['config_num']}{input_ext}"
+        else:
+            input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
+        input_path = os.path.join(calc_dir, input_name)
+        
+        if create_qm_input_file(config, template_content, input_path, qm_program):
+            file_input_files.append(input_name)
+        
+    # Include run number in message only if there are multiple files
+    if total_xyz_files == 1:
+        return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
+    else:
+        return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
+
+def _process_xyz_file_for_opt(xyz_file_data):
+    """
+    Process a single XYZ file for optimization system creation.
+    This is a module-level function to support multiprocessing.
+    """
+    xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
+    
+    # Extract configurations
+    configurations = extract_configurations_from_xyz(xyz_file)
+    if not configurations:
+        return [], f"Warning: No configurations found in {xyz_file}"
+    
+    file_input_files = []
+    base_name = os.path.basename(xyz_file).replace('.xyz', '')
+    
+    # Create input files for each configuration
+    for config in configurations:
+        # Extract motif name from comment if available, otherwise use base filename
+        import re
+        comment = config['comment']
+        motif_match = re.search(r'[Mm]otif_(\d+)', comment)
+        
+        # If not found in comment, try to extract from filename
+        if not motif_match:
+            motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
+        
+        if motif_match:
+            # Use motif name from comment or filename
+            motif_num = int(motif_match.group(1))
+            input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
+            source_name = f"motif_{motif_num:0>2}"
+        else:
+            # For non-motif files, use simple opt_conf_X naming
+            input_name = f"opt_conf_{config['config_num']}{input_ext}"
+            source_name = base_name
+        
+        input_path = os.path.join(opt_dir, input_name)
+        
+        # Update config comment with source file info
+        config['comment'] = f"Configuration: {config['config_num']} | Source: {source_name}"
+        
+        # Create input file
+        if create_qm_input_file(config, template_content, input_path, qm_program):
+            file_input_files.append(input_name)
+    
+    return file_input_files, f"Processed {xyz_file} with {len(configurations)} configurations"
 
 def get_molecular_formula_string(atom_symbols_list: List[str]) -> str:
     """
@@ -640,7 +627,7 @@ def get_molecular_formula_string(atom_symbols_list: List[str]) -> str:
         # For all other elements, sort by electronegativity (ascending)
         # If an element is not in our dictionary, assign a very high value (float('inf'))
         # so it sorts to the end of the list.
-        electronegativity = ELECTRONEGATIVITY_VALUES.get(symbol, float('inf'))
+        electronegativity = electronegativity_values.get(symbol, float('inf'))
         return (0, electronegativity) # Others get lower priority, then sorted by EN
 
     sorted_elements = sorted(counts.keys(), key=sort_key_for_formula)
@@ -656,9 +643,9 @@ def get_molecular_formula_string(atom_symbols_list: List[str]) -> str:
 def _post_process_mol_file(mol_filepath: str, state: SystemState):
     """
     Post-processes a .mol file to replace Open Babel's '*' dummy atom symbol with 'X'
-    if the DUMMY_ATOM_SYMBOL is 'X'.
+    if the dummy_atom_symbol is 'X'.
     """
-    if DUMMY_ATOM_SYMBOL != "X": # Only needed if we actually use 'X' and obabel uses '*'
+    if dummy_atom_symbol != "X": # Only needed if we actually use 'X' and obabel uses '*'
         return # Skip post-processing if not using 'X' as dummy or if dummy is default *
 
     temp_mol_path = mol_filepath + ".tmp"
@@ -670,7 +657,7 @@ def _post_process_mol_file(mol_filepath: str, state: SystemState):
                 # Example: "  1 C       0.0000    0.0000    0.0000  0  0  0  0  0  0  0  0"
                 # If there's a '*' at position 31 and a space after it, it's likely a dummy atom placeholder from OB.
                 if len(line) >= 34 and line[31] == '*' and line[32] == ' ':
-                            modified_line = line[:31] + DUMMY_ATOM_SYMBOL + line[32:] 
+                            modified_line = line[:31] + dummy_atom_symbol + line[32:] 
                             outfile.write(modified_line)
                 else:
                     outfile.write(line)
@@ -874,16 +861,16 @@ def initialize_element_symbols(state: SystemState):
     Initializes a dictionary mapping atomic numbers to element symbols
     and populates the Fortran-style list state.sym.
     """
-    state.atomic_number_to_symbol = ATOMIC_NUMBER_TO_SYMBOL.copy()
+    state.atomic_number_to_symbol = atomic_number_to_symbol.copy()
 
-    for z, symbol in ATOMIC_NUMBER_TO_SYMBOL.items():
+    for z, symbol in atomic_number_to_symbol.items():
         if z < len(state.sym):
             state.sym[z] = symbol.strip()
 
 # Helper function to get element symbol (used in rless.out and history output)
 def get_element_symbol(atomic_number: int) -> str:
     """Retrieves the element symbol for a given atomic number."""
-    return ATOMIC_NUMBER_TO_SYMBOL.get(atomic_number, 'X') # Default to 'X' for unknown/dummy
+    return atomic_number_to_symbol.get(atomic_number, 'X') # Default to 'X' for unknown/dummy
 
 
 def get_molecular_formula(mol_def) -> str:
@@ -926,10 +913,10 @@ def initialize_element_weights(state: SystemState):
     Initializes a dictionary mapping atomic numbers to their atomic weights
     and populates the list state.wt. Also populates atomic_number_to_mass.
     """
-    state.atomic_number_to_weight = ATOMIC_WEIGHTS.copy()
-    state.atomic_number_to_mass = ATOMIC_WEIGHTS.copy() # Populate this for COM calculations
+    state.atomic_number_to_weight = atomic_weights.copy()
+    state.atomic_number_to_mass = atomic_weights.copy() # Populate this for COM calculations
 
-    for atomic_num, weight in ATOMIC_WEIGHTS.items():
+    for atomic_num, weight in atomic_weights.items():
         if 0 < atomic_num < len(state.wt):
             state.wt[atomic_num] = weight
 
@@ -972,7 +959,7 @@ def config_molecules(natom: int, nmo: int, r_coords: np.ndarray, state: SystemSt
     """
     Fortran subroutine config: Configures initial molecular positions and orientations.
     Modifies r_coords in place. Applies PBC.
-    Now includes overlap prevention using R_ATOM during initial random configuration.
+    Now includes overlap prevention using r_atom during initial random configuration.
     Also dynamically adjusts placement ranges if a molecule is difficult to place,
     mimicking the Fortran's aggressive self-correction for steric clashes.
     """
@@ -1012,7 +999,7 @@ def config_molecules(natom: int, nmo: int, r_coords: np.ndarray, state: SystemSt
         local_rotation_range_factor = 1.0
         next_increase_threshold_for_this_molecule = RANGE_INCREASE_STEP
 
-        while overlap_found and attempts < state.MAX_OVERLAP_PLACEMENT_ATTEMPTS:
+        while overlap_found and attempts < state.max_overlap_placement_attempts:
             attempts += 1
             
             # Show progress for difficult placements
@@ -1072,23 +1059,23 @@ def config_molecules(natom: int, nmo: int, r_coords: np.ndarray, state: SystemSt
 
                     distance = np.linalg.norm(prop_coords - placed_coords)
 
-                    radius1 = state.R_ATOM.get(prop_atom_num, 0.5)
-                    radius2 = state.R_ATOM.get(placed_atom_num, 0.5)
+                    radius1 = state.r_atom.get(prop_atom_num, 0.5)
+                    radius2 = state.r_atom.get(placed_atom_num, 0.5)
 
-                    min_distance_allowed = (radius1 + radius2) * state.OVERLAP_SCALE_FACTOR
+                    min_distance_allowed = (radius1 + radius2) * state.overlap_scale_factor
 
                     if distance < min_distance_allowed and distance > 1e-4:
                         overlap_found = True
                         # If overlap is found, this molecule's placement attempt fails.
                         # The while loop will continue to retry placing *this same molecule*
                         # with potentially increased ranges until a non-overlapping position is found
-                        # or MAX_OVERLAP_PLACEMENT_ATTEMPTS is reached.
+                        # or max_overlap_placement_attempts is reached.
                         break 
                 if overlap_found:
                     break 
             
         if overlap_found: 
-            _print_verbose(f"Warning: Could not find non-overlapping placement for molecule {mol_def.label} (instance {i+1}) after {state.MAX_OVERLAP_PLACEMENT_ATTEMPTS} attempts. Placing it anyway, may cause QM errors.", 1, state)
+            _print_verbose(f"Warning: Could not find non-overlapping placement for molecule {mol_def.label} (instance {i+1}) after {state.max_overlap_placement_attempts} attempts. Placing it anyway, may cause QM errors.", 1, state)
 
         for atom_data in proposed_mol_atoms:
             atomic_num, abs_coords = atom_data
@@ -1416,7 +1403,7 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
                     y = float(parts[2])
                     z = float(parts[3])
                     
-                    atomic_num = ELEMENT_SYMBOLS.get(symbol)
+                    atomic_num = element_symbols.get(symbol)
                     if atomic_num is None:
                         raise ValueError(f"Error: Unknown element symbol '{symbol}' near line {line_num}.")
                     
@@ -2307,7 +2294,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
 
 
 # 12. QM Program Details Mapping
-QM_PROGRAM_DETAILS = {
+qm_program_details = {
     1: {
         "name": "gaussian",
         "default_exe": "g09", # Common executable name.
@@ -2343,13 +2330,13 @@ def preserve_last_qm_files(state: SystemState, run_dir: str, call_id: Optional[i
         call_id = state.qm_call_count
     
     # Source files (from the most recent calculation)
-    source_input = os.path.join(run_dir, f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
-    source_output = os.path.join(run_dir, f"qm_output_{call_id}{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    source_input = os.path.join(run_dir, f"qm_input_{call_id}{qm_program_details[state.ia]['input_ext']}")
+    source_output = os.path.join(run_dir, f"qm_output_{call_id}{qm_program_details[state.ia]['output_ext']}")
     source_chk = os.path.join(run_dir, f"qm_chk_{call_id}.chk") if state.qm_program == "gaussian" else None
     
     # Destination files (preserved versions)
-    dest_input = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['input_ext']}")
-    dest_output = os.path.join(run_dir, f"anneal{QM_PROGRAM_DETAILS[state.ia]['output_ext']}")
+    dest_input = os.path.join(run_dir, f"anneal{qm_program_details[state.ia]['input_ext']}")
+    dest_output = os.path.join(run_dir, f"anneal{qm_program_details[state.ia]['output_ext']}")
     dest_chk = os.path.join(run_dir, "anneal.chk") if state.qm_program == "gaussian" else None
     
     # Set message suffix based on debug flag
@@ -2422,8 +2409,8 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     state.qm_call_count += 1 # Increment total QM calls
     call_id = state.qm_call_count
     
-    qm_input_filename = f"qm_input_{call_id}{QM_PROGRAM_DETAILS[state.ia]['input_ext']}"
-    qm_output_filename = f"qm_output_{call_id}{QM_PROGRAM_DETAILS[state.ia]['output_ext']}"
+    qm_input_filename = f"qm_input_{call_id}{qm_program_details[state.ia]['input_ext']}"
+    qm_output_filename = f"qm_output_{call_id}{qm_program_details[state.ia]['output_ext']}"
     
     # Checkpoint file naming convention, might vary per program (e.g., Gaussian uses .chk)
     qm_chk_filename = f"qm_chk_{call_id}.chk" if state.qm_program == "gaussian" else None
@@ -2497,7 +2484,7 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
         return 0.0, 0
 
     # Determine QM command - use alias from input file if provided, otherwise use default
-    qm_exe = state.alias if state.alias else QM_PROGRAM_DETAILS[state.ia]["default_exe"]
+    qm_exe = state.alias if state.alias else qm_program_details[state.ia]["default_exe"]
     if state.qm_program == "gaussian":
         qm_command = f"{qm_exe} {qm_input_filename} {qm_output_filename}"
     elif state.qm_program == "orca":
@@ -2556,11 +2543,11 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 output_content = f.read()
             
             # Check for normal termination string
-            termination_found = QM_PROGRAM_DETAILS[state.ia]["termination_string"] in output_content
+            termination_found = qm_program_details[state.ia]["termination_string"] in output_content
             
             # For programs with alternative termination patterns, check those too
-            if not termination_found and "alternative_termination" in QM_PROGRAM_DETAILS[state.ia]:
-                for alt_term in QM_PROGRAM_DETAILS[state.ia]["alternative_termination"]:
+            if not termination_found and "alternative_termination" in qm_program_details[state.ia]:
+                for alt_term in qm_program_details[state.ia]["alternative_termination"]:
                     if alt_term in output_content:
                         termination_found = True
                         break
@@ -2569,7 +2556,7 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 _print_verbose(f"QM program '{state.qm_program}' did not terminate normally for config {call_id}.", 1, state)
                 status = 0
             else:
-                match = re.search(QM_PROGRAM_DETAILS[state.ia]["energy_regex"], output_content)
+                match = re.search(qm_program_details[state.ia]["energy_regex"], output_content)
                 if match:
                     energy = float(match.group(1))
                     status = 1
@@ -2741,7 +2728,7 @@ def write_single_xyz_configuration(file_handle, natom, rp, iznu, energy, config_
     base_comment_line = f"Configuration: {config_idx} | E = {energy:.8f} a.u."
     if include_dummy_atoms:
         if L > 0: 
-            base_comment_line += f" | BoxL={L:.1f} A ({DUMMY_ATOM_SYMBOL} box markers)" 
+            base_comment_line += f" | BoxL={L:.1f} A ({dummy_atom_symbol} box markers)" 
     elif random_generate_config_mode == 1 and state and hasattr(state, 'current_temp'): # Only add T for annealing mode, not for random mode
         base_comment_line += f" | T = {state.current_temp:.1f} K" 
 
@@ -2753,7 +2740,7 @@ def write_single_xyz_configuration(file_handle, natom, rp, iznu, energy, config_
 
     if include_dummy_atoms:
         for coords in box_corners:
-            file_handle.write(f"{DUMMY_ATOM_SYMBOL: <3} {coords[0]: 12.6f} {coords[1]: 12.6f} {coords[2]: 12.6f}\n")
+            file_handle.write(f"{dummy_atom_symbol: <3} {coords[0]: 12.6f} {coords[1]: 12.6f} {coords[2]: 12.6f}\n")
 
     file_handle.flush()
 
@@ -2793,7 +2780,7 @@ def write_accepted_xyz(prefix: str, config_number: int, energy: float, temp: flo
         )                
     
     # Conditionally write to the BOX XYZ COPY file handle (with dummy atoms)
-    if CREATE_BOX_XYZ_COPY:
+    if create_box_xyz_copy:
         with open(box_xyz_path, 'a') as f_box_xyz:
             write_single_xyz_configuration(
                 f_box_xyz,
@@ -2878,8 +2865,8 @@ def find_rotatable_bonds(mol_coords: np.ndarray, mol_atomic_numbers: List[int],
             distance = np.linalg.norm(mol_coords[j] - mol_coords[i])
             
             # Get atomic radii for bond length estimation
-            radius_i = state.R_ATOM.get(mol_atomic_numbers[i], 1.5)
-            radius_j = state.R_ATOM.get(mol_atomic_numbers[j], 1.5)
+            radius_i = state.r_atom.get(mol_atomic_numbers[i], 1.5)
+            radius_j = state.r_atom.get(mol_atomic_numbers[j], 1.5)
             max_bond_length = (radius_i + radius_j) * 1.3  # 30% tolerance
             
             if distance < max_bond_length:
@@ -2921,8 +2908,8 @@ def find_connected_atoms(start_atom: int, exclude_atom: int, mol_coords: np.ndar
                 continue
                 
             distance = np.linalg.norm(mol_coords[neighbor] - mol_coords[current])
-            radius_curr = state.R_ATOM.get(mol_atomic_numbers[current], 1.5)
-            radius_neigh = state.R_ATOM.get(mol_atomic_numbers[neighbor], 1.5)
+            radius_curr = state.r_atom.get(mol_atomic_numbers[current], 1.5)
+            radius_neigh = state.r_atom.get(mol_atomic_numbers[neighbor], 1.5)
             max_bond_length = (radius_curr + radius_neigh) * 1.3
             
             if distance < max_bond_length:
@@ -2955,8 +2942,8 @@ def check_intramolecular_overlap(mol_coords: np.ndarray, mol_atomic_numbers: Lis
         for j in range(i + 1, n_atoms):
             distance = np.linalg.norm(mol_coords[i] - mol_coords[j])
             
-            radius_i = state.R_ATOM.get(mol_atomic_numbers[i], 0.5)
-            radius_j = state.R_ATOM.get(mol_atomic_numbers[j], 0.5)
+            radius_i = state.r_atom.get(mol_atomic_numbers[i], 0.5)
+            radius_j = state.r_atom.get(mol_atomic_numbers[j], 0.5)
             
             # Use a stricter overlap criterion for intramolecular checks
             # (0.5 is more strict than 0.7 used for intermolecular placement)
@@ -3066,7 +3053,7 @@ def propose_move(state: SystemState, current_rp: np.ndarray, current_imolec: Lis
     
     current_rcm = calculate_mass_center(mol_coords_current, mol_masses)
 
-    # --- Translation Part (matching Fortran's 'trans' subroutine) ---
+    # Translation Part (matching Fortran's 'trans' subroutine)
     # Generate random displacement vector for CM, range [-max_displacement_a, +max_displacement_a]
     random_displacement_vector = (np.random.rand(3) - 0.5) * 2.0 * state.max_displacement_a
 
@@ -3084,7 +3071,7 @@ def propose_move(state: SystemState, current_rp: np.ndarray, current_imolec: Lis
     
     proposed_rp_full_system[start_atom_idx:end_atom_idx, :] += actual_atom_displacement
 
-    # --- Rotation Part (matching Fortran's 'rotac' subroutine with Euler angles) ---
+    # Rotation Part (matching Fortran's 'rotac' subroutine with Euler angles)
     # Generate random Euler angles (alpha, beta, gamma) for Z, Y, X rotations respectively
     alpha_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
     beta_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad  
@@ -3158,7 +3145,7 @@ def propose_conformational_or_rigid_move(state: SystemState) -> bool:
     return conformational_applied
 
 
-# --- Subroutine: trans (Translates molecules randomly) ---
+# Subroutine: trans (Translates molecules randomly)
 def trans(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np.ndarray, ds_val: float, state: SystemState):
     """
     Translates a molecule (imo) randomly.
@@ -3189,7 +3176,7 @@ def trans(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np
             r_coords[inu, i] += s
             rel_coords[inu - state.imolec[imo], i] = r_coords[inu, i] - rcm_coords[imo, i] # Update relative position
 
-# --- Subroutine: rotac (Rotates molecules randomly) ---
+# Subroutine: rotac (Rotates molecules randomly)
 def rotac(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np.ndarray, dphi_val: float, state: SystemState):
     """
     Rotates a molecule (imo) randomly around its center of mass.
@@ -3251,7 +3238,7 @@ def rotac(imo: int, r_coords: np.ndarray, rel_coords: np.ndarray, rcm_coords: np
         for k in range(3):
             r_coords[inu, k] = rel_coords[i_rel, k] + rcm_coords[imo, k] # imo is 0-indexed
 
-# --- Main Subroutine: config_move ---
+# Main Subroutine: config_move
 def config_move(state: SystemState):
     """
     Generates a new configuration by randomly translating and rotating ALL molecules.
@@ -3332,7 +3319,7 @@ def calculate_molecular_volume(mol_def, method='covalent_spheres') -> float:
         # This is an upper bound estimate but computationally simple
         total_volume = 0.0
         for atomic_num, x, y, z in mol_def.atoms_coords:
-            radius = R_ATOM.get(atomic_num, 1.5)  # Default to 1.5 Å for unknown atoms
+            radius = r_atom.get(atomic_num, 1.5)  # Default to 1.5 Å for unknown atoms
             atomic_volume = (4.0/3.0) * np.pi * (radius ** 3)
             total_volume += atomic_volume
         
@@ -3350,7 +3337,7 @@ def calculate_molecular_volume(mol_def, method='covalent_spheres') -> float:
             # Create points on the surface of each atomic sphere
             all_surface_points = []
             for atomic_num, x, y, z in mol_def.atoms_coords:
-                radius = R_ATOM.get(atomic_num, 1.5)
+                radius = r_atom.get(atomic_num, 1.5)
                 center = np.array([x, y, z])
                 
                 # Generate points on sphere surface (using spherical coordinates)
@@ -6942,38 +6929,6 @@ def collect_out_files_with_tracking():
     except Exception:
         return None
 
-
-def revert_sort_changes(original_state, created_files, created_folders):
-    """Revert all changes made during the sort process."""
-    # Remove created files
-    for file_path in created_files:
-        try:
-            if os.path.exists(file_path):
-                os.remove(file_path)
-                print(f"  Removed: {file_path}")
-        except Exception as e:
-            print(f"  Warning: Could not remove {file_path}: {e}")
-    
-    # Move files back to original locations and remove created folders
-    for folder_path in created_folders:
-        try:
-            if os.path.exists(folder_path):
-                # If it's a local folder (created by grouping), move files back
-                if os.path.dirname(folder_path) == os.getcwd():
-                    for item in os.listdir(folder_path):
-                        src = os.path.join(folder_path, item)
-                        dest = os.path.join(os.getcwd(), item)
-                        if os.path.isfile(src):
-                            shutil.move(src, dest)
-                            print(f"  Moved back: {item}")
-                
-                # Remove the folder
-                shutil.rmtree(folder_path)
-                print(f"  Removed folder: {folder_path}")
-        except Exception as e:
-            print(f"  Warning: Could not revert folder {folder_path}: {e}")
-
-
 def parse_gaussian_output(filepath):
     """Parse Gaussian .log output file for energy and time."""
     results = {'input_file': os.path.splitext(os.path.basename(filepath))[0]}
@@ -7104,37 +7059,23 @@ def execute_sort_command(include_summary=True):
         print("ASCEC Sort Process Completed")
         print("=" * 50)
         
-        # Interactive confirmation
-        print("\nPress ENTER to accept the sorting, or type 'r' to revert all changes:")
-        user_input = input().strip().lower()
-        
-        if user_input == 'r':
-            print("\nReverting all changes...")
-            revert_sort_changes(original_state, created_files, created_folders)
-            print("All changes have been reverted successfully.")
-        else:
-            print("Sorting accepted and finalized.")
-            # Suggest similarity analysis if .out files were collected
-            # Check if any similarity folder exists at the parent level
-            parent_dir = os.path.dirname(os.getcwd())
-            similarity_dirs = []
-            for item in os.listdir(parent_dir):
-                if item == "similarity" or item.startswith("similarity_"):
-                    similarity_path = os.path.join(parent_dir, item)
-                    if os.path.isdir(similarity_path):
-                        similarity_dirs.append(item)
+        # Suggest similarity analysis if .out files were collected
+        # Check if any similarity folder exists at the parent level
+        parent_dir = os.path.dirname(os.getcwd())
+        similarity_dirs = []
+        for item in os.listdir(parent_dir):
+            if item == "similarity" or item.startswith("similarity_"):
+                similarity_path = os.path.join(parent_dir, item)
+                if os.path.isdir(similarity_path):
+                    similarity_dirs.append(item)
             
-            if similarity_dirs:
-                print("\nSuggested next step:")
-                print("  python3 ascec-v04.py sim --threshold 0.9")
-                print("  Run similarity analysis on collected output files")
-    
+        if similarity_dirs:
+            print("\nSuggested next step:")
+            print("  python3 ascec-v04.py sim --threshold 0.9")
+            print("  Run similarity analysis on collected output files")
+
     except Exception as e:
         print(f"\nError during sort process: {e}")
-        print("Attempting to revert changes...")
-        revert_sort_changes(original_state, created_files, created_folders)
-        print("Changes reverted due to error.")
-
 
 def execute_similarity_analysis(*args):
     """Execute similarity analysis by calling the similarity script."""
@@ -8116,7 +8057,7 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
                 x, y, z = float(parts[3]), float(parts[4]), float(parts[5])
                 # Convert atomic number to symbol
                 symbol = 'X'
-                for sym, num in ELEMENT_SYMBOLS.items():
+                for sym, num in element_symbols.items():
                     if num == atomic_num:
                         symbol = sym
                         break
@@ -8278,9 +8219,9 @@ def extract_final_geometry(out_file: str, calc_dir: str):
                     # Gaussian format: Center Number, Atomic Number, Atomic Type, X, Y, Z
                     atomic_num = int(parts[1])
                     x, y, z = parts[3], parts[4], parts[5]
-                    # Convert atomic number to symbol (reverse lookup from ELEMENT_SYMBOLS)
+                    # Convert atomic number to symbol (reverse lookup from element_symbols)
                     symbol = 'X'
-                    for sym, num in ELEMENT_SYMBOLS.items():
+                    for sym, num in element_symbols.items():
                         if num == atomic_num:
                             symbol = sym
                             break
@@ -11459,9 +11400,9 @@ def main_ascec_integrated():
     state.use_standard_metropolis = args.standard # Set the flag in state
     
     # Handle --nobox flag to disable box XYZ file creation
-    global CREATE_BOX_XYZ_COPY
+    global create_box_xyz_copy
     if args.nobox:
-        CREATE_BOX_XYZ_COPY = False
+        create_box_xyz_copy = False
 
     # Check for Open Babel executable early
     if not shutil.which("obabel"):
@@ -11499,11 +11440,11 @@ def main_ascec_integrated():
         # Set output directory to the directory containing the input file
         state.output_dir = run_dir
 
-        # --- Call for Box Length Advice (only for simulation mode, not box analysis) ---
+        # Call for Box Length Advice (only for simulation mode, not box analysis)
         provide_box_length_advice(state) # This will print to stderr
 
-        # Set QM program name based on QM_PROGRAM_DETAILS mapping
-        state.qm_program = QM_PROGRAM_DETAILS[state.ia]["name"]
+        # Set QM program name based on qm_program_details mapping
+        state.qm_program = qm_program_details[state.ia]["name"]
         
         # Initialize parallel execution environment optimization
         optimize_qm_execution_environment(state)
@@ -11583,7 +11524,7 @@ def main_ascec_integrated():
                 )
             _print_verbose("Random configuration generation complete.\n", 0, state)
             
-            # --- Add the final output for random mode here ---
+            # Add the final output for random mode here
             with open(out_file_path, 'a') as out_file_handle_local:
                 out_file_handle_local.write("\n") # Explicit blank line before the final summary separator
                 out_file_handle_local.write("=" * 60 + "\n") 
@@ -12012,7 +11953,7 @@ def main_ascec_integrated():
 
         # Handle MOL conversion for XYZ files (which were created by write_accepted_xyz)
         # We need to ensure paths are defined before attempting conversion
-        _print_verbose(f"\n--- Initiating .mol file conversions ---", 1, state)
+        _print_verbose(f"\nInitiating .mol file conversions", 1, state)
 
         # Only attempt mol conversion if obabel was found at startup
         if shutil.which("obabel"):
@@ -12031,7 +11972,7 @@ def main_ascec_integrated():
                 except Exception as e:
                     _print_verbose(f"  Warning: Unexpected error during .mol creation for '{os.path.basename(main_xyz_path)}': {e}", 0, state)
 
-            if CREATE_BOX_XYZ_COPY and os.path.exists(box_xyz_path):
+            if create_box_xyz_copy and os.path.exists(box_xyz_path):
                 _print_verbose(f"  Processing box XYZ file for .mol conversion: '{os.path.basename(box_xyz_path)}'", 1, state)
                 mol_box_filename = os.path.splitext(box_xyz_path)[0] + ".mol"
                 try:
@@ -12063,7 +12004,7 @@ def main_ascec_integrated():
         else:
             _print_verbose(f"  Skipping .mol file conversions because Open Babel was not found in your PATH.", 1, state)
         
-        _print_verbose(f"\n--- .mol file conversions completed ---", 1, state)
+        _print_verbose(f"\n.mol file conversions completed", 1, state)
 
         # Generate annealing diagrams if this was an annealing simulation
         if state.random_generate_config == 1 and tvse_file_path and os.path.exists(tvse_file_path):
@@ -12125,7 +12066,7 @@ def analyze_box_length_from_xyz(xyz_file: str, num_molecules: int = 1) -> None:
             if len(atom) >= 7:  # New format with string and float coordinates
                 symbol, x_str, y_str, z_str, x_float, y_float, z_float = atom
                 # Look up atomic number from symbol
-                atomic_num = ELEMENT_SYMBOLS.get(symbol)
+                atomic_num = element_symbols.get(symbol)
                 
                 if atomic_num is None:
                     print(f"Warning: Unknown element symbol '{symbol}', skipping atom")
