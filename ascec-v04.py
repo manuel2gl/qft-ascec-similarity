@@ -9722,9 +9722,6 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         os.chmod(temp_script, 0o755)
                         
-                        # Track execution time to detect rapid failures
-                        start_time = time.time()
-                        
                         # Run the calculation (no timeout - runs until completion)
                         result = subprocess.run(
                             ['bash', os.path.basename(temp_script)],
@@ -9732,23 +9729,6 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             capture_output=True,
                             text=True
                         )
-                        
-                        execution_time = time.time() - start_time
-                        
-                        # Detect rapid failures (execution < 2 seconds suggests instant crash)
-                        if execution_time < 2.0 and total_attempts > 1:
-                            rapid_failure_count += 1
-                            if rapid_failure_count >= 3:
-                                print(f"\r  Running: {display_name}... ✗ (rapid failures detected)\033[K")
-                                print(f"    Calculation failing instantly ({execution_time:.1f}s). Possible issues:")
-                                print(f"    - Environment variables not set correctly")
-                                print(f"    - QM program not found or not executable")
-                                print(f"    - Severe input file error")
-                                break
-                        else:
-                            rapid_failure_count = 0
-                        
-                        last_attempt_time = execution_time
                         
                         # Cleanup after run
                         # Remove temp script
