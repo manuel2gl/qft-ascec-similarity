@@ -4,7 +4,13 @@ import argparse
 import os
 import numpy as np
 # matplotlib import moved to functions that use it for faster startup
-# cclib import moved to functions that use it for faster startup
+# cclib imported at top level for multiprocessing compatibility
+try:
+    from cclib.io import ccread
+    CCLIB_AVAILABLE = True
+except ImportError:
+    CCLIB_AVAILABLE = False
+    ccread = None
 # sklearn and scipy imports moved to functions that use them for faster startup
 import glob
 import re
@@ -501,7 +507,9 @@ def extract_properties_from_logfile(logfile_path):
     Returns:
         dict: Extracted properties, or None if parsing fails
     """
-    from cclib.io import ccread
+    if not CCLIB_AVAILABLE:
+        print(f"  ERROR: cclib is not installed. Please install it with: pip install cclib")
+        return None
     
     data = None
 
@@ -2237,6 +2245,10 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # For normal mode, output directly to the working directory (no subfolder)
         os.makedirs(output_base_dir, exist_ok=True) # Ensure this base directory exists
         print(f"  All outputs will be placed in the current working directory")
+    
+    # Provide early feedback before expensive operations
+    if not is_compare_mode:
+        print_step("Initializing data extraction...")
 
     # Define a generic cache file path
     cache_file_name = "data_cache.pkl" # Shortened cache file name
@@ -2286,33 +2298,43 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     # Unknown format
                     raise ValueError("Unknown cache format")
                 
-                current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
-                retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
-                
-                # Files that were processed (either successfully or skipped)
-                processed_files = {d['filename'] for d in successful_data} | skipped_files
-                unprocessed_files = current_files_in_folder - processed_files
-                
-                vprint(f"  Cache contains {len(successful_data)} successful entries and {len(skipped_files)} skipped files")
-                vprint(f"  Current folder has {len(current_files_in_folder)} files")
-                vprint(f"  Unprocessed files: {len(unprocessed_files)}")
-                
-                if len(unprocessed_files) == 0:
-                    # All files have been processed before
-                    all_extracted_data = retained_cached_data
-                    vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
-                    print_step("Using cached data")
-                else:
-                    # Some files haven't been processed yet
-                    if len(retained_cached_data) > 0:
-                        vprint(f"  Cache partial: {len(unprocessed_files)} files need processing")
-                        all_extracted_data = retained_cached_data.copy()
+                # Only scan filesystem if cache has data (lightweight check first)
+                if len(successful_data) > 0:
+                    # Defer expensive glob until we know cache exists and has data
+                    current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
+                    retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
+                    
+                    # Files that were processed (either successfully or skipped)
+                    processed_files = {d['filename'] for d in successful_data} | skipped_files
+                    unprocessed_files = current_files_in_folder - processed_files
+                    
+                    vprint(f"  Cache contains {len(successful_data)} successful entries and {len(skipped_files)} skipped files")
+                    vprint(f"  Current folder has {len(current_files_in_folder)} files")
+                    vprint(f"  Unprocessed files: {len(unprocessed_files)}")
+                    
+                    if len(unprocessed_files) == 0:
+                        # All files have been processed before
+                        all_extracted_data = retained_cached_data
+                        vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
+                        print_step("Using cached data")
                     else:
-                        vprint("Cache data incomplete or outdated. Re-extracting all files.")
-                        all_extracted_data = []
-                        skipped_files = set()
-                        if os.path.exists(cache_file_path):
-                            os.remove(cache_file_path)
+                        # Some files haven't been processed yet
+                        if len(retained_cached_data) > 0:
+                            vprint(f"  Cache partial: {len(unprocessed_files)} files need processing")
+                            all_extracted_data = retained_cached_data.copy()
+                        else:
+                            vprint("Cache data incomplete or outdated. Re-extracting all files.")
+                            all_extracted_data = []
+                            skipped_files = set()
+                            if os.path.exists(cache_file_path):
+                                os.remove(cache_file_path)
+                else:
+                    # Cache is empty, invalidate it
+                    vprint("Cache is empty. Re-extracting all files.")
+                    all_extracted_data = []
+                    skipped_files = set()
+                    if os.path.exists(cache_file_path):
+                        os.remove(cache_file_path)
 
             except Exception as e:
                 vprint(f"Error loading data from cache: {e}. Re-extracting all files.")
