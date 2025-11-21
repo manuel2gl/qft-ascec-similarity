@@ -9806,8 +9806,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             if os.path.exists(xyz_file):
                                 os.remove(xyz_file)
                         
-                        # Update display
-                        print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
+                        # Update display (only show status for retries, not first attempt)
+                        if attempt_counter > 1:
+                            print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
                         
                         # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
                         
@@ -9866,7 +9867,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 
                                 if normal_term:
                                     # SUCCESS!
-                                    print(f"\r  Running: {display_name}... ✓ (Success at attempt {attempt_counter})\033[K")
+                                    if attempt_counter > 1:
+                                        print(f"\r  Running: {display_name}... ✓ (Attempt {attempt_counter})\033[K")
+                                    else:
+                                        print(f"\r  Running: {display_name}... ✓\033[K")
                                     num_completed += 1
                                     success = True
                                     
@@ -10562,8 +10566,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     if os.path.exists(xyz_file):
                         os.remove(xyz_file)
                 
-                # Update display
-                print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
+                # Update display (only show status for retries, not first attempt)
+                if attempt_counter > 1:
+                    print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
                 
                 # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
                 
@@ -10622,7 +10627,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         
                         if normal_term:
                             # SUCCESS!
-                            print(f"\r  Running: {display_name}... ✓ (Success at attempt {attempt_counter})\033[K")
+                            if attempt_counter > 1:
+                                print(f"\r  Running: {display_name}... ✓ (Attempt {attempt_counter})\033[K")
+                            else:
+                                print(f"\r  Running: {display_name}... ✓\033[K")
                             num_completed += 1
                             success = True
                             
