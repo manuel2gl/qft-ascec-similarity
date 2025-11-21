@@ -3477,7 +3477,7 @@ if __name__ == "__main__":
             print("\nOnly .out files found in the selected folder(s). Processing .out files.")
         else:
             print("\nNo .log or .out files found in the selected folder(s) that match available types. Exiting.")
-            exit(0)
+1            exit(0)
 
         print(f"\nProcessing {len(selected_folders)} folder(s) for files matching '{file_extension_pattern}'...")
         for folder_path in selected_folders:
