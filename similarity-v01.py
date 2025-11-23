@@ -2278,70 +2278,148 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             elif not success:
                 skipped_files.add(filename)
     else:
-        # Existing cache logic for normal mode
-        if os.path.exists(cache_file_path) and not force_reprocess_cache:
-            print(f"Attempting to load data from cache: '{os.path.basename(cache_file_path)}'")
-            try:
-                with open(cache_file_path, 'rb') as f:
-                    cached_data = pickle.load(f)
+
+        # INCREMENTAL CACHE UPDATE MODE (for redo)
+        update_cache_file = None
+        if len(sys.argv) > 1:  # Check if there are arguments
+            for i, arg in enumerate(sys.argv):
+                if arg == '--update-cache' and i + 1 < len(sys.argv):
+                    update_cache_file = sys.argv[i + 1]
+                    break
+        
+        if update_cache_file and os.path.exists(update_cache_file):
+            # Read list of files to update
+            with open(update_cache_file, 'r') as f:
+                basenames_to_update = {line.strip() for line in f if line.strip()}
+            
+            # Determine file extension (check if .out or .log exists for first basename)
+            file_ext = None
+            if basenames_to_update:
+                first_basename = next(iter(basenames_to_update))
+                if os.path.exists(os.path.join(str(input_source), first_basename + '.out')):
+                    file_ext = '.out'
+                elif os.path.exists(os.path.join(str(input_source), first_basename + '.log')):
+                    file_ext = '.log'
+            
+            if file_ext:
+                print(f"  Incremental cache update: {len(basenames_to_update)} file(s)")
                 
-                # Handle both old format (list) and new format (dict with 'successful' and 'skipped')
-                if isinstance(cached_data, list):
-                    # Old format - assume all were successful, no skipped info
-                    successful_data = cached_data
-                    skipped_files = set()
-                elif isinstance(cached_data, dict) and 'successful' in cached_data:
-                    # New format with skipped file tracking
-                    successful_data = cached_data['successful']
-                    skipped_files = set(cached_data.get('skipped', []))
-                else:
-                    # Unknown format
-                    raise ValueError("Unknown cache format")
-                
-                # Only scan filesystem if cache has data (lightweight check first)
-                if len(successful_data) > 0:
-                    # Defer expensive glob until we know cache exists and has data
-                    current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
-                    retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
-                    
-                    # Files that were processed (either successfully or skipped)
-                    processed_files = {d['filename'] for d in successful_data} | skipped_files
-                    unprocessed_files = current_files_in_folder - processed_files
-                    
-                    vprint(f"  Cache contains {len(successful_data)} successful entries and {len(skipped_files)} skipped files")
-                    vprint(f"  Current folder has {len(current_files_in_folder)} files")
-                    vprint(f"  Unprocessed files: {len(unprocessed_files)}")
-                    
-                    if len(unprocessed_files) == 0:
-                        # All files have been processed before
-                        all_extracted_data = retained_cached_data
-                        vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
-                        print_step("Using cached data")
+                # Load existing cache
+                cache_exists = os.path.exists(cache_file_path)
+                if cache_exists:
+                    with open(cache_file_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    if isinstance(cached_data, list):
+                        successful_data = cached_data
+                        skipped_files = set()
                     else:
-                        # Some files haven't been processed yet
-                        if len(retained_cached_data) > 0:
-                            vprint(f"  Cache partial: {len(unprocessed_files)} files need processing")
-                            all_extracted_data = retained_cached_data.copy()
-                        else:
-                            vprint("Cache data incomplete or outdated. Re-extracting all files.")
-                            all_extracted_data = []
-                            skipped_files = set()
-                            if os.path.exists(cache_file_path):
-                                os.remove(cache_file_path)
+                        successful_data = cached_data.get('successful', [])
+                        skipped_files = set(cached_data.get('skipped', []))
                 else:
-                    # Cache is empty, invalidate it
-                    vprint("Cache is empty. Re-extracting all files.")
+                    successful_data = []
+                    skipped_files = set()
+                
+                # Remove old data for files being updated
+                filenames_to_update = {b + file_ext for b in basenames_to_update}
+                successful_data = [d for d in successful_data if d['filename'] not in filenames_to_update]
+                skipped_files = skipped_files - filenames_to_update
+                
+                # Reprocess only the specified files
+                files_to_reprocess = [os.path.join(str(input_source), f) for f in filenames_to_update 
+                                     if os.path.exists(os.path.join(str(input_source), f))]
+                
+                print(f"    Reprocessing {len(files_to_reprocess)} file(s)...")
+                effective_cores = min(num_cores, len(files_to_reprocess)) if len(files_to_reprocess) > 0 else 1
+                
+                with mp.Pool(processes=effective_cores) as pool:
+                    results = pool.map(process_file_parallel_wrapper, sorted(files_to_reprocess))
+                
+                # Update with new data
+                for success, extracted_props, filename in results:
+                    if success and extracted_props:
+                        successful_data.append(extracted_props)
+                    elif not success:
+                        skipped_files.add(filename)
+                
+                # Save updated cache
+                cache_data_to_save = {
+                    'successful': successful_data,
+                    'skipped': list(skipped_files)
+                }
+                with open(cache_file_path, 'wb') as f:
+                    pickle.dump(cache_data_to_save, f, protocol=pickle.HIGHEST_PROTOCOL)
+                
+                all_extracted_data = successful_data
+                print(f"    Cache updated with {len(results)} file(s)")
+            else:
+                print(f"  Warning: Could not determine file extension for incremental update")
+                force_reprocess_cache = True  # Fallback to full reprocess
+        
+        # Existing cache logic for normal mode (skip if incremental update was done)
+        if not (update_cache_file and os.path.exists(update_cache_file) and all_extracted_data):
+            if os.path.exists(cache_file_path) and not force_reprocess_cache:
+                print(f"Attempting to load data from cache: '{os.path.basename(cache_file_path)}'")
+                try:
+                    with open(cache_file_path, 'rb') as f:
+                        cached_data = pickle.load(f)
+                    
+                    # Handle both old format (list) and new format (dict with 'successful' and 'skipped')
+                    if isinstance(cached_data, list):
+                        # Old format - assume all were successful, no skipped info
+                        successful_data = cached_data
+                        skipped_files = set()
+                    elif isinstance(cached_data, dict) and 'successful' in cached_data:
+                        # New format with skipped file tracking
+                        successful_data = cached_data['successful']
+                        skipped_files = set(cached_data.get('skipped', []))
+                    else:
+                        # Unknown format
+                        raise ValueError("Unknown cache format")
+                    
+                    # Only scan filesystem if cache has data (lightweight check first)
+                    if len(successful_data) > 0:
+                        # Defer expensive glob until we know cache exists and has data
+                        current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
+                        retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
+                        
+                        # Files that were processed (either successfully or skipped)
+                        processed_files = {d['filename'] for d in successful_data} | skipped_files
+                        unprocessed_files = current_files_in_folder - processed_files
+                        
+                        vprint(f"  Cache contains {len(successful_data)} successful entries and {len(skipped_files)} skipped files")
+                        vprint(f"  Current folder has {len(current_files_in_folder)} files")
+                        vprint(f"  Unprocessed files: {len(unprocessed_files)}")
+                        
+                        if len(unprocessed_files) == 0:
+                            # All files have been processed before
+                            all_extracted_data = retained_cached_data
+                            vprint(f"Data loaded from cache successfully. ({len(all_extracted_data)} entries)")
+                            print_step("Using cached data")
+                        else:
+                            # Some files haven't been processed yet
+                            if len(retained_cached_data) > 0:
+                                vprint(f"  Cache partial: {len(unprocessed_files)} files need processing")
+                                all_extracted_data = retained_cached_data.copy()
+                            else:
+                                vprint("Cache data incomplete or outdated. Re-extracting all files.")
+                                all_extracted_data = []
+                                skipped_files = set()
+                                if os.path.exists(cache_file_path):
+                                    os.remove(cache_file_path)
+                    else:
+                        # Cache is empty, invalidate it
+                        vprint("Cache is empty. Re-extracting all files.")
+                        all_extracted_data = []
+                        skipped_files = set()
+                        if os.path.exists(cache_file_path):
+                            os.remove(cache_file_path)
+
+                except Exception as e:
+                    vprint(f"Error loading data from cache: {e}. Re-extracting all files.")
                     all_extracted_data = []
                     skipped_files = set()
                     if os.path.exists(cache_file_path):
                         os.remove(cache_file_path)
-
-            except Exception as e:
-                vprint(f"Error loading data from cache: {e}. Re-extracting all files.")
-                all_extracted_data = []
-                skipped_files = set()
-                if os.path.exists(cache_file_path):
-                    os.remove(cache_file_path)
         else:
             # No cache file exists
             all_extracted_data = []
@@ -3314,6 +3392,8 @@ if __name__ == "__main__":
                         help="Temperature in Kelvin for Boltzmann population analysis. Default: 298.15 K")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Enable verbose output showing detailed information for each step.")
+    parser.add_argument("--update-cache", type=str, default=None,
+                        help="File containing list of basenames to update in cache (for incremental redo). One basename per line.")
 
 
     # Preprocess arguments to handle -j8 format

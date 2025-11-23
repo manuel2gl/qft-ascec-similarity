@@ -8653,16 +8653,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if attempt > 1:
                             print(f"\nRedo attempt {attempt}/{max_redos}")
                         
-                        # Run calculation
+                        # If this is a redo attempt, remove old similarity/ folder BEFORE calculation/sort
+                        if attempt > 1 and os.path.exists("similarity"):
+                            print("\nRemoving old similarity/ folder...")
+                            shutil.rmtree("similarity")
+                        
+                        # Run calculation (which includes sort step that creates similarity/)
                         result = execute_calculation_stage(context, stage)
                         if result != 0:
                             print(f"\nError: Calculation failed with code {result}")
                             return result
-                        
-                        # If this is a redo attempt, remove old similarity/ folder before sort/similarity
-                        if attempt > 1 and os.path.exists("similarity"):
-                            print("\nRemoving old similarity/ folder...")
-                            shutil.rmtree("similarity")
                         
                         # Run similarity (suppress stage header in retry mode)
                         if attempt == 1:
@@ -8861,6 +8861,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                     processed_basenames.append(basename)
                                             
                                             print(f"  Updated {processed_count} input file(s) with new geometries")
+                                            
+                                            # Store recalculated basenames in context for similarity cache update
+                                            context.recalculated_files = processed_basenames
 
                                             # Step 5: Delete .out files only for structures that we actually prepared
                                             print(f"  Removing output files for structures needing recalculation")
@@ -9625,6 +9628,11 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             # Count only non-excluded files for accurate total
             num_inputs = sum(1 for f in input_files if not match_exclusion(f, excluded_numbers))
             
+            # Filter completed_calcs to only include files that have matching input files
+            # This prevents showing 491/490 if there's an orphaned output file
+            input_basenames = {os.path.splitext(os.path.basename(f))[0] for f in input_files if not match_exclusion(f, excluded_numbers)}
+            completed_calcs = [f for f in completed_calcs if os.path.splitext(os.path.basename(f))[0] in input_basenames]
+            
             if completed_calcs:
                 print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
             
@@ -9640,8 +9648,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 # Make script executable (for manual use later)
                 os.chmod(launcher_script, 0o755)
                 
-                # Run calculations one by one, checking for normal termination
-                num_completed = len(completed_calcs)
+                # Track completions: resumed count + newly completed
+                num_completed = 0  # Track only newly completed in this run
                 num_failed = 0
                 failed_calculations = []  # Track failed input files
                 # Get max attempts from context (set by --attempt flag, default 5)
@@ -9912,12 +9920,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             shutil.copy(backup_input, input_path)
                             os.remove(backup_input)
                         
-                        # Continue to next calculation (DO NOT break)
                 
-                print(f"\nCalculation results: {num_completed}/{num_inputs} completed successfully")
+                # Print results using total completed (resumed + new)
+                total_completed = len(completed_calcs) + num_completed
+                print(f"\nCalculation results: {total_completed}/{num_inputs} completed successfully")
                 
-                # Store for protocol summary
-                context.calc_completed = num_completed
+                # Store for protocol summary (use total)
+                context.calc_completed = total_completed
                 context.calc_total = num_inputs
                 
                 # Handle failed calculations
@@ -9961,11 +9970,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     os.chmod(failed_launcher, 0o755)
                     print(f"Manual retry launcher written to: {failed_launcher}")
                 
-                if num_completed == 0:
+                # Use total_completed for status checks (includes resumed + new)
+                if total_completed == 0:
                     print("Error: No calculations completed successfully")
                     return 1
-                elif num_completed < num_inputs:
-                    print(f"Status: {num_completed}/{num_inputs} calculations completed")
+                elif total_completed < num_inputs:
+                    print(f"Status: {total_completed}/{num_inputs} calculations completed")
                     # Continue - don't stop workflow, similarity will handle quality control
                 else:
                     print("All calculations completed successfully")
@@ -10107,14 +10117,37 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     # Build command - pass '1' via stdin to auto-select the first folder
     cmd = ['python3', similarity_script] + other_args
     
+    # If this is a redo and we have a list of recalculated files, pass them for incremental update
+    if hasattr(context, 'recalculated_files') and context.recalculated_files:
+        # Create temp file with list of files to update
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+            update_list_file = f.name
+            for basename in context.recalculated_files:
+                f.write(f"{basename}\n")
+        cmd.extend(['--update-cache', update_list_file])
+        print(f"  Incremental cache update: {len(context.recalculated_files)} file(s)")
+    
     print(f"Command: {' '.join(cmd)}\n")
     print(f"Working directory: {similarity_base}\n")
     
     try:
         # Auto-select folder 1 by providing '1\n' as stdin
-        # Capture output to filter folder selection prompts
-        result = subprocess.run(cmd, input='1\n', check=True, capture_output=True, 
-                              text=True, cwd=similarity_base)
+        # Use Popen + communicate() to avoid hanging on large outputs
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, 
+                               stderr=subprocess.PIPE, text=True, cwd=similarity_base)
+        stdout, stderr = proc.communicate(input='1\n')
+        
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, stderr)
+        
+        # Create result object compatible with subprocess.run
+        class Result:
+            def __init__(self, returncode, stdout, stderr):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+        result = Result(proc.returncode, stdout, stderr)
         
         # Filter output to skip folder selection prompts
         skip_lines = [
@@ -10173,12 +10206,27 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         # Store similarity directory for context
         context.similarity_dir = similarity_base
         
+        # Cleanup temp file if created
+        if hasattr(context, 'recalculated_files') and context.recalculated_files:
+            try:
+                os.remove(update_list_file)
+                # Clear the list after use
+                context.recalculated_files = None
+            except:
+                pass
+        
         return 0
         
     except subprocess.CalledProcessError as e:
         print(f"Error: Similarity analysis failed with code {e.returncode}")
         if e.stderr:
-            print(e.stderr)
+            print(f"Error output: {e.stderr}")
+        # Cleanup temp file if it exists
+        if hasattr(context, 'recalculated_files') and context.recalculated_files:
+            try:
+                os.remove(update_list_file)
+            except:
+                pass
         return e.returncode
     except Exception as e:
         print(f"Error running similarity analysis: {e}")
