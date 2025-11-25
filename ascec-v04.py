@@ -10115,7 +10115,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     print(f"Using similarity script: {similarity_script}")
     
     # Build command - pass '1' via stdin to auto-select the first folder
-    cmd = ['python3', similarity_script] + other_args
+    cmd = ['python', similarity_script] + other_args
     
     # If this is a redo and we have a list of recalculated files, pass them for incremental update
     if hasattr(context, 'recalculated_files') and context.recalculated_files:
