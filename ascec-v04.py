@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 import argparse
 import dataclasses
@@ -896,21 +896,31 @@ def get_molecular_formula(mol_def) -> str:
     
     # Count atoms by element
     element_counts = {}
-    for atomic_num, x, y, z in mol_def.atoms_coords:
+    for atom_data in mol_def.atoms_coords:
+        # Handle both 4-field and 5+ field formats (atomic_num, x, y, z, [extra...])
+        # mol_def.atoms_coords is already parsed, so we just need the atomic_num
+        if len(atom_data) >= 1:
+            atomic_num = atom_data[0]
+        else:
+            continue  # Skip malformed entries
         element = get_element_symbol(atomic_num)
         element_counts[element] = element_counts.get(element, 0) + 1
     
-    # Sort elements: C, H, then alphabetically
+    # Sort elements: C, H, then by electronegativity
     sorted_elements = []
     if 'C' in element_counts:
         sorted_elements.append('C')
     if 'H' in element_counts:
         sorted_elements.append('H')
     
-    # Add remaining elements alphabetically
-    for element in sorted(element_counts.keys()):
-        if element not in ['C', 'H']:
-            sorted_elements.append(element)
+    # Get remaining elements
+    remaining_elements = [e for e in element_counts.keys() if e not in ['C', 'H']]
+    
+    # Sort remaining elements by electronegativity (ascending)
+    # Elements not in the dictionary get a high value to be at the end
+    remaining_elements.sort(key=lambda e: electronegativity_values.get(e, 1000.0))
+    
+    sorted_elements.extend(remaining_elements)
     
     # Build formula string
     formula = ""
@@ -3822,7 +3832,7 @@ def create_launcher_script(replicated_files: List[str], input_dir: str, script_n
                 if i > 0:
                     commands.append('echo "=================================================================="')
                 
-                commands.append(f"python3 {ascec_script_path} {rel_path} > {output_name}")
+                commands.append(f"python {ascec_script_path} {rel_path} > {output_name}")
             
             # Join commands with " && \\\n" for sequential execution
             f.write(" && \\\n".join(commands))
@@ -3881,7 +3891,7 @@ def merge_launcher_scripts(working_dir: str = ".") -> str:
             commands = []
             for line in lines:
                 line = line.strip()
-                if line and not line.startswith('#') and 'python3 ascec-v04.py' in line:
+                if line and not line.startswith('#') and 'python ascec-v04.py' in line:
                     # Remove trailing " && \\" if present
                     line = line.rstrip(' \\&')
                     commands.append(line)
@@ -4826,27 +4836,29 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
             return []
 
 
-def extract_qm_executable_from_launcher(launcher_content: str, qm_program: str) -> str:
+def extract_qm_executable_from_launcher(launcher_content: str, qm_program_idx: int) -> str:
     """
     Extract the QM executable path from the launcher template.
     
     Args:
         launcher_content (str): Content of the launcher template
-        qm_program (str): QM program name ('orca' or 'gaussian')
+        qm_program_idx (int): QM program index (1: Gaussian, 2: ORCA)
     
     Returns:
         str: The executable path or command to use
     """
+    qm_name = qm_program_details.get(qm_program_idx, {}).get('name', 'unknown')
+    
     if not launcher_content:
         # Fallback to bare commands if no launcher content provided
-        if qm_program == 'orca':
+        if qm_name == 'orca':
             return "orca"
         else:  # gaussian
             return "g16"
     
     lines = launcher_content.split('\n')
     
-    if qm_program == 'orca':
+    if qm_name == 'orca':
         # Look for ORCA root definitions - enhanced patterns to catch custom variable names
         orca_root_patterns = [
             r'export\s+(ORCA\d*_ROOT)\s*=\s*(.+)',  # ORCA5_ROOT, ORCA66_ROOT, etc.
@@ -4930,37 +4942,48 @@ def extract_qm_executable_from_launcher(launcher_content: str, qm_program: str) 
         return "g16"
 
 
-def create_simple_calculation_system(template_file: str, launcher_template: Optional[str] = None, auto_select: Optional[str] = None, workflow_mode: bool = False) -> str:
+def calculate_input_files(template_file: str, launcher_template: Optional[str] = None, auto_select: Optional[str] = None, workflow_mode: bool = False, stage_type: str = "calculation") -> str:
     """
-    Creates a calculation system by looking for result_*.xyz, combined_results.xyz, or combined_r*.xyz files
-    and generating QM input files with optional launcher scripts.
+    Generic function to create input files and launcher for calculation or optimization stages.
     
     Args:
         template_file (str): Template input file (e.g., example_input.inp)
         launcher_template (str, optional): Template launcher file (e.g., launcher_orca.sh)
         auto_select (Optional[str]): Auto-selection mode:
-            - 'all': Process all result_*.xyz files (excludes combined files)
-            - 'combined': Combine all result_*.xyz files into combined_r{N}.xyz, then process that
-            - None: Interactive prompt for user selection
+            - 'all': Process all available files
+            - 'combined': Combine files (calculation stage only)
+            - None: Interactive prompt
+        workflow_mode (bool): If True, suppress some interactive output
+        stage_type (str): "calculation" or "optimization"
     
     Returns:
         str: Status message
     """
     # Determine QM program from template file extension
-    if template_file.endswith('.inp'):
+    qm_program_idx = 0
+    template_file = template_file.strip()
+    template_lower = template_file.lower()
+    
+    if template_lower.endswith('.inp'):
         qm_program = 'orca'
+        qm_program_idx = 2
         input_ext = '.inp'
         output_ext = '.out'
-    elif template_file.endswith('.com'):
+    elif template_lower.endswith('.com'):
         qm_program = 'gaussian'
+        qm_program_idx = 1
         input_ext = '.com'
         output_ext = '.log'
-    elif template_file.endswith('.gjf'):
+    elif template_lower.endswith('.gjf'):
         qm_program = 'gaussian'
+        qm_program_idx = 1
         input_ext = '.gjf'
         output_ext = '.log'
     else:
-        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
+        return f"Error: Unsupported template file extension '{template_file}'. Use .inp for ORCA or .com/.gjf for Gaussian."
+    
+    if workflow_mode:
+        print(f"  Template: {template_file} -> QM Program: {qm_program} (idx: {qm_program_idx})")
     
     # Check if template files exist
     if not os.path.exists(template_file):
@@ -4985,133 +5008,136 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
         except IOError as e:
             return f"Error reading launcher template '{launcher_template}': {e}"
     
-    # Create calculation directory with incremental numbering
-    def get_next_calc_dir():
-        """Find the next available calculation directory (calculation, calculation_2, etc.)"""
-        base_name = "calculation"
-        if not os.path.exists(base_name):
-            return base_name
-        
+    # Create directory with incremental numbering
+    base_name = "calculation" if stage_type == "calculation" else "optimization"
+    
+    def get_next_dir(base):
+        if not os.path.exists(base):
+            return base
         counter = 2
         while True:
-            calc_dir_name = f"{base_name}_{counter}"
-            if not os.path.exists(calc_dir_name):
-                return calc_dir_name
+            dir_name = f"{base}_{counter}"
+            if not os.path.exists(dir_name):
+                return dir_name
             counter += 1
     
-    calc_dir = get_next_calc_dir()
-    # DON'T create directory yet - wait until after file selection
+    output_dir = get_next_dir(base_name)
     
-    # Look for XYZ files: result_*.xyz AND combined_results.xyz AND combined_r*.xyz
+    # File Search Logic
     xyz_files = []
-    
-    # FIRST: Check for retry_input folder (structures from need_recalculation)
-    if os.path.exists("retry_input"):
-        print("Found retry_input folder, using structures from previous similarity analysis")
-        for file in os.listdir("retry_input"):
-            # Skip combined files - only process individual structures
-            if file.endswith(".xyz") and not file.startswith("combined"):
-                xyz_files.append(os.path.join("retry_input", file))
-    else:
-        # Normal flow: Check for combined files in current directory
+    if stage_type == "calculation":
+        # FIRST: Check for retry_input folder (structures from need_recalculation)
+        # FIRST: Check for retry_input folder (structures from need_recalculation)
+        retry_path = os.path.join("similarity", "skipped_structures", "need_recalculation")
+        if os.path.exists(retry_path):
+            print(f"Found retry path {retry_path}, using structures from previous similarity analysis")
+            for file in os.listdir(retry_path):
+                if file.endswith(".xyz") and not file.startswith("combined"):
+                    xyz_files.append(os.path.join(retry_path, file))
+        elif os.path.exists("retry_input"): # Fallback to old path just in case
+            print("Found retry_input folder, using structures from previous similarity analysis")
+            for file in os.listdir("retry_input"):
+                if file.endswith(".xyz") and not file.startswith("combined"):
+                    xyz_files.append(os.path.join("retry_input", file))
+        else:
+            # Normal flow: Check for combined files in current directory
+            for file in os.listdir("."):
+                if (file.startswith("combined_results") or file.startswith("combined_r")) and file.endswith(".xyz"):
+                    xyz_files.append(file)
+            
+            # Look for result_*.xyz files recursively in subdirectories
+            for root, dirs, files in os.walk("."):
+                for file in files:
+                    if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
+                        xyz_files.append(os.path.join(root, file))
+                        
+        if not xyz_files:
+            return "No result_*.xyz, combined_results.xyz, or combined_r*.xyz files found."
+            
+        # Sort XYZ files by annealing number
+        def get_annealing_number(file_path):
+            import re
+            directory = os.path.dirname(file_path)
+            match = re.search(r'_(\d+)$', directory)
+            if match: return int(match.group(1))
+            match = re.search(r'result_(\d+)', os.path.basename(file_path))
+            if match: return int(match.group(1))
+            return float('inf')
+        xyz_files.sort(key=get_annealing_number)
+        
+    elif stage_type == "optimization":
+        # Check for combined files
         for file in os.listdir("."):
-            if (file.startswith("combined_results") or file.startswith("combined_r")) and file.endswith(".xyz"):
+            if file.endswith(".xyz") and "combined" in file.lower():
                 xyz_files.append(file)
         
-        # Look for result_*.xyz files recursively in subdirectories
+        # Look for motif_*.xyz files
         for root, dirs, files in os.walk("."):
             for file in files:
-                if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
+                if (file.startswith("motif_") and file.endswith(".xyz")) or \
+                   (file.endswith(".xyz") and "combined" in file.lower() and root != "."):
                     xyz_files.append(os.path.join(root, file))
-    
-    if not xyz_files:
-        return "No result_*.xyz, combined_results.xyz, or combined_r*.xyz files found in the current directory or subdirectories."
-    
-    # Sort XYZ files by annealing number (extracted from directory name)
-    def get_annealing_number(file_path):
-        """Extract annealing number from file path like './some_name_2/result_*.xyz'"""
-        import re
-        # Look for pattern like 'name_N' in the directory path
-        directory = os.path.dirname(file_path)
-        match = re.search(r'_(\d+)$', directory)
-        if match:
-            return int(match.group(1))
-        # If no _N pattern found in directory, try to extract from filename
-        match = re.search(r'result_(\d+)', os.path.basename(file_path))
-        if match:
-            return int(match.group(1))
-        return float('inf')  # Put unmatched files at the end
-    
-    xyz_files.sort(key=get_annealing_number)
-    
-    print(f"Found {len(xyz_files)} XYZ file(s) to process:")
-    for xyz_file in xyz_files:
-        print(f"  - {xyz_file}")
-    
-    # Store first XYZ source for protocol summary (will be updated if combined)
-    # Default to "Annealing" if context not available or files come from annealing
-    if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:  # type: ignore[attr-defined]
-        if xyz_files:
-            # If files come from annealing (result_*.xyz or resultbox_*.xyz), set as "Annealing"
-            first_file = xyz_files[0]
-            if 'result' in first_file or 'annealing' in first_file.lower():
-                sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
+                    
+        if not xyz_files:
+            return "No files with 'combined' in name or motif_*.xyz files found."
+            
+    # File Selection Logic
+    if stage_type == "calculation":
+        print(f"Found {len(xyz_files)} XYZ file(s) to process:")
+        for xyz_file in xyz_files:
+            print(f"  - {xyz_file}")
+            
+        # Store first XYZ source for protocol summary
+        if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:
+            if xyz_files:
+                first_file = xyz_files[0]
+                if 'result' in first_file or 'annealing' in first_file.lower():
+                    sys._current_workflow_context.calc_xyz_source = "Annealing"
+                else:
+                    sys._current_workflow_context.calc_xyz_source = first_file
             else:
-                sys._current_workflow_context.calc_xyz_source = first_file  # type: ignore[attr-defined]
-        else:
-            sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
-    
-    # If auto-combining, create directory first (needed for combined file)
-    if auto_select == 'combined':
-        os.makedirs(calc_dir, exist_ok=True)
-    
-    # Let user choose which files to process (or use auto_select)
-    selected_xyz_files = interactive_xyz_file_selection(xyz_files, calc_dir, auto_select=auto_select)
+                sys._current_workflow_context.calc_xyz_source = "Annealing"
+                
+        if auto_select == 'combined':
+            os.makedirs(output_dir, exist_ok=True)
+            
+        selected_xyz_files = interactive_xyz_file_selection(xyz_files, output_dir, auto_select=auto_select)
+        
+    elif stage_type == "optimization":
+        selected_xyz_files = interactive_optimization_file_selection(xyz_files, output_dir)
+        
     if not selected_xyz_files:
         return "No XYZ files selected for processing."
     xyz_files = selected_xyz_files
     
-    # Update XYZ source after selection (in case files were combined or selection changed)
-    if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:  # type: ignore[attr-defined]
-        if xyz_files:
-            # If files come from annealing or were combined, set as "Annealing"
-            first_file = xyz_files[0]
-            if 'result' in first_file or 'annealing' in first_file.lower() or 'combined' in first_file:
-                sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
-            else:
-                sys._current_workflow_context.calc_xyz_source = first_file  # type: ignore[attr-defined]
-        else:
-            sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
-    
-    # NOW create the calculation directory after user confirms selection (if not already created)
-    if not os.path.exists(calc_dir):
-        os.makedirs(calc_dir, exist_ok=True)
-        print(f"Created calculation directory: {calc_dir}")
-    
-    # Process each XYZ file in parallel
+    # Create directory
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Created {stage_type} directory: {output_dir}")
+        
+    # Process files in parallel
     all_input_files = []
-    
-    # Prepare data for parallel processing
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor, as_completed
     
-    # Determine naming mode based on auto_select flag
     total_xyz_files = len(xyz_files)
     use_combined_naming = (auto_select == 'combined')
     
-    # Prepare arguments for each file
-    xyz_file_args = [(xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
-                     for xyz_file in xyz_files]
-    
-    # Use parallel processing with limited workers
+    # Prepare arguments
+    if stage_type == "calculation":
+        xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
+                         for xyz_file in xyz_files]
+        process_func = _process_xyz_file_for_calc
+    else: # optimization
+        xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext) 
+                         for xyz_file in xyz_files]
+        process_func = _process_xyz_file_for_opt
+        
     max_workers = get_optimal_workers('mixed', len(xyz_files))
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_file = {executor.submit(_process_xyz_file_for_calc, args): args[0] 
-                         for args in xyz_file_args}
+        future_to_file = {executor.submit(process_func, args): args[0] for args in xyz_file_args}
         
-        # Collect results as they complete
         for future in as_completed(future_to_file):
             xyz_file = future_to_file[future]
             try:
@@ -5124,131 +5150,353 @@ def create_simple_calculation_system(template_file: str, launcher_template: Opti
             except Exception as e:
                 if not workflow_mode:
                     print(f"  Error processing {xyz_file}: {e}")
-    
+                    
     print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
-    
-    # Create launcher script only if template is provided
-    if launcher_template and launcher_content:
-        launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
         
+    # Create launcher script
+    if launcher_template and launcher_content:
+        launcher_path = os.path.join(output_dir, f"launcher_{qm_program}.sh")
         try:
-            # Group commands by run number
-            run_groups = {}
+            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program_idx)
+            print(f"Using QM executable: {qm_program}")
             
-            # Extract QM executable path from launcher template
-            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program)
-            print(f"Using QM executable: {qm_executable}")
+            # Group commands (logic slightly different for calc vs opt, but can be unified)
+            # For simplicity, we'll use a unified approach or split if needed
             
-            for input_file in all_input_files:
-                # Extract run number from filename
-                if input_file.startswith("opt_conf_"):
-                    run_num = 0  # For combined_results files (opt_conf_X.inp)
-                elif input_file.startswith("opt") and "_conf_" in input_file:
-                    run_num = int(input_file.split("_")[0][3:])  # Extract number from "optX_conf_Y.inp"
-                else:
-                    run_num = 0  # Default fallback
-                
-                if run_num not in run_groups:
-                    run_groups[run_num] = []
-                
-                output_file = input_file.replace(input_ext, output_ext)
-                if qm_program == 'orca':
-                    cmd = f"{qm_executable} {input_file} > {output_file}"
-                else:  # gaussian
-                    cmd = f"{qm_executable} {input_file} {output_file}"
-                run_groups[run_num].append(cmd)
-            
-            # Sort run groups and commands within each group
-            sorted_runs = sorted(run_groups.keys())
-            for run_num in sorted_runs:
-                # Sort commands numerically by configuration number
-                def extract_conf_number(cmd):
-                    import re
-                    # Extract number from opt_conf_X.inp or optY_conf_X.inp
-                    match = re.search(r'_conf_(\d+)\.inp', cmd)
-                    return int(match.group(1)) if match else 0
-                
-                run_groups[run_num].sort(key=extract_conf_number)
-            
-            # Write launcher script
             with open(launcher_path, 'w') as f:
-                # Process launcher template content to handle ### separator
+                # Header
                 launcher_lines = launcher_content.rstrip().split('\n')
                 separator_found = False
-                
-                # Write everything up to the ### separator
                 for line in launcher_lines:
                     if line.strip() == '###':
                         separator_found = True
-                        f.write(line + "\n")
-                        f.write("\n")  # Add blank line after separator
-                        f.write("# Run QM using the full path\n")  # Add the comment as requested
+                        f.write(line + "\n\n# Run QM using the full path\n")
                         break
                     else:
-                        # Skip existing ORCA commands (example commands to be replaced)
-                        if '$ORCA5_ROOT/orca' in line and '.inp' in line:
-                            continue
-                        # Also skip lines that are just '&&' continuation from removed commands
-                        if line.strip() == '&&' or line.strip() == '&& \\':
-                            continue
+                        if '$ORCA5_ROOT/orca' in line and '.inp' in line: continue
+                        if line.strip() == '&&' or line.strip() == '&& \\': continue
                         f.write(line + "\n")
                 
-                # If no ### separator found, add it
                 if not separator_found:
-                    f.write("\n###\n\n")
-                    f.write("# Run QM using the full path\n")
-                
-                # Write grouped commands with separators
-                for i, run_num in enumerate(sorted_runs):
-                    commands = run_groups[run_num]
+                    f.write("\n###\n\n# Run QM using the full path\n")
                     
-                    # Write commands for this run
-                    for j, cmd in enumerate(commands):
-                        f.write(cmd)
-                        if j < len(commands) - 1:
-                            f.write(" && \\\n")
-                        else:
-                            f.write(" && \\\n")  # End this run group with &&
-                    
-                    # Add separator between run groups (except after the last group)
-                    if i < len(sorted_runs) - 1:
-                        f.write("###\n")
+                # Commands
+                # Sort input files
+                def sort_key(f):
+                    import re
+                    # Try to extract numbers
+                    nums = re.findall(r'\d+', f)
+                    return [int(n) for n in nums] if nums else [f]
+                all_input_files.sort(key=sort_key)
                 
-                # Remove the trailing " && \" from the last command and add final newline
-                f.seek(f.tell() - 5)  # Go back to remove " && \"
-                f.write("\n")
-                f.truncate()  # Remove any content after the current position
-            
-            # Make launcher executable
+                for i, input_file in enumerate(all_input_files):
+                    output_file = input_file.replace(input_ext, output_ext)
+                    if qm_program == 'orca':
+                        cmd = f"{qm_executable} {input_file} > {output_file}"
+                    else:
+                        cmd = f"{qm_executable} {input_file} {output_file}"
+                        
+                    if i < len(all_input_files) - 1:
+                        f.write(f"{cmd} && \\\n")
+                    else:
+                        f.write(f"{cmd}\n")
+                        
             os.chmod(launcher_path, 0o755)
             
+            msg = f"\nCreated {stage_type} system in '{output_dir}' directory:\n"
+            msg += f"  Input files: {len(all_input_files)}\n"
+            msg += f"  Launcher script: launcher_{qm_program}.sh"
             if not workflow_mode:
-                print(f"\nCreated calculation system in '{calc_dir}' directory:")
-                print(f"  Input files: {len(all_input_files)}")
-                print(f"  Launcher script: launcher_{qm_program}.sh")
+                print(msg)
                 print(f"\nTo run all calculations, use:")
-                print(f"  cd {calc_dir}")
+                print(f"  cd {output_dir}")
                 print(f"  ./launcher_{qm_program}.sh")
-            else:
-                print(f"\nCreated calculation system in '{calc_dir}' directory:")
-                print(f"  Input files: {len(all_input_files)}")
-                print(f"  Launcher script: launcher_{qm_program}.sh")
-            
-            return f"Successfully created calculation system with {len(all_input_files)} input files."
+            return msg
             
         except IOError as e:
             return f"Error creating launcher script: {e}"
-    else:
-        # No launcher template provided - just create input files
-        print(f"\nCreated calculation system in '{calc_dir}' directory:")
-        print(f"  Input files: {len(all_input_files)}")
-        print("\nInput files created without launcher script.")
-        print("To run calculations manually, use appropriate QM program commands in the calculation directory.")
+            
+    return f"Created {stage_type} system in '{output_dir}' with {len(all_input_files)} input files (no launcher)."
+
+
+def calculate_input_files(template_file: str, launcher_template: Optional[str] = None, 
+                          auto_select: str = 'interactive', stage_type: str = "calculation", 
+                          workflow_mode: bool = False) -> str:
+    """
+    Unified function to create QM input files and launcher scripts for both calculation and optimization stages.
+    
+    Args:
+        template_file (str): Path to the QM input template file.
+        launcher_template (Optional[str]): Path to the launcher script template.
+        auto_select (str): 'interactive', 'all', or 'combined' for file selection.
+        stage_type (str): "calculation" or "optimization".
+        workflow_mode (bool): True if called from a workflow, suppresses some print statements.
         
-        return f"Successfully created calculation system with {len(all_input_files)} input files (input files only)."
+    Returns:
+        str: Status message indicating success or failure.
+    """
+    # Determine QM program and file extension from template
+    if template_file.lower().endswith('.inp'):
+        qm_program = 'orca'
+        input_ext = '.inp'
+        output_ext = '.out'
+        qm_program_idx = 0 # For extract_qm_executable_from_launcher
+    elif template_file.lower().endswith('.com'):
+        qm_program = 'gaussian'
+        input_ext = '.com'
+        output_ext = '.log'
+        qm_program_idx = 1
+    elif template_file.lower().endswith('.gjf'):
+        qm_program = 'gaussian'
+        input_ext = '.gjf'
+        output_ext = '.log'
+        qm_program_idx = 1
+    else:
+        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
+    
+    # Check if template files exist
+    if not os.path.exists(template_file):
+        return f"Error: Template file '{template_file}' not found."
+    
+    launcher_content = None
+    if launcher_template:
+        if not os.path.exists(launcher_template):
+            return f"Error: Launcher template '{launcher_template}' not found."
+        try:
+            with open(launcher_template, 'r') as f:
+                launcher_content = f.read()
+        except IOError as e:
+            return f"Error reading launcher template '{launcher_template}': {e}"
+    
+    # Read template content
+    try:
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    except IOError as e:
+        return f"Error reading template file '{template_file}': {e}"
+    
+    # Determine output directory name
+    def get_next_dir(base):
+        """Find the next available directory (base, base_2, etc.)"""
+        if not os.path.exists(base):
+            return base
+        counter = 2
+        while True:
+            dir_name = f"{base}_{counter}"
+            if not os.path.exists(dir_name):
+                return dir_name
+            counter += 1
+    
+    output_dir = get_next_dir(stage_type)
+    
+    # File Search Logic
+    xyz_files = []
+    if stage_type == "calculation":
+        # FIRST: Check for retry_input folder (structures from need_recalculation)
+        if os.path.exists("retry_input"):
+            print("Found retry_input folder, using structures from previous similarity analysis")
+            for file in os.listdir("retry_input"):
+                if file.endswith(".xyz") and not file.startswith("combined"):
+                    xyz_files.append(os.path.join("retry_input", file))
+        else:
+            # Normal flow: Check for combined files in current directory
+            for file in os.listdir("."):
+                if (file.startswith("combined_results") or file.startswith("combined_r")) and file.endswith(".xyz"):
+                    xyz_files.append(file)
+            
+            # Look for result_*.xyz files recursively in subdirectories
+            for root, dirs, files in os.walk("."):
+                for file in files:
+                    if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
+                        xyz_files.append(os.path.join(root, file))
+                        
+        if not xyz_files:
+            return "No result_*.xyz, combined_results.xyz, or combined_r*.xyz files found."
+            
+        # Sort XYZ files by annealing number
+        def get_annealing_number(file_path):
+            import re
+            directory = os.path.dirname(file_path)
+            match = re.search(r'_(\d+)$', directory)
+            if match: return int(match.group(1))
+            match = re.search(r'result_(\d+)', os.path.basename(file_path))
+            if match: return int(match.group(1))
+            return float('inf')
+        xyz_files.sort(key=get_annealing_number)
+        
+    elif stage_type == "optimization":
+        # Check for combined files
+        for file in os.listdir("."):
+            if file.endswith(".xyz") and "combined" in file.lower():
+                xyz_files.append(file)
+        
+        # Look for motif_*.xyz files
+        for root, dirs, files in os.walk("."):
+            for file in files:
+                if (file.startswith("motif_") and file.endswith(".xyz")) or \
+                   (file.endswith(".xyz") and "combined" in file.lower() and root != "."):
+                    xyz_files.append(os.path.join(root, file))
+                    
+        if not xyz_files:
+            return "No files with 'combined' in name or motif_*.xyz files found."
+            
+    # File Selection Logic
+    if stage_type == "calculation":
+        print(f"Found {len(xyz_files)} XYZ file(s) to process:")
+        for xyz_file in xyz_files:
+            print(f"  - {xyz_file}")
+            
+        # Store first XYZ source for protocol summary
+        if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:
+            if xyz_files:
+                first_file = xyz_files[0]
+                if 'result' in first_file or 'annealing' in first_file.lower():
+                    sys._current_workflow_context.calc_xyz_source = "Annealing"
+                else:
+                    sys._current_workflow_context.calc_xyz_source = first_file
+            else:
+                sys._current_workflow_context.calc_xyz_source = "Annealing"
+                
+        if auto_select == 'combined':
+            os.makedirs(output_dir, exist_ok=True)
+            
+        selected_xyz_files = interactive_xyz_file_selection(xyz_files, output_dir, auto_select=auto_select)
+        
+    elif stage_type == "optimization":
+        selected_xyz_files = interactive_optimization_file_selection(xyz_files, output_dir)
+        
+    if not selected_xyz_files:
+        return "No XYZ files selected for processing."
+    xyz_files = selected_xyz_files
+    
+    # Create directory
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+        print(f"Created {stage_type} directory: {output_dir}")
+        
+    # Process files in parallel
+    all_input_files = []
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    
+    total_xyz_files = len(xyz_files)
+    use_combined_naming = (auto_select == 'combined')
+    
+    # Prepare arguments
+    if stage_type == "calculation":
+        xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
+                         for xyz_file in xyz_files]
+        process_func = _process_xyz_file_for_calc
+    else: # optimization
+        xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext) 
+                         for xyz_file in xyz_files]
+        process_func = _process_xyz_file_for_opt
+        
+    max_workers = get_optimal_workers('mixed', len(xyz_files))
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {executor.submit(process_func, args): args[0] for args in xyz_file_args}
+        
+        for future in as_completed(future_to_file):
+            xyz_file = future_to_file[future]
+            try:
+                file_input_files, status_msg = future.result()
+                all_input_files.extend(file_input_files)
+                if not workflow_mode:
+                    print(f"  {status_msg}")
+                    for input_file in file_input_files:
+                        print(f"    Created: {input_file}")
+            except Exception as e:
+                if not workflow_mode:
+                    print(f"  Error processing {xyz_file}: {e}")
+                    
+    print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
+    
+    if not all_input_files:
+        return "No input files were created successfully."
+        
+    # Create launcher script
+    if launcher_template and launcher_content:
+        launcher_path = os.path.join(output_dir, f"launcher_{qm_program}.sh")
+        try:
+            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program_idx)
+            print(f"Using QM executable: {qm_program}")
+            
+            # Group commands (logic slightly different for calc vs opt, but can be unified)
+            # For simplicity, we'll use a unified approach or split if needed
+            
+            with open(launcher_path, 'w') as f:
+                # Header
+                launcher_lines = launcher_content.rstrip().split('\n')
+                separator_found = False
+                for line in launcher_lines:
+                    if line.strip() == '###':
+                        separator_found = True
+                        f.write(line + "\n\n# Run QM using the full path\n")
+                        break
+                    else:
+                        if '$ORCA5_ROOT/orca' in line and '.inp' in line: continue
+                        if line.strip() == '&&' or line.strip() == '&& \\': continue
+                        f.write(line + "\n")
+                
+                if not separator_found:
+                    f.write("\n###\n\n# Run QM using the full path\n")
+                    
+                # Commands
+                # Sort input files
+                def sort_key(f):
+                    import re
+                    # Try to extract numbers
+                    nums = re.findall(r'\d+', f)
+                    return [int(n) for n in nums] if nums else [f]
+                all_input_files.sort(key=sort_key)
+                
+                for i, input_file in enumerate(all_input_files):
+                    output_file = input_file.replace(input_ext, output_ext)
+                    if qm_program == 'orca':
+                        cmd = f"{qm_executable} {input_file} > {output_file}"
+                    else:
+                        cmd = f"{qm_executable} {input_file} {output_file}"
+                        
+                    if i < len(all_input_files) - 1:
+                        f.write(f"{cmd} && \\\n")
+                    else:
+                        f.write(f"{cmd}\n")
+                        
+            os.chmod(launcher_path, 0o755)
+            
+            msg = f"\nCreated {stage_type} system in '{output_dir}' directory:\n"
+            msg += f"  Input files: {len(all_input_files)}\n"
+            msg += f"  Launcher script: launcher_{qm_program}.sh"
+            if not workflow_mode:
+                print(msg)
+                print(f"\nTo run all calculations, use:")
+                print(f"  cd {output_dir}")
+                print(f"  ./launcher_{qm_program}.sh")
+            return msg
+            
+        except IOError as e:
+            return f"Error creating launcher script: {e}"
+            
+    return f"Created {stage_type} system in '{output_dir}' with {len(all_input_files)} input files (no launcher)."
+
+
+def create_calculation_system(template_file: str, launcher_template: str) -> str:
+    """
+    Creates a calculation system by extracting configurations from XYZ files
+    and generating QM input files with launcher scripts.
+    
+    Args:
+        template_file (str): Template input file (e.g., example_input.inp)
+        launcher_template (str): Template launcher file (e.g., launcher_orca.sh)
+    
+    Returns:
+        str: Status message
+    """
+    return calculate_input_files(template_file, launcher_template, stage_type="calculation")
 
 
 def create_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
@@ -5263,196 +5511,7 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
     Returns:
         str: Status message indicating success or failure
     """
-    if not os.path.exists(template_file):
-        return f"Error: Template file '{template_file}' not found."
-    
-    if launcher_template and not os.path.exists(launcher_template):
-        return f"Error: Launcher template '{launcher_template}' not found."
-    
-    # Determine calculation directory name
-    def get_next_optimization_dir():
-        """Find the next available optimization directory (optimization, optimization_2, etc.)"""
-        base_name = "optimization"
-        if not os.path.exists(base_name):
-            return base_name
-        
-        counter = 2
-        while True:
-            opt_dir_name = f"{base_name}_{counter}"
-            if not os.path.exists(opt_dir_name):
-                return opt_dir_name
-            counter += 1
-    
-    opt_dir = get_next_optimization_dir()
-    os.makedirs(opt_dir, exist_ok=True)
-    
-    # Look for optimization files: files with 'combined' in name AND motif_*.xyz files
-    xyz_files = []
-    
-    # Check for combined files in current directory
-    for file in os.listdir("."):
-        if file.endswith(".xyz") and "combined" in file.lower():
-            xyz_files.append(file)
-    
-    # Look for motif_*.xyz files in current directory and subdirectories
-    for root, dirs, files in os.walk("."):
-        for file in files:
-            if (file.startswith("motif_") and file.endswith(".xyz")) or \
-               (file.endswith(".xyz") and "combined" in file.lower() and root != "."):
-                xyz_files.append(os.path.join(root, file))
-    
-    if not xyz_files:
-        return "No files with 'combined' in name or motif_*.xyz files found in the current directory or subdirectories."
-    
-    # Interactive file selection
-    selected_xyz_files = interactive_optimization_file_selection(xyz_files, opt_dir)
-    
-    if not selected_xyz_files:
-        # Clean up empty directory
-        try:
-            os.rmdir(opt_dir)
-        except OSError:
-            pass
-        return "No files selected for optimization. Operation cancelled."
-    
-    # Determine QM program and file extension from template
-    if template_file.lower().endswith('.inp'):
-        qm_program = "orca"
-        input_ext = ".inp"
-    elif template_file.lower().endswith('.com'):
-        qm_program = "gaussian"
-        input_ext = ".com"
-    elif template_file.lower().endswith('.gjf'):
-        qm_program = "gaussian"
-        input_ext = ".gjf"
-    else:
-        qm_program = "gaussian"  # Default fallback
-        input_ext = ".com"
-    
-    # Read template content
-    try:
-        with open(template_file, 'r') as f:
-            template_content = f.read()
-    except IOError as e:
-        return f"Error reading template file: {e}"
-    
-    # Process each selected XYZ file in parallel
-    all_input_files = []
-    
-    # Prepare data for parallel processing
-    import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    
-    print(f"Processing {len(selected_xyz_files)} XYZ files for optimization in parallel...")
-    
-    # Prepare arguments for each file
-    xyz_file_args = [(xyz_file, template_content, opt_dir, qm_program, input_ext) 
-                     for xyz_file in selected_xyz_files]
-    
-    # Use parallel processing with limited workers
-    max_workers = get_optimal_workers('mixed', len(selected_xyz_files))
-    
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_file = {executor.submit(_process_xyz_file_for_opt, args): args[0] 
-                         for args in xyz_file_args}
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_file):
-            xyz_file = future_to_file[future]
-            try:
-                file_input_files, status_msg = future.result()
-                all_input_files.extend(file_input_files)
-                print(f"  {status_msg}")
-                for input_file in file_input_files:
-                    print(f"    Created: {input_file}")
-            except Exception as e:
-                print(f"  Error processing {xyz_file}: {e}")
-    
-    print(f"Completed processing. Created {len(all_input_files)} input files total.")
-    
-    if not all_input_files:
-        return "No input files were created successfully."
-    
-    # Create launcher script only if template is provided
-    if launcher_template:
-        launcher_path = os.path.join(opt_dir, f"launcher_{qm_program}.sh")
-        
-        try:
-            # Read launcher template
-            with open(launcher_template, 'r') as f:
-                launcher_content = f.read()
-            
-            # Process launcher template content to handle ### separator
-            launcher_lines = launcher_content.split('\n')
-            header_lines = []
-            found_separator = False
-            
-            # Write everything up to the ### separator
-            for line in launcher_lines:
-                if line.strip() == '###':
-                    found_separator = True
-                    break
-                header_lines.append(line)
-            
-            # Extract QM executable path from launcher template
-            qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program)
-            print(f"Using QM executable: {qm_executable}")
-            
-            with open(launcher_path, 'w') as f:
-                # Write header
-                for line in header_lines:
-                    f.write(line + '\n')
-                
-                # Always add separator and comment line
-                f.write("\n###\n\n")
-                f.write("# Run QM using the full path \n\n")
-                
-                # Add commands for all input files
-                for i, input_file in enumerate(all_input_files):
-                    # Create output filename by replacing extension
-                    if qm_program == "gaussian":
-                        # Handle both .com and .gjf extensions
-                        if input_file.endswith('.com'):
-                            output_file = input_file.replace('.com', '.log')
-                        elif input_file.endswith('.gjf'):
-                            output_file = input_file.replace('.gjf', '.log')
-                        else:
-                            output_file = input_file + '.log'  # fallback
-                        command = f"{qm_executable} {input_file} {output_file}"
-                    else:
-                        output_file = input_file.replace('.inp', '.out')
-                        command = f"{qm_executable} {input_file} > {output_file}"
-                    
-                    if i < len(all_input_files) - 1:
-                        f.write(f"{command} && \\\n")
-                    else:
-                        f.write(f"{command}\n")
-            
-            # Make launcher executable
-            os.chmod(launcher_path, 0o755)
-            
-            return f"""Optimization system created successfully in '{opt_dir}':
-- Input files: {len(all_input_files)} files
-- Launcher script: {os.path.basename(launcher_path)}
-- Total configurations: {len(all_input_files)}
-
-To run the calculations:
-cd {opt_dir}
-./{os.path.basename(launcher_path)}
-"""
-            
-        except IOError as e:
-            return f"Error creating launcher script: {e}"
-    else:
-        # No launcher template provided - just create input files
-        return f"""Optimization system created successfully in '{opt_dir}':
-- Input files: {len(all_input_files)} files
-- Total configurations: {len(all_input_files)}
-
-Input files created without launcher script.
-To run calculations manually, use appropriate QM program commands in the {opt_dir} directory.
-"""
+    return calculate_input_files(template_file, launcher_template, stage_type="optimization")
 
 
 def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
@@ -5545,7 +5604,7 @@ def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str =
                         break
                 else:
                     if selected_files:
-                        print(f"Selected {len(selected_files)} file(s):")
+                        print("Selected %s file(s):" % len(selected_files))
                         for f in selected_files:
                             print(f"  - {f}")
                         return selected_files
@@ -5829,236 +5888,6 @@ def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
     except IOError as e:
         print(f"Error writing to {output_filename}: {e}")
         return False
-
-
-def create_calculation_system(template_file: str, launcher_template: str) -> str:
-    """
-    Creates a calculation system by extracting configurations from XYZ files
-    and generating QM input files with launcher scripts.
-    
-    Args:
-        template_file (str): Template input file (e.g., example_input.inp)
-        launcher_template (str): Template launcher file (e.g., launcher_orca.sh)
-    
-    Returns:
-        str: Status message
-    """
-    # Determine QM program from template file extension
-    if template_file.endswith('.inp'):
-        qm_program = 'orca'
-        input_ext = '.inp'
-        output_ext = '.out'
-    elif template_file.endswith('.com'):
-        qm_program = 'gaussian'
-        input_ext = '.com'
-        output_ext = '.log'
-    elif template_file.endswith('.gjf'):
-        qm_program = 'gaussian'
-        input_ext = '.gjf'
-        output_ext = '.log'
-    else:
-        return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
-    
-    # Check if template files exist
-    if not os.path.exists(template_file):
-        return f"Error: Template file '{template_file}' not found."
-    
-    if not os.path.exists(launcher_template):
-        return f"Error: Launcher template '{launcher_template}' not found."
-    
-    # Read template content
-    try:
-        with open(template_file, 'r') as f:
-            template_content = f.read()
-    except IOError as e:
-        return f"Error reading template file '{template_file}': {e}"
-    
-    try:
-        with open(launcher_template, 'r') as f:
-            launcher_content = f.read()
-    except IOError as e:
-        return f"Error reading launcher template '{launcher_template}': {e}"
-    
-    # Create calculation directory with incremental numbering
-    def get_next_calc_dir():
-        """Find the next available calculation directory (calculation, calculation_2, etc.)"""
-        base_name = "calculation"
-        if not os.path.exists(base_name):
-            return base_name
-        
-        counter = 2
-        while True:
-            calc_dir_name = f"{base_name}_{counter}"
-            if not os.path.exists(calc_dir_name):
-                return calc_dir_name
-            counter += 1
-    
-    calc_dir = get_next_calc_dir()
-    os.makedirs(calc_dir, exist_ok=True)
-    
-    # Find all result_*.xyz files (ignore resultbox_*.xyz)
-    xyz_files = []
-    for root, dirs, files in os.walk("."):
-        for file in files:
-            if file.startswith("result_") and file.endswith(".xyz") and not file.startswith("resultbox_"):
-                xyz_path = os.path.join(root, file)
-                xyz_files.append(xyz_path)
-    
-    if not xyz_files:
-        return "No result_*.xyz files found in the working directory and subfolders."
-    
-    # Sort XYZ files by annealing number (extracted from directory name)
-    def get_annealing_number(file_path):
-        """Extract annealing number from file path like './some_name_2/result_*.xyz'"""
-        import re
-        # Look for pattern like 'name_N' in the directory path
-        directory = os.path.dirname(file_path)
-        match = re.search(r'_(\d+)$', directory)
-        if match:
-            return int(match.group(1))
-        # If no _N pattern found in directory, try to extract from filename
-        match = re.search(r'result_(\d+)', os.path.basename(file_path))
-        if match:
-            return int(match.group(1))
-        return float('inf')  # Put unmatched files at the end
-    
-    xyz_files.sort(key=get_annealing_number)
-    
-    # Interactive selection of XYZ files
-    selected_xyz_files = interactive_xyz_file_selection(xyz_files, calc_dir)
-    if not selected_xyz_files:
-        return "No XYZ files selected for processing."
-    
-    # Process each selected XYZ file in parallel
-    all_input_files = []
-    
-    # Prepare data for parallel processing
-    import multiprocessing as mp
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    
-    print(f"Processing {len(selected_xyz_files)} XYZ file{'s' if len(selected_xyz_files) != 1 else ''}...")
-    
-    # Prepare arguments for each file, including total count and combined flag
-    total_xyz_files = len(selected_xyz_files)
-    use_combined_naming = False  # This function doesn't use auto_select, set to False
-    xyz_file_args = [(xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
-                     for xyz_file in selected_xyz_files]
-    
-    # Use parallel processing with limited workers
-    max_workers = get_optimal_workers('mixed', len(selected_xyz_files))
-    
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_file = {executor.submit(_process_xyz_file_for_calc, args): args[0] 
-                         for args in xyz_file_args}
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_file):
-            xyz_file = future_to_file[future]
-            try:
-                file_input_files, status_msg = future.result()
-                all_input_files.extend(file_input_files)
-                print(f"  {status_msg}")
-                for input_file in file_input_files:
-                    print(f"    Created: {input_file}")
-            except Exception as e:
-                print(f"  Error processing {xyz_file}: {e}")
-    
-    print(f"Completed processing. Created {len(all_input_files)} input files total.")
-    
-    if not all_input_files:
-        return "No input files were created successfully."
-    
-    # Create launcher script
-    launcher_path = os.path.join(calc_dir, f"launcher_{qm_program}.sh")
-    
-    try:
-        # Group input files by run number for separator placement
-        run_groups = {}
-        for input_file in all_input_files:
-            # Extract run number from filename (e.g., opt1_conf_1.inp -> 1, opt_conf_1.inp -> 0)
-            import re
-            match = re.match(r'opt(\d+)_conf_', input_file)
-            if match:
-                run_num = int(match.group(1))
-            else:
-                # Single run case: opt_conf_X.inp
-                run_num = 0
-            
-            if run_num not in run_groups:
-                run_groups[run_num] = []
-            run_groups[run_num].append(input_file)
-        
-        # Sort run groups
-        sorted_runs = sorted(run_groups.keys())
-        
-        # Create commands
-        all_commands = []
-        for i, run_num in enumerate(sorted_runs):
-            # Sort files numerically by configuration number
-            def extract_conf_number(filename):
-                import re
-                # Extract number from opt_conf_X.inp or optY_conf_X.inp
-                match = re.search(r'_conf_(\d+)\.inp', filename)
-                return int(match.group(1)) if match else 0
-            
-            run_files = sorted(run_groups[run_num], key=extract_conf_number)
-            for input_file in run_files:
-                output_file = input_file.replace(input_ext, output_ext)
-                if qm_program == 'orca':
-                    cmd = f"$ORCA5_ROOT/orca {input_file} > {output_file}"
-                else:  # gaussian
-                    cmd = f"$G16_ROOT/g16 {input_file} {output_file}"
-                all_commands.append(cmd)
-            
-            # Add separator between runs (except after last run)
-            if i < len(sorted_runs) - 1:
-                all_commands.append("###")
-        
-        # Write launcher script
-        with open(launcher_path, 'w') as f:
-            # Process launcher template content to remove any existing example commands
-            launcher_lines = launcher_content.rstrip().split('\n')
-            filtered_lines = []
-            
-            for line in launcher_lines:
-                # Skip lines that contain ORCA commands (example commands to be replaced)
-                if '$ORCA5_ROOT/orca' in line and '.inp' in line:
-                    continue
-                # Also skip lines that are just '&&' continuation from removed commands
-                if line.strip() == '&&' or line.strip() == '&& \\':
-                    continue
-                filtered_lines.append(line)
-            
-            # Write the cleaned launcher template content
-            f.write('\n'.join(filtered_lines))
-            f.write("\n")
-            
-            # Process commands with proper formatting
-            for i, cmd in enumerate(all_commands):
-                if cmd == "###":
-                    f.write(" && \\\n###\n")
-                else:
-                    f.write(cmd)
-                    if i < len(all_commands) - 1 and all_commands[i + 1] != "###":
-                        f.write(" && \\\n")
-                    elif i == len(all_commands) - 1:
-                        f.write("\n")  # Final newline for last command
-        
-        # Make launcher executable
-        os.chmod(launcher_path, 0o755)
-        
-        print(f"\nCreated calculation system in '{calc_dir}' directory:")
-        print(f"  Input files: {len(all_input_files)}")
-        print(f"  Launcher script: launcher_{qm_program}.sh")
-        print(f"\nTo run all calculations, use:")
-        print(f"  cd {calc_dir}")
-        print(f"  ./launcher_{qm_program}.sh")
-        
-        return f"Successfully created calculation system with {len(all_input_files)} input files."
-        
-    except IOError as e:
-        return f"Error creating launcher script: {e}"
 
 
 def get_box_size_recommendation(input_file_path: str, packing_percent: float = 10.0) -> Optional[float]:
@@ -6590,7 +6419,6 @@ def summarize_calculations(directory=".", file_types=None):
             
             # Collect results as they complete
             for future in as_completed(future_to_file):
-                filepath = future_to_file[future]
                 try:
                     results = future.result()
                     if results:
@@ -6896,7 +6724,7 @@ def create_summary_with_tracking(directory):
     return created_files
 
 
-def collect_out_files_with_tracking():
+def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None):
     """Collect .out files and return the created similarity folder path."""
     try:
         current_directory = os.getcwd()
@@ -6913,8 +6741,21 @@ def collect_out_files_with_tracking():
         
         def get_next_similarity_dir():
             """Find the next available similarity directory (similarity, similarity_2, etc.)"""
+            # If target folder is explicitly provided, use it
+            if target_sim_folder:
+                # Handle both full path and relative path
+                if os.path.isabs(target_sim_folder):
+                    return target_sim_folder
+                else:
+                    return os.path.join(parent_directory, target_sim_folder)
+
             base_name = "similarity"
             similarity_path = os.path.join(parent_directory, base_name)
+            
+            # If reuse_existing is True, return the base path if it exists
+            if reuse_existing and os.path.exists(similarity_path):
+                return similarity_path
+            
             if not os.path.exists(similarity_path):
                 return similarity_path
             
@@ -6930,9 +6771,13 @@ def collect_out_files_with_tracking():
         os.makedirs(similarity_dir, exist_ok=True)
         
         # Create the orca_out_### subfolder inside similarity folder
-        destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_dir)
-        destination_path = os.path.join(similarity_dir, destination_folder_name)
-        os.makedirs(destination_path)
+        if reuse_existing and os.path.exists(os.path.join(similarity_dir, base_destination_folder_name)):
+            destination_folder_name = base_destination_folder_name
+            destination_path = os.path.join(similarity_dir, destination_folder_name)
+        else:
+            destination_folder_name = get_unique_folder_name(base_destination_folder_name, similarity_dir)
+            destination_path = os.path.join(similarity_dir, destination_folder_name)
+            os.makedirs(destination_path, exist_ok=True)
         
         # Copy files to the orca_out_### subfolder
         for file_path in all_out_files:
@@ -7029,7 +6874,7 @@ def execute_summary_only():
         print("\nNo summary files were created (no valid calculation data found).")
 
 
-def execute_sort_command(include_summary=True):
+def execute_sort_command(include_summary=True, target_sim_folder=None, reuse_existing=False):
     """Execute the complete sort process with option to revert."""
     print("=" * 50)
     print("ASCEC Sort Process Started")
@@ -7067,7 +6912,7 @@ def execute_sort_command(include_summary=True):
         
         # Step 5: Collect .out files
         print("\n5. Collecting .out files...")
-        similarity_folder = collect_out_files_with_tracking()
+        similarity_folder = collect_out_files_with_tracking(reuse_existing=reuse_existing, target_sim_folder=target_sim_folder)
         if similarity_folder:
             created_folders.append(similarity_folder)
         
@@ -7087,7 +6932,7 @@ def execute_sort_command(include_summary=True):
             
         if similarity_dirs:
             print("\nSuggested next step:")
-            print("  python3 ascec-v04.py sim --threshold 0.9")
+            print("  python ascec-v04.py sim --threshold 0.9")
             print("  Run similarity analysis on collected output files")
 
     except Exception as e:
@@ -7108,7 +6953,7 @@ def execute_similarity_analysis(*args):
         return
     
     # Build command
-    cmd = [sys.executable, similarity_script] + list(args)
+    cmd = ["python", similarity_script] + list(args)
     
     print("=" * 50)
     print("ASCEC Similarity Analysis")
@@ -7253,66 +7098,66 @@ def print_all_commands():
     print("1. SIMULATION COMMANDS:")
     print("-" * 40)
     print("  Run single simulation:")
-    print("    python3 ascec-v04.py input_file.in > output.out  # Run simulation with output redirect")
-    print("    python3 ascec-v04.py input_file.in --v > output.out  # Verbose mode")
-    print("    python3 ascec-v04.py input_file.in --va > output.out # Very verbose mode")
-    print("    python3 ascec-v04.py input_file.in --standard > output.out # Standard Metropolis")
-    print("    python3 ascec-v04.py input_file.in --nobox > output.out    # Disable box XYZ files")
+    print("    python ascec-v04.py input_file.in > output.out  # Run simulation with output redirect")
+    print("    python ascec-v04.py input_file.in --v > output.out  # Verbose mode")
+    print("    python ascec-v04.py input_file.in --va > output.out # Very verbose mode")
+    print("    python ascec-v04.py input_file.in --standard > output.out # Standard Metropolis")
+    print("    python ascec-v04.py input_file.in --nobox > output.out    # Disable box XYZ files")
     print()
     print("  Analyze box length requirements:")
-    print("    python3 ascec-v04.py input_file.in box        # Show box analysis in terminal")
-    print("    python3 ascec-v04.py box input_file.in        # Alternative syntax")
-    print("    python3 ascec-v04.py input_file.in box > box.txt  # Save analysis to file")
+    print("    python ascec-v04.py input_file.in box        # Show box analysis in terminal")
+    print("    python ascec-v04.py box input_file.in        # Alternative syntax")
+    print("    python ascec-v04.py input_file.in box > box.txt  # Save analysis to file")
     print()
     
     print("  Run replicated simulations:")
-    print("    python3 ascec-v04.py input_file.in r3         # Create 3 replicas")
-    print("    python3 ascec-v04.py input_file.in r5         # Create 5 replicas")
-    print("    python3 ascec-v04.py input_file.in r3 --box10 # Create 3 replicas with 10% packing")
-    print("    python3 ascec-v04.py input_file.in r3 --box5  # Create 3 replicas with 5% packing")
+    print("    python ascec-v04.py input_file.in r3         # Create 3 replicas")
+    print("    python ascec-v04.py input_file.in r5         # Create 5 replicas")
+    print("    python ascec-v04.py input_file.in r3 --box10 # Create 3 replicas with 10% packing")
+    print("    python ascec-v04.py input_file.in r3 --box5  # Create 3 replicas with 5% packing")
     print()
     
     print("2. CALCULATION SYSTEM COMMANDS:")
     print("-" * 40)
     print("  Create QM input files from simulation results:")
-    print("    python3 ascec-v04.py calc template.inp launcher.sh     # Uses result_*.xyz or combined_results.xyz")
-    print("    python3 ascec-v04.py calc template.com launcher.sh     # Gaussian version")
+    print("    python ascec-v04.py calc template.inp launcher.sh     # Uses result_*.xyz or combined_results.xyz")
+    print("    python ascec-v04.py calc template.com launcher.sh     # Gaussian version")
     print("  ")
     print("  Create optimization input files from combined/motif files:")
-    print("    python3 ascec-v04.py opt template.inp launcher.sh      # Uses *combined*.xyz and motif_*.xyz files")
-    print("    python3 ascec-v04.py opt template.com launcher.sh      # Gaussian version, creates optimization/ folder")
+    print("    python ascec-v04.py opt template.inp launcher.sh      # Uses *combined*.xyz and motif_*.xyz files")
+    print("    python ascec-v04.py opt template.com launcher.sh      # Gaussian version, creates optimization/ folder")
     print("  ")
     print("  Merge XYZ files:")
-    print("    python3 ascec-v04.py merge                             # Interactive selection (all .xyz files)")
-    print("    python3 ascec-v04.py merge result                      # Interactive selection (result_*.xyz files only)")
+    print("    python ascec-v04.py merge                             # Interactive selection (all .xyz files)")
+    print("    python ascec-v04.py merge result                      # Interactive selection (result_*.xyz files only)")
     print("  ")
     print("  Update existing QM input files with new template:")
-    print("    python3 ascec-v04.py update new_template.inp             # Interactive selection (same extension)")
-    print("    python3 ascec-v04.py update new_template.inp pattern     # Interactive selection (filtered by pattern)")
+    print("    python ascec-v04.py update new_template.inp             # Interactive selection (same extension)")
+    print("    python ascec-v04.py update new_template.inp pattern     # Interactive selection (filtered by pattern)")
     print()
     
     print("3. ORGANIZATION COMMANDS:")
     print("-" * 40)
     print("  Sort and organize calculation results:")
-    print("    python3 ascec-v04.py sort                     # Full sort with summary")
-    print("    python3 ascec-v04.py sort --nosum             # Sort without summary")
-    print("    python3 ascec-v04.py sort --justsum           # Create summaries only")
+    print("    python ascec-v04.py sort                     # Full sort with summary")
+    print("    python ascec-v04.py sort --nosum             # Sort without summary")
+    print("    python ascec-v04.py sort --justsum           # Create summaries only")
     print()
     
     print("  Merge launcher scripts:")
-    print("    python3 ascec-v04.py launcher                 # Merge all launcher scripts")
+    print("    python ascec-v04.py launcher                 # Merge all launcher scripts")
     print()
     
     print("  Generate annealing diagrams:")
-    print("    python3 ascec-v04.py diagram                  # Generate/regenerate all diagrams")
-    print("    python3 ascec-v04.py diagram --scaled         # Generate with intelligent scaling")
+    print("    python ascec-v04.py diagram                  # Generate/regenerate all diagrams")
+    print("    python ascec-v04.py diagram --scaled         # Generate with intelligent scaling")
     print()
     
     print("4. ANALYSIS COMMANDS:")
     print("-" * 40)
     print("  Similarity analysis:")
-    print("    python3 ascec-v04.py sim --threshold 0.9      # Run similarity analysis")
-    print("    python3 ascec-v04.py sim --help               # See similarity options")
+    print("    python ascec-v04.py sim --threshold 0.9      # Run similarity analysis")
+    print("    python ascec-v04.py sim --help               # See similarity options")
     print()
     
     print("5. INPUT FILE FORMAT:")
@@ -7363,51 +7208,51 @@ def print_all_commands():
     print("      similarity --th=2")
     print()
     print("  Run protocol:")
-    print("    python3 ascec-v04.py input.in protocol")
+    print("    python ascec-v04.py input.in protocol")
     print()
     print("  Restart from specific stage:")
-    print("    python3 ascec-v04.py input.in protocol 2      # Restart from stage 2")
-    print("    python3 ascec-v04.py input.in protocol calc   # Restart 1st calc stage")
-    print("    python3 ascec-v04.py input.in protocol calc2  # Restart 2nd calc stage")
-    print("    python3 ascec-v04.py input.in protocol opt    # Restart 1st opt stage")
+    print("    python ascec-v04.py input.in protocol 2      # Restart from stage 2")
+    print("    python ascec-v04.py input.in protocol calc   # Restart 1st calc stage")
+    print("    python ascec-v04.py input.in protocol calc2  # Restart 2nd calc stage")
+    print("    python ascec-v04.py input.in protocol opt    # Restart 1st opt stage")
     print()
     
     print("8. EXCLUSION MANAGEMENT:")
     print("-" * 40)
     print("  Exclude specific calculations or optimizations:")
-    print("    python3 ascec-v04.py input.in exclude          # Show current exclusions")
-    print("    python3 ascec-v04.py input.in exclude calc 2,5-9    # Exclude conf_2, conf_5 to conf_9")
-    print("    python3 ascec-v04.py input.in exclude calc2 3-10    # Exclude 2nd calc stage files")
-    print("    python3 ascec-v04.py input.in exclude opt 2,5-9     # Exclude motif_02, motif_05 to motif_09")
+    print("    python ascec-v04.py input.in exclude          # Show current exclusions")
+    print("    python ascec-v04.py input.in exclude calc 2,5-9    # Exclude conf_2, conf_5 to conf_9")
+    print("    python ascec-v04.py input.in exclude calc2 3-10    # Exclude 2nd calc stage files")
+    print("    python ascec-v04.py input.in exclude opt 2,5-9     # Exclude motif_02, motif_05 to motif_09")
     print()
     print("  Clear exclusions:")
-    print("    python3 ascec-v04.py input.in exclude clear         # Clear all exclusions")
-    print("    python3 ascec-v04.py input.in exclude calc clear   # Clear calc exclusions only")
-    print("    python3 ascec-v04.py input.in exclude opt clear    # Clear opt exclusions only")
+    print("    python ascec-v04.py input.in exclude clear         # Clear all exclusions")
+    print("    python ascec-v04.py input.in exclude calc clear   # Clear calc exclusions only")
+    print("    python ascec-v04.py input.in exclude opt clear    # Clear opt exclusions only")
     print()
     
     print("9. EXAMPLES:")
     print("-" * 40)
     print("  Complete manual workflow:")
-    print("    1. python3 ascec-v04.py input.in box          # Check box requirements first")
-    print("    2. python3 ascec-v04.py input.in r3           # Create 3 replicated runs")
-    print("    3. python3 ascec-v04.py merge                 # Combine XYZ files")
-    print("    4. python3 ascec-v04.py calc template.inp launcher.sh")
+    print("    1. python ascec-v04.py input.in box          # Check box requirements first")
+    print("    2. python ascec-v04.py input.in r3           # Create 3 replicated runs")
+    print("    3. python ascec-v04.py merge                 # Combine XYZ files")
+    print("    4. python ascec-v04.py calc template.inp launcher.sh")
     print("    5. cd calculation && ./launcher_orca.sh")
-    print("    6. cd .. && python3 ascec-v04.py sort")
-    print("    7. python3 ascec-v04.py sim --threshold 0.9")
+    print("    6. cd .. && python ascec-v04.py sort")
+    print("    7. python ascec-v04.py sim --threshold 0.9")
     print()
     
     print("  Protocol workflow with exclusions:")
-    print("    1. python3 ascec-v04.py input.in protocol     # Run automated protocol")
+    print("    1. python ascec-v04.py input.in protocol     # Run automated protocol")
     print("    2. # Protocol pauses if issues found")
-    print("    3. python3 ascec-v04.py input.in exclude calc 5-10  # Exclude problematic files")
-    print("    4. python3 ascec-v04.py input.in protocol     # Resume (skips excluded files)")
+    print("    3. python ascec-v04.py input.in exclude calc 5-10  # Exclude problematic files")
+    print("    4. python ascec-v04.py input.in protocol     # Resume (skips excluded files)")
     print()
     
     print("  Update existing calculations:")
-    print("    python3 ascec-v04.py update new_template.inp            # Interactive selection (same extension)")
-    print("    python3 ascec-v04.py update new_template.inp conf_1     # Interactive selection (filtered)")
+    print("    python ascec-v04.py update new_template.inp            # Interactive selection (same extension)")
+    print("    python ascec-v04.py update new_template.inp conf_1     # Interactive selection (filtered)")
     print()
     
     print("=" * 80)
@@ -7885,7 +7730,7 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
                 else:
                     print(f"      Could not create displaced structure")
             elif imag_count >= 2:
-                # Multiple imaginary frequencies: extract final geometry
+                # Multiple imaginary frequencies: extract from final geometry
                 if extract_final_geometry(out_file, calc_dir):
                     processed += 1
                     print(f"      Final geometry extracted for re-optimization")
@@ -7897,18 +7742,30 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
     return processed
 
 def count_imaginary_frequencies(out_file: str) -> int:
-    """Count number of imaginary frequencies in ORCA output file."""
+    """Count number of imaginary frequencies in ORCA output file by checking for negative values."""
     try:
         with open(out_file, 'r') as f:
             content = f.read()
-            # Count occurrences of imaginary frequency markers
-            count = content.lower().count('***imaginary mode***')
-            if count == 0:
-                # Alternative pattern
-                import re
-                matches = re.findall(r'imaginary mode', content, re.IGNORECASE)
-                count = len(matches)
-            return count
+            
+        # Regex to match vibrational frequencies in ORCA output
+        # Format:    6:      -123.45 cm-1
+        import re
+        # Look for the vibrational frequencies section
+        if "VIBRATIONAL FREQUENCIES" in content:
+            # Extract frequencies - handle both cm-1 and cm**-1
+            # Format:    6:      -123.45 cm-1  OR  6:      -123.45 cm**-1
+            freq_matches = re.findall(r"\s+\d+:\s+(-?\d+\.\d+)\s+cm(?:\*\*|)-1", content)
+            if freq_matches:
+                # Count negative frequencies
+                imag_count = sum(1 for freq in freq_matches if float(freq) < 0)
+                return imag_count
+        
+        # Fallback to old method if section not found (e.g. different format)
+        count = content.lower().count('***imaginary mode***')
+        if count == 0:
+            matches = re.findall(r'imaginary mode', content, re.IGNORECASE)
+            count = len(matches)
+        return count
     except:
         return 0
 
@@ -7996,26 +7853,29 @@ def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5
             return False
         
         # Step 2: Find imaginary frequency mode number
-        # Look in VIBRATIONAL FREQUENCIES section for "***imaginary mode***"
+        # Look in VIBRATIONAL FREQUENCIES section for negative frequencies
         imaginary_mode_idx = None
         imaginary_freq = None
         for i, line in enumerate(lines):
             if 'VIBRATIONAL FREQUENCIES' in line:
                 # Search next 200 lines for imaginary mode
                 for j in range(i, min(i+200, len(lines))):
-                    if '***imaginary mode***' in lines[j]:
-                        # Extract mode number and frequency
+                    # Check for frequency line (handle both cm-1 and cm**-1)
+                    if 'cm-1' in lines[j] or 'cm**-1' in lines[j]:
                         # Format: "   6:       -16.68 cm**-1 ***imaginary mode***"
                         parts = lines[j].split(':')
                         if len(parts) >= 2:
                             try:
-                                imaginary_mode_idx = int(parts[0].strip())
-                                # Extract frequency value
-                                freq_parts = parts[1].split()
-                                if freq_parts:
-                                    imaginary_freq = float(freq_parts[0])
-                                break
-                            except ValueError:
+                                # Parse frequency value
+                                freq_str = parts[1].strip().split()[0]
+                                freq_val = float(freq_str)
+                                
+                                # Check if negative
+                                if freq_val < 0:
+                                    imaginary_mode_idx = int(parts[0].strip())
+                                    imaginary_freq = freq_val
+                                    break
+                            except (ValueError, IndexError):
                                 continue
                 break
         
@@ -8529,13 +8389,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             if stage_key in cache['stages']:
                 stage_cache = cache['stages'][stage_key]
                 if stage_cache.get('status') == 'completed':
+                    # Display name (Annealing instead of Replication)
+                    display_name = 'Annealing' if stage_type == 'replication' else stage_type.capitalize()
                     print(f"\n{'-' * 60}")
-                    print(f"[{stage_num}/{len(stages)}] {stage_type.capitalize()} (cached)")
+                    print(f"[{stage_num}/{len(stages)}] {display_name} (cached)")
                     print(f"  ✓ Skipped (completed at {stage_cache.get('timestamp', 'unknown')})")
                     print('-' * 60)
                     stage_idx += 1
                     if stage_type == 'calculation':
-                        # Check if next stage is similarity AND it's also cached - skip both if both cached
+                        # Check if next stage is similarity AND it's also cached - check threshold before skipping
                         next_is_similarity = (stage_idx < len(stages) and 
                                             stages[stage_idx]['type'] == 'similarity')
                         if next_is_similarity:
@@ -8544,14 +8406,83 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             next_stage_key = f"similarity_{next_stage_num}"
                             if next_stage_key in cache.get('stages', {}) and \
                                cache['stages'][next_stage_key].get('status') == 'completed':
+                                
+                                # Check if calculation stage has redo parameters
+                                calc_args = stage['args']
+                                max_critical = None
+                                max_skipped = None
+                                
+                                for arg in calc_args:
+                                    if arg.startswith('--critical='):
+                                        max_critical = float(arg.split('=')[1])
+                                    elif arg.startswith('--skipped='):
+                                        max_skipped = float(arg.split('=')[1])
+                                
+                                # If thresholds are set, check if they're met
+                                if max_critical is not None or max_skipped is not None:
+                                    # Get similarity directory from cache
+                                    sim_cache = cache['stages'][next_stage_key]
+                                    sim_dir = sim_cache.get('result', {}).get('working_dir', 'similarity')
+                                    summary_file = os.path.join(sim_dir, "clustering_summary.txt")
+                                    
+                                    if os.path.exists(summary_file):
+                                        critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+                                        
+                                        threshold_met = True
+                                        if max_critical is not None:
+                                            threshold_met = critical_pct <= max_critical
+                                            if not threshold_met:
+                                                print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
+                                                print(f"  Invalidating cache and re-running calculation with redo logic...")
+                                                # Remove both calc and similarity from cache
+                                                if stage_key in cache.get('stages', {}):
+                                                    del cache['stages'][stage_key]
+                                                if next_stage_key in cache.get('stages', {}):
+                                                    del cache['stages'][next_stage_key]
+                                                # Save updated cache
+                                                with open(cache_file, 'wb') as f:
+                                                    pickle.dump(cache, f)
+                                                # Go back to re-execute this stage
+                                                stage_idx -= 1
+                                                continue
+                                        elif max_skipped is not None:
+                                            threshold_met = skipped_pct <= max_skipped
+                                            if not threshold_met:
+                                                print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
+                                                print(f"  Invalidating cache and re-running calculation with redo logic...")
+                                                # Remove both calc and similarity from cache
+                                                if stage_key in cache.get('stages', {}):
+                                                    del cache['stages'][stage_key]
+                                                if next_stage_key in cache.get('stages', {}):
+                                                    del cache['stages'][next_stage_key]
+                                                # Save updated cache
+                                                with open(cache_file, 'wb') as f:
+                                                    pickle.dump(cache, f)
+                                                # Go back to re-execute this stage
+                                                stage_idx -= 1
+                                                continue
+                                
+                                # If we get here, threshold is met or not set - skip both stages
+                                # Print skipped similarity stage
+                                sim_stage_cache = cache['stages'][next_stage_key]
+                                print(f"\n{'-' * 60}")
+                                print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+                                print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+                                print('-' * 60)
                                 stage_idx += 1
                     continue
         
         # Display name for stage (Annealing instead of Replication)
-        stage_display_name = stage_display_map.get(stage_type, stage_type.capitalize())
+        display_name = stage_type
+        if stage_type == 'replication':
+            display_name = 'Annealing'
+        elif stage_type == 'calculation':
+            display_name = 'Calculation'
+        else:
+            display_name = stage_type.capitalize()
         
         print(f"\n{'-' * 60}")
-        print(f"[{stage_num}/{len(stages)}] {stage_display_name}")
+        print(f"[{stage_num}/{len(stages)}] {display_name}")
         print('-' * 60)
         
         # Update cache - mark stage as in progress
@@ -8653,16 +8584,42 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if attempt > 1:
                             print(f"\nRedo attempt {attempt}/{max_redos}")
                         
-                        # If this is a redo attempt, remove old similarity/ folder BEFORE calculation/sort
-                        if attempt > 1 and os.path.exists("similarity"):
-                            print("\nRemoving old similarity/ folder...")
-                            shutil.rmtree("similarity")
+                        # Don't delete similarity folder - we'll update it with corrected calculations
                         
                         # Run calculation (which includes sort step that creates similarity/)
                         result = execute_calculation_stage(context, stage)
                         if result != 0:
                             print(f"\nError: Calculation failed with code {result}")
                             return result
+                        
+                        # If this is a redo attempt and we have recalculated files, copy them to similarity folder
+                        if attempt > 1 and hasattr(context, 'recalculated_files') and context.recalculated_files:
+                            # Get calculation and similarity directories
+                            calc_dir = getattr(context, 'calculation_dir', 'calculation')
+                            # Get similarity orca output directory
+                            sim_dir = context.similarity_dir if hasattr(context, 'similarity_dir') else "similarity"
+                            
+                            # Find the orca_out directory in similarity
+                            orca_dirs = glob.glob(os.path.join(sim_dir, "orca_out*"))
+                            if orca_dirs:
+                                sim_orca_dir = orca_dirs[0]  # Use first match (e.g., orca_out_581)
+                                print(f"\n  Updating {len(context.recalculated_files)} file(s) in {sim_orca_dir}/")
+                                
+                                # Copy updated .out files from calculation subdirectories to similarity
+                                for basename in context.recalculated_files:
+                                    # Find the .out file in calculation subdirectories
+                                    calc_subdir = os.path.join(calc_dir, basename)
+                                    calc_out_file = os.path.join(calc_subdir, f"{basename}.out")
+                                    
+                                    if os.path.exists(calc_out_file):
+                                        # Copy to similarity orca directory
+                                        sim_out_file = os.path.join(sim_orca_dir, f"{basename}.out")
+                                        shutil.copy2(calc_out_file, sim_out_file)
+                                        print(f"    Copied {basename}.out to similarity folder")
+                                    else:
+                                        print(f"    Warning: {calc_out_file} not found")
+                            else:
+                                print(f"\n  Warning: No orca_out directory found in {sim_dir}/")
                         
                         # Run similarity (suppress stage header in retry mode)
                         if attempt == 1:
@@ -8677,7 +8634,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             return result
                         
                         # Parse similarity results from clustering_summary.txt
-                        summary_file = os.path.join("similarity", "clustering_summary.txt")
+                        summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                         if os.path.exists(summary_file):
                             critical_pct, skipped_pct = parse_similarity_summary(summary_file)
                             
@@ -8710,198 +8667,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             # If threshold not met and attempts remain, continue to redo logic below
                             if not threshold_met:
                                 if attempt < max_redos:
-                                    import tempfile
-                                    
-                                    # ═══════════════════════════════════════════════════════════════
-                                    # INTELLIGENT RETRY SYSTEM (REDO LOGIC)
-                                    # Works with both ORCA and Gaussian output files
-                                    # ═══════════════════════════════════════════════════════════════
-                                    # When similarity threshold not met, redo failed calculations:
-                                    #
-                                    # 1. Identify failed structures from similarity/need_recalculation/
-                                    # 2. Process geometry based on imaginary frequency count:
-                                    #    - 1 imaginary: Displace along mode (orca_pltvib)
-                                    #    - 2+ imaginary: Use final geometry from optimization
-                                    # 3. UNSORT calculation/ (move files from subdirs to root)
-                                    # 4. Remove similarity/ folder (will be recreated by sort)
-                                    # 5. Update .inp files with new geometries for failed structures
-                                    # 6. Delete .out files for failed structures (keep good ones)
-                                    # 7. Re-run calculations (only for structures without .out)
-                                    # 8. SORT again (recreates subdirs + similarity/ folder)
-                                    # 9. SIMILARITY again (reprocess all structures)
-                                    #
-                                    # Note: Reuses same calculation/ folder, no numbered copies needed
-                                    # ═══════════════════════════════════════════════════════════════
-                                    
-                                    # Get directories from cache instead of hardcoded paths
-                                    # This enables proper stage memory in workflows
-                                    calc_key = f"calculation_{stage_num}"
-                                    sim_key = f"similarity_{stage_num + 1}"
-                                    
-                                    # Get working directories from cache (fallback to context or defaults)
-                                    calc_dir = context.get_stage_working_dir(calc_key)
-                                    if not calc_dir:
-                                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                                    
-                                    sim_dir = context.get_stage_working_dir(sim_key)
-                                    if not sim_dir:
-                                        sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
-                                    
-                                    # Check for need_recalculation folder (created by similarity script)
-                                    need_recalc_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
-                                    
-                                    if os.path.exists(need_recalc_dir):
-                                        # Step 1: Get list of structures that need recalculation from similarity
-                                        xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
-                                        if xyz_files:
-                                            print(f"\nPreparing {len(xyz_files)} structure(s) for retry")
-                                            
-                                            # Build basenames but filter out combined files (these are for user convenience only)
-                                            need_recalc_basenames = [os.path.splitext(os.path.basename(f))[0] for f in xyz_files]
-                                            filtered_basenames = []
-                                            for b in need_recalc_basenames:
-                                                low = b.lower()
-                                                # Skip files that are clearly combined outputs created by similarity
-                                                if low.startswith('combined') or 'combined_' in low or low == 'combined':
-                                                    print(f"    Skipping combined file from similarity: {b}")
-                                                    continue
-                                                filtered_basenames.append(b)
-                                            need_recalc_basenames = filtered_basenames
-                                            
-                                            # Step 2: UNSORT - Move files from subdirectories back to calculation root
-                                            if os.path.exists(calc_dir):
-                                                print(f"  Unsorting {calc_dir}/ (moving files from subdirs to root)")
-                                                unsort_directory(calc_dir)
-                                            
-                                            # Step 3: Process failed structures - extract/update geometries
-                                            processed_count = 0
-                                            processed_basenames = []
-                                            for basename in need_recalc_basenames:
-                                                xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
-                                                out_file = os.path.join(calc_dir, f"{basename}.out")
-                                                inp_file = os.path.join(calc_dir, f"{basename}.inp")
-
-                                                if not os.path.exists(inp_file):
-                                                    print(f"    Warning: {basename}.inp not found, skipping")
-                                                    continue
-
-                                                # Read existing .inp to get template structure
-                                                with open(inp_file, 'r') as f:
-                                                    inp_content = f.read()
-
-                                                # Determine new geometry based on imaginary frequencies
-                                                new_geometry = None
-                                                if os.path.exists(out_file):
-                                                    imag_count = count_imaginary_frequencies(out_file)
-
-                                                    if imag_count == 1:
-                                                        # Single imaginary: displace along mode
-                                                        print(f"    {basename}: 1 imaginary freq, displacing along mode", end='')
-                                                        xyz_lines = displace_along_imaginary_mode(out_file, calc_dir)
-                                                        if xyz_lines:
-                                                            # Verify the returned data has proper format
-                                                            try:
-                                                                natoms = int(xyz_lines[0].strip())
-                                                                if len(xyz_lines) >= natoms + 2:
-                                                                    new_geometry = xyz_lines[2:]  # Skip first 2 lines
-                                                                    print(f" ✓")
-                                                                else:
-                                                                    print(f" ✗ (malformed XYZ)")
-                                                            except (ValueError, IndexError):
-                                                                print(f" ✗ (invalid XYZ format)")
-                                                        else:
-                                                            print(f" ✗ (displacement failed)")
-
-                                                    elif imag_count >= 2:
-                                                        # Multiple imaginary: extract final geometry
-                                                        print(f"    {basename}: {imag_count} imaginary freqs, using final geometry", end='')
-                                                        xyz_lines = extract_final_geometry(out_file, calc_dir)
-                                                        if xyz_lines:
-                                                            new_geometry = xyz_lines[2:]  # Skip first 2 lines
-                                                            print(f" ✓")
-                                                        else:
-                                                            print(f" ✗ (extraction failed)")
-                                                    else:
-                                                        # No imaginary - use XYZ from similarity
-                                                        print(f"    {basename}: No imaginary freqs, using similarity XYZ")
-                                                        if os.path.exists(xyz_file):
-                                                            with open(xyz_file, 'r') as f:
-                                                                new_geometry = f.readlines()[2:]
-                                                else:
-                                                    # No .out file - use XYZ from similarity
-                                                    print(f"    {basename}: Using geometry from similarity")
-                                                    if os.path.exists(xyz_file):
-                                                        with open(xyz_file, 'r') as f:
-                                                            new_geometry = f.readlines()[2:]
-
-                                                # Step 4: Update .inp file with new geometry
-                                                if new_geometry:
-                                                    # Update inp file geometry (ORCA format: * xyz charge mult ... *)
-                                                    lines = inp_content.split('\n')
-                                                    new_inp = []
-                                                    in_coords = False
-                                                    for line in lines:
-                                                        if line.strip().startswith('* xyz'):
-                                                            new_inp.append(line)
-                                                            in_coords = True
-                                                            # Add new geometry
-                                                            for coord_line in new_geometry:
-                                                                if coord_line.strip() and not coord_line.strip() == '*':
-                                                                    new_inp.append(coord_line.rstrip())
-                                                            new_inp.append('*')
-                                                        elif in_coords and line.strip() == '*':
-                                                            in_coords = False
-                                                            # Already added * above
-                                                        elif not in_coords:
-                                                            new_inp.append(line)
-
-                                                    with open(inp_file, 'w') as f:
-                                                        f.write('\n'.join(new_inp))
-                                                    processed_count += 1
-                                                    processed_basenames.append(basename)
-                                            
-                                            print(f"  Updated {processed_count} input file(s) with new geometries")
-                                            
-                                            # Store recalculated basenames in context for similarity cache update
-                                            context.recalculated_files = processed_basenames
-
-                                            # Step 5: Delete .out files only for structures that we actually prepared
-                                            print(f"  Removing output files for structures needing recalculation")
-                                            for basename in processed_basenames:
-                                                out_file = os.path.join(calc_dir, f"{basename}.out")
-                                                if os.path.exists(out_file):
-                                                    os.remove(out_file)
-                                                # Also remove auxiliary files
-                                                for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.engrad']:
-                                                    aux_file = os.path.join(calc_dir, f"{basename}{ext}")
-                                                    if os.path.exists(aux_file):
-                                                        try:
-                                                            os.remove(aux_file)
-                                                        except:
-                                                            pass
-                                            
-                                            # Step 6: Remove similarity/ folder (will be regenerated by sort after recalc)
-                                            # This happens AFTER we get the info but BEFORE the next iteration
-                                            # Actually, keep it for now - it will be removed after successful recalc
-                                            # The next loop iteration will:
-                                            #   - Recalculate (5/5 structures)
-                                            #   - Remove similarity/ (in post-calc cleanup)
-                                            #   - Sort (recreate similarity/)
-                                            #   - Similarity (reprocess)
-                                        else:
-                                            # No structures need recalculation - we're done!
-                                            print(f"\n✓ No structures need recalculation")
-                                            break
-                                    else:
-                                        # No need_recalculation folder - redo all structures
-                                        print(f"\n⚠ Warning: need_recalculation folder not found, redoing all structures")
-                                        
-                                        # Use cached directories 
-                                        if os.path.exists(calc_dir):
-                                            shutil.rmtree(calc_dir)
-                                        if os.path.exists(sim_dir):
-                                            shutil.rmtree(sim_dir)
-                                    
+                                    # Redo logic has been moved to the start of execute_calculation_stage
+                                    # via process_redo_structures function
+                                    # Just continue the loop to trigger another attempt
+                                    pass  # Loop will continue to next iteration
                                 else:
                                     print(f"Max attempts reached")
                         else:
@@ -8911,7 +8680,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     # Get final similarity results for cache
                     final_critical = None
                     final_skipped = None
-                    summary_file = os.path.join("similarity", "clustering_summary.txt")
+                    summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                     if os.path.exists(summary_file):
                         final_critical, final_skipped = parse_similarity_summary(summary_file)
                     
@@ -9002,6 +8771,86 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 # Standalone similarity (not after calc)
                 result = execute_similarity_stage(context, stage)
                 
+                # Check if previous stage was calculation with threshold requirements
+                if result == 0 and stage_idx > 0:
+                    prev_stage = stages[stage_idx - 1]
+                    if prev_stage['type'] == 'calculation':
+                        # Check if calculation had redo parameters
+                        calc_args = prev_stage['args']
+                        max_critical = None
+                        max_skipped = None
+                        max_redos = 1
+                        
+                        for arg in calc_args:
+                            if arg.startswith('--critical='):
+                                max_critical = float(arg.split('=')[1])
+                            elif arg.startswith('--skipped='):
+                                max_skipped = float(arg.split('=')[1])
+                            elif arg.startswith('--redo='):
+                                max_redos = int(arg.split('=')[1])
+                        
+                        # If thresholds are set and redo is enabled, check results
+                        if (max_critical is not None or max_skipped is not None) and max_redos > 1:
+                            summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
+                            
+                            if os.path.exists(summary_file):
+                                critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+                                
+                                print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
+                                
+                                threshold_met = True
+                                if max_critical is not None:
+                                    threshold_met = critical_pct <= max_critical
+                                    if not threshold_met:
+                                        print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
+                                        print(f"  Invalidating cache and re-running calculation with redo logic...")
+                                        
+                                        # Invalidate both calc and similarity stages
+                                        calc_key = f"calculation_{stage_idx}"  # Previous stage
+                                        sim_key = f"similarity_{stage_num}"    # Current stage
+                                        
+                                        if use_cache and 'stages' in cache:
+                                            if calc_key in cache['stages']:
+                                                del cache['stages'][calc_key]
+                                            if sim_key in cache['stages']:
+                                                del cache['stages'][sim_key]
+                                            
+                                            # Save updated cache
+                                            with open(cache_file, 'wb') as f:
+                                                pickle.dump(cache, f)
+                                        
+                                        # Go back to re-execute calculation stage
+                                        stage_idx -= 1
+                                        continue
+                                    else:
+                                        print(f"→ Threshold met (critical ≤ {max_critical}%)")
+                                        
+                                elif max_skipped is not None:
+                                    threshold_met = skipped_pct <= max_skipped
+                                    if not threshold_met:
+                                        print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
+                                        print(f"  Invalidating cache and re-running calculation with redo logic...")
+                                        
+                                        # Invalidate both calc and similarity stages
+                                        calc_key = f"calculation_{stage_idx}"
+                                        sim_key = f"similarity_{stage_num}"
+                                        
+                                        if use_cache and 'stages' in cache:
+                                            if calc_key in cache['stages']:
+                                                del cache['stages'][calc_key]
+                                            if sim_key in cache['stages']:
+                                                del cache['stages'][sim_key]
+                                            
+                                            # Save updated cache
+                                            with open(cache_file, 'wb') as f:
+                                                pickle.dump(cache, f)
+                                        
+                                        # Go back to re-execute calculation stage
+                                        stage_idx -= 1
+                                        continue
+                                    else:
+                                        print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
+                
                 # Save similarity result to cache
                 if result == 0 and use_cache:
                     from datetime import datetime as dt_sim
@@ -9016,6 +8865,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         sim_result['similarity_folder'] = context.sim_folder
                     if hasattr(context, 'sim_motifs_created') and context.sim_motifs_created is not None:
                         sim_result['motifs_created'] = context.sim_motifs_created
+                    
+                    # Store working directory for later threshold checks
+                    if hasattr(context, 'similarity_dir'):
+                        sim_result['working_dir'] = context.similarity_dir
                     
                     update_protocol_cache(sim_key, 'completed', 
                                         result=sim_result, cache_file=cache_file)
@@ -9054,6 +8907,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         elif max_skipped is not None:
                             print(f"  Stage redo enabled: max {max_redos} attempts, target skipped ≤ {max_skipped}%")
                     
+                    
+                    # Determine the similarity folder for THIS optimization stage BEFORE the loop
+                    # Check for similarity_2 first (opt stage), not similarity (calc stage)
+                    opt_sim_dir = None
+                    if os.path.exists("similarity_2"):
+                        opt_sim_dir = "similarity_2"
+                    elif os.path.exists("similarity_3"):
+                        opt_sim_dir = "similarity_3"
+                    elif os.path.exists("similarity_4"):
+                        opt_sim_dir = "similarity_4"
+                    
+                    # Store in context for execute_optimization_stage to use
+                    if opt_sim_dir:
+                        context.opt_sim_folder = opt_sim_dir
+                    
                     # Redo loop for opt+similarity
                     final_attempt = 1
                     for attempt in range(1, max_redos + 1):
@@ -9067,10 +8935,51 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             print(f"\nError: Optimization failed with code {result}")
                             return result
                         
-                        # If this is a redo attempt, remove old similarity_2/ folder before sort/similarity
-                        if attempt > 1 and os.path.exists("similarity_2"):
-                            print("\nRemoving old similarity_2/ folder...")
-                            shutil.rmtree("similarity_2")
+                        # If this is a redo attempt and we have recalculated files, copy them to similarity folder
+                        if attempt > 1 and hasattr(context, 'recalculated_files') and context.recalculated_files:
+                            # Get optimization and similarity directories
+                            opt_dir = getattr(context, 'optimization_dir', 'optimization')
+                            # Get similarity orca output directory
+                            sim_dir = opt_sim_dir if opt_sim_dir else "similarity_2"
+                            
+                            # Find the orca_out directory in similarity
+                            orca_dirs = glob.glob(os.path.join(sim_dir, "orca_out*"))
+                            if orca_dirs:
+                                sim_orca_dir = orca_dirs[0]  # Use first match (e.g., orca_out_1)
+                                print(f"\n  Updating {len(context.recalculated_files)} file(s) in {sim_orca_dir}/")
+                                
+                                # Copy updated .out files from optimization subdirectories to similarity
+                                for basename in context.recalculated_files:
+                                    # Find the .out file in optimization subdirectories
+                                    opt_out_file = find_out_file_in_subdirs(opt_dir, basename)
+                                    
+                                    if opt_out_file:
+                                        # Copy to similarity orca directory
+                                        sim_out_file = os.path.join(sim_orca_dir, f"{basename}.out")
+                                        shutil.copy2(opt_out_file, sim_out_file)
+                                        print(f"    Copied {basename}.out to similarity folder")
+                                    else:
+                                        print(f"    Warning: {basename}.out not found")
+                            else:
+                                print(f"\n  Warning: No orca_out directory found in {sim_dir}/")
+                        
+                        # If this is a redo attempt, clean similarity folder for fresh analysis
+                        # BUT keep orca_out_X/ and data_cache.pkl for incremental updates
+                        if attempt > 1:
+                            if opt_sim_dir and os.path.exists(opt_sim_dir):
+                                print(f"\nCleaning {opt_sim_dir}/ for fresh analysis...")
+                                # Remove all subdirectories EXCEPT orca_out_*, opt_out_*
+                                # and keep data_cache.pkl
+                                for item in os.listdir(opt_sim_dir):
+                                    item_path = os.path.join(opt_sim_dir, item)
+                                    if os.path.isdir(item_path):
+                                        # Keep orca_out_* and opt_out_* folders
+                                        if not (item.startswith("orca_out_") or item.startswith("opt_out_")):
+                                            shutil.rmtree(item_path)
+                                    elif os.path.isfile(item_path):
+                                        # Keep data_cache.pkl and .xyz files in orca_out folders
+                                        if item != "data_cache.pkl":
+                                            os.remove(item_path)
                         
                         # Run similarity (suppress stage header in retry mode)
                         if attempt == 1:
@@ -9085,7 +8994,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             return result
                         
                         # Parse similarity results from clustering_summary.txt
-                        summary_file = os.path.join("similarity_2", "clustering_summary.txt")
+                        summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                         if os.path.exists(summary_file):
                             critical_pct, skipped_pct = parse_similarity_summary(summary_file)
                             
@@ -9111,35 +9020,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             else:
                                 break
                             
-                            # If threshold not met and attempts remain, prepare for redo
-                            if not threshold_met and attempt < max_redos:
-                                # Same redo logic as calculation stage
-                                need_recalc_dir = os.path.join("similarity_2", "skipped_structures", "need_recalculation")
-                                
-                                if os.path.exists(need_recalc_dir):
-                                    xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
-                                    if xyz_files:
-                                        print(f"\nPreparing {len(xyz_files)} structure(s) for retry")
-                                        
-                                        opt_dir = "optimization"
-                                        need_recalc_basenames = set(os.path.splitext(os.path.basename(f))[0] for f in xyz_files)
-                                        
-                                        # UNSORT optimization folder
-                                        if os.path.exists(opt_dir):
-                                            print(f"  Unsorting {opt_dir}/ (moving files from subdirs to root)")
-                                            unsort_directory(opt_dir)
-                                        
-                                        # Process and update .inp files (same logic as calculation)
-                                        # Delete .out files for failed structures
-                                        print(f"  Removing output files for structures needing recalculation")
-                                        for basename in need_recalc_basenames:
-                                            out_file = os.path.join(opt_dir, f"{basename}.out")
-                                            if os.path.exists(out_file):
-                                                os.remove(out_file)
-                                            for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.engrad']:
-                                                aux_file = os.path.join(opt_dir, f"{basename}{ext}")
-                                                if os.path.exists(aux_file):
-                                                    os.remove(aux_file)
+                            # If threshold not met and attempts remain, continue to redo logic
+                            if not threshold_met:
+                                if attempt < max_redos:
+                                    # Redo logic has been moved to the start of execute_optimization_stage
+                                    # via process_redo_structures function
+                                    # Just continue the loop to trigger another attempt
+                                    pass  # Loop will continue to next iteration
+                                else:
+                                    print(f"Max attempts reached")
                         else:
                             print("⚠ Warning: Could not find clustering_summary.txt")
                             break
@@ -9147,7 +9036,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     # Get final similarity results for cache
                     final_critical = None
                     final_skipped = None
-                    summary_file = os.path.join("similarity_2", "clustering_summary.txt")
+                    summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                     if os.path.exists(summary_file):
                         final_critical, final_skipped = parse_similarity_summary(summary_file)
                     
@@ -9337,8 +9226,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         for attempt in range(1, max_retries + 1):
             try:
                 # Run as subprocess in the run directory
-                # Use python3 explicitly to ensure correct interpreter
-                cmd = ['python3', os.path.abspath(sys.argv[0]), input_basename]
+                # Use python explicitly to ensure correct interpreter
+                cmd = ['python', os.path.abspath(sys.argv[0]), input_basename]
                 result = subprocess.run(
                     cmd,
                     cwd=run_dir,
@@ -9456,6 +9345,277 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     
     return 0
 
+def find_out_file_in_subdirs(base_dir: str, basename: str):
+    """Find .out file in subdirectories, checking shortened basename variants."""
+    subdirs_to_check = [basename, 'orca_out', 'gaussian_out', 'completed', 'failed', 'skipped']
+    
+    # Add shortened basename variants
+    if '_opt' in basename:
+        subdirs_to_check.insert(0, basename.replace('_opt', ''))
+    elif '_calc' in basename:
+        subdirs_to_check.insert(0, basename.replace('_calc', ''))
+    
+    # Check root first
+    root_file = os.path.join(base_dir, f"{basename}.out")
+    if os.path.exists(root_file):
+        return root_file
+    
+    # Check subdirectories
+    for subdir in subdirs_to_check:
+        subdir_path = os.path.join(base_dir, subdir)
+        out_file = os.path.join(subdir_path, f"{basename}.out")
+        if os.path.exists(out_file):
+            return out_file
+    
+    return None
+
+def process_redo_structures(context: WorkflowContext, stage_dir: str, template_file: str) -> bool:
+    """
+    Process structures that need recalculation (from similarity stage).
+    Regenerates input files using new geometries and deletes old output files.
+    
+    Args:
+        context: Workflow context
+        stage_dir: Directory of the current stage (calculation or optimization)
+        template_file: Path to the template input file
+        
+    Returns:
+        bool: True if any structures were processed, False otherwise
+    """
+    # Determine similarity directory (check context or default)
+    sim_dir = getattr(context, 'similarity_dir', None)
+    if not sim_dir:
+        # For optimization stages, check for similarity_2, similarity_3, etc.
+        # For calculation stages, use similarity
+        if 'optimization' in stage_dir.lower():
+            # Check for similarity_2 first (most common for first optimization)
+            if os.path.exists('similarity_2'):
+                sim_dir = 'similarity_2'
+            elif os.path.exists('similarity_3'):
+                sim_dir = 'similarity_3'
+            elif os.path.exists('similarity_4'):
+                sim_dir = 'similarity_4'
+            else:
+                # Fallback to similarity if none found
+                sim_dir = 'similarity'
+        else:
+            # Calculation stage - use similarity
+            sim_dir = 'similarity'
+    
+    if not os.path.exists(sim_dir):
+        return False
+        
+    need_recalc_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
+    if not os.path.exists(need_recalc_dir):
+        return False
+        
+    xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
+    if not xyz_files:
+        return False
+        
+    print(f"\nProcessing redo structures from: {need_recalc_dir}")
+    print(f"Found {len(xyz_files)} structure(s) to retry")
+    
+    # Get basenames
+    need_recalc_basenames = [os.path.splitext(os.path.basename(f))[0] for f in xyz_files]
+    filtered_basenames = []
+    for b in need_recalc_basenames:
+        low = b.lower()
+        if low.startswith('combined') or 'combined_' in low or low == 'combined':
+            continue
+        filtered_basenames.append(b)
+    need_recalc_basenames = filtered_basenames
+    
+    if not need_recalc_basenames:
+        return False
+
+    processed_count = 0
+    processed_basenames = []
+    
+    # Get template content
+    if template_file and os.path.exists(template_file):
+        with open(template_file, 'r') as f:
+            template_content = f.read()
+    else:
+        print(f"  Warning: Template file {template_file} not found. Cannot regenerate inputs.")
+        return False
+
+    for basename in need_recalc_basenames:
+        xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
+        
+
+        
+        # Possible subdirectory names where .out files may be located
+        # Include both standard directories AND the basename itself (where ORCA/Gaussian creates output)
+        subdirs_to_check = [basename, 'orca_out', 'gaussian_out', 'completed', 'failed', 'skipped']
+        
+        # Also add shortened versions of basename (e.g., "motif_01" for "motif_01_opt")
+        # ORCA often creates subdirectories without the suffix
+        if '_opt' in basename:
+            subdirs_to_check.insert(0, basename.replace('_opt', ''))
+        elif '_calc' in basename:
+            subdirs_to_check.insert(0, basename.replace('_calc', ''))
+        
+        # Find .out file for this structure
+        out_file = None
+        
+        # Search in root first
+        if os.path.exists(os.path.join(stage_dir, f"{basename}.out")):
+            out_file = os.path.join(stage_dir, f"{basename}.out")
+        elif os.path.exists(os.path.join(stage_dir, f"{basename}.out.backup")):
+            out_file = os.path.join(stage_dir, f"{basename}.out.backup")
+        else:
+            # Search in subdirectories
+            for subdir in subdirs_to_check:
+                subdir_path = os.path.join(stage_dir, subdir)
+                if os.path.exists(os.path.join(subdir_path, f"{basename}.out")):
+                    out_file = os.path.join(subdir_path, f"{basename}.out")
+                    break
+                elif os.path.exists(os.path.join(subdir_path, f"{basename}.out.backup")):
+                    out_file = os.path.join(subdir_path, f"{basename}.out.backup")
+                    break
+        
+        # Determine new geometry based on imaginary frequencies
+        new_geometry = None
+        if out_file and os.path.exists(out_file):
+            imag_count = count_imaginary_frequencies(out_file)
+            
+            if imag_count == 1:
+                # Single imaginary: displace along mode
+                xyz_lines = displace_along_imaginary_mode(out_file, os.path.dirname(out_file))
+                if xyz_lines:
+                    try:
+                        natoms = int(xyz_lines[0].strip())
+                        if len(xyz_lines) >= natoms + 2:
+                            new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                            print(f"    {basename}: 1 imaginary freq, displacing along mode ✓")
+                        else:
+                            print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (malformed XYZ)")
+                    except (ValueError, IndexError):
+                        print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (invalid XYZ format)")
+                else:
+                    print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (displacement failed)")
+            
+            elif imag_count >= 2:
+                # Multiple imaginary: extract final geometry
+                xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                if xyz_lines:
+                    new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                    print(f"    {basename}: {imag_count} imaginary freqs, using final geometry ✓")
+                else:
+                    print(f"    {basename}: {imag_count} imaginary freqs, using final geometry ✗ (extraction failed)")
+            else:
+                # No imaginary - use XYZ from similarity
+                print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
+                if os.path.exists(xyz_file):
+                    with open(xyz_file, 'r') as f:
+                        new_geometry = f.readlines()[2:]
+                    print(f" ✓")
+                else:
+                    print(f" ✗ (similarity XYZ not found)")
+        else:
+            # No .out file found - use XYZ from similarity
+            print(f"    {basename}: No .out file, using similarity XYZ", end='')
+            if os.path.exists(xyz_file):
+                with open(xyz_file, 'r') as f:
+                    new_geometry = f.readlines()[2:]
+                print(f" ✓")
+            else:
+                print(f" ✗ (similarity XYZ not found)")
+        
+        # Regenerate input file with new geometry
+        if new_geometry:
+            # Determine QM program and input extension
+            template_lower = template_file.lower().strip()
+            if template_lower.endswith('.inp'):
+                qm_program = 'orca'
+                input_ext = '.inp'
+            else:
+                qm_program = 'gaussian'
+                input_ext = '.com' if template_lower.endswith('.com') else '.gjf'
+            
+            # Define input path
+            input_path = os.path.join(stage_dir, f"{basename}{input_ext}")
+            
+            # Generate input using existing function
+            # Parse XYZ lines into atom fields (symbol, x, y, z)
+            atoms_list = []
+            for line in new_geometry:
+                parts = line.strip().split()
+                if len(parts) >= 4:
+                    # Convert coordinates to float
+                    symbol = parts[0]
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    atoms_list.append([symbol, x, y, z])
+            
+            config_data = {
+                'atoms': atoms_list,
+                'comment': f"{basename} generated by ASCEC redo"
+            }
+            
+            if create_qm_input_file(config_data, template_content, input_path, qm_program):
+                processed_count += 1
+                processed_basenames.append(basename)
+    
+    if processed_count > 0:
+        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        
+        # Store recalculated basenames in context for similarity cache update
+        context.recalculated_files = processed_basenames
+        
+        # RENAME (not delete) output files for structures needing recalculation
+        # This preserves the old .out file in case the new calculation fails
+        # We can then extract geometry from the backup on next redo attempt
+        print(f"  Backing up old output files for structures needing recalculation")
+        for basename in processed_basenames:
+            # Build list of subdirectories to search, including shortened basename variants
+            subdirs_to_search = ['orca_out', 'gaussian_out', 'completed', basename]
+            
+            # Add shortened versions for common patterns (e.g., "motif_01" for "motif_01_opt")
+            if '_opt' in basename:
+                subdirs_to_search.insert(0, basename.replace('_opt', ''))
+            elif '_calc' in basename:
+                subdirs_to_search.insert(0, basename.replace('_calc', ''))
+            
+            # Check in subdirectories
+            search_dirs_for_out = [stage_dir] + [os.path.join(stage_dir, sd) for sd in subdirs_to_search]
+            
+            out_file_found = False
+            for search_dir in search_dirs_for_out:
+                if not os.path.exists(search_dir):
+                    continue
+                
+                out_file = os.path.join(search_dir, f"{basename}.out")
+                if os.path.exists(out_file):
+                    # Incremental backup logic
+                    backup_base = out_file + ".backup"
+                    backup_file = backup_base
+                    backup_counter = 2
+                    while os.path.exists(backup_file):
+                        backup_file = f"{backup_base}{backup_counter}"
+                        backup_counter += 1
+                    
+                    shutil.move(out_file, backup_file)
+                    out_file_found = True
+                    break # Only rename the first .out file found
+            
+            # Also remove auxiliary files from all possible locations
+            # Use the broader search_dirs list for auxiliary files
+            all_possible_search_dirs = [stage_dir] + [os.path.join(stage_dir, sd) for sd in subdirs_to_search + ['failed', 'skipped']]
+            for search_dir in all_possible_search_dirs:
+                if not os.path.exists(search_dir):
+                    continue
+                for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.engrad']:
+                    aux_file = os.path.join(search_dir, f"{basename}{ext}")
+                    if os.path.exists(aux_file):
+                        try:
+                            os.remove(aux_file)
+                        except Exception:
+                            pass
+                            
+    return processed_count > 0
+
+
 def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
     """Execute calculation stage with automatic retry logic."""
     # Store context globally for access in helper functions
@@ -9518,6 +9678,16 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     context.max_tries = max_stage_redos  # For compatibility with existing code
     context.max_attempts_per_calc = max_calc_retries  # Store for this stage
     
+    # Process redo structures at the START of the stage (if need_recalculation exists)
+    # This ensures that when the workflow restarts this stage after a similarity failure,
+    # we immediately regenerate inputs and delete old outputs before checking completion
+    calc_dir = getattr(context, 'calculation_dir', 'calculation')
+    if not calc_dir:  # Handle empty string
+        calc_dir = 'calculation'
+    if os.path.exists(calc_dir):
+        redo_result = process_redo_structures(context, calc_dir, template_file)
+    
+    
     # Check if we're resuming and calculation directory already exists
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
     cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
@@ -9525,36 +9695,128 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     # Get the current stage key from context (e.g., "calculation_2" for first calc at position 2)
     stage_key = getattr(context, 'current_stage_key', '')
     
+    # Get completed calculations from cache
     completed_calcs = cache.get('stages', {}).get(stage_key, {}).get('result', {}).get('completed_files', [])
     calc_dir_exists = os.path.exists("calculation")
     
-    # If resuming (cache exists + calc stage was started before), reuse existing directory
+    # If resuming (cache exists + calc stage was started before), reuse existing directory  
     # This works even if no calculations completed yet (e.g., interrupted during first calc)
     stage_was_started = stage_key in cache.get('stages', {})
     
+    # Determine if this is a fresh start or resume
+    calc_dir = getattr(context, 'calculation_dir', None)
     if calc_dir_exists and stage_was_started:
-        calc_dir = "calculation"
+        # Use absolute path from context if available, otherwise use relative path
+        if not calc_dir:
+            calc_dir = "calculation"
         
-        # Get current input files from calculation directory to filter completed_calcs
-        # This ensures completed_calcs only includes files that still exist
-        current_input_files = []
-        # Check root level
-        for f in os.listdir(calc_dir):
-            if f.endswith(('.inp', '.com', '.gjf')):
-                current_input_files.append(f)
-        # Check subdirectories (if files were sorted)
-        if not current_input_files:
+        # Check if redo structures exist (files scheduled for recalculation)
+        redo_files = set()
+        if hasattr(context, 'recalculated_files') and context.recalculated_files:
+            redo_files = set(context.recalculated_files)
+        
+        # Scan ALL subdirectories for completed calculations (check for .out files, NOT .out.backup)
+        # Files with only .out.backup are being redone and should NOT be counted as completed
+        actual_completed = []
+        
+        # 1. Check calculation directory subfolders
+        if os.path.exists(calc_dir):
             for item in os.listdir(calc_dir):
                 item_path = os.path.join(calc_dir, item)
-                if os.path.isdir(item_path):
-                    for f in os.listdir(item_path):
-                        if f.endswith(('.inp', '.com', '.gjf')):
-                            current_input_files.append(os.path.join(item, f))
+                if os.path.isdir(item_path) and not item.startswith('_'):  # Skip _run_ directories
+                    # Skip if this file is marked for redo
+                    if item in redo_files:
+                        continue
+                        
+                    # Check if this subdirectory has a completed calculation (.out file, not just .backup)
+                    out_file = os.path.join(item_path, f"{item}.out")
+                    if os.path.exists(out_file):
+                        # Verify completion
+                        try:
+                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
+                                content = f.read()
+                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
+                                    actual_completed.append(item)
+                        except Exception:
+                            pass
+            
+            # 1b. Check for flat files in calculation directory (e.g. opt_conf_1.out)
+            # This handles the case where calculations are not in subdirectories
+            for item in os.listdir(calc_dir):
+                if item.endswith('.out') or item.endswith('.log'):
+                    basename = os.path.splitext(item)[0]
+                    # Skip if already found in subdir or marked for redo
+                    if basename not in actual_completed and basename not in redo_files:
+                        out_file = os.path.join(calc_dir, item)
+                        # Verify completion
+                        try:
+                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
+                                content = f.read()
+                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
+                                    actual_completed.append(basename)
+                        except Exception:
+                            pass
         
-        # Filter completed_calcs to only include files that currently exist
-        # Extract just the basename for comparison (handles both root and subdir paths)
-        current_basenames = set(os.path.basename(f) for f in current_input_files)
-        completed_calcs = [f for f in completed_calcs if os.path.basename(f) in current_basenames]
+        # 2. Check similarity/orca_out_* folders (files moved there after sorting)
+        # This is CRITICAL for showing correct counts (e.g. 11/11) when resuming
+        sim_dir = getattr(context, 'similarity_dir', 'similarity')
+        if os.path.exists(sim_dir):
+            for item in os.listdir(sim_dir):
+                if item.startswith('orca_out_') or item.startswith('gaussian_out_'):
+                    out_dir = os.path.join(sim_dir, item)
+                    if os.path.isdir(out_dir):
+                        files_in_subdir = os.listdir(out_dir)
+                        for f in files_in_subdir:
+                            if f.endswith('.out') or f.endswith('.log'):
+                                basename = os.path.splitext(f)[0]
+                                if basename not in actual_completed and basename not in redo_files:
+                                    # Verify completion here too
+                                    out_file = os.path.join(out_dir, f)
+                                    try:
+                                        with open(out_file, 'r', encoding='utf-8', errors='replace') as f_obj:
+                                            content = f_obj.read()
+                                            if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
+                                                actual_completed.append(basename)
+                                    except:
+                                        pass
+        
+        # Also check for similarity_2, similarity_3, etc.
+        # This is needed if we have multiple similarity stages
+        parent_dir = os.getcwd()
+        for item in os.listdir(parent_dir):
+            if item.startswith('similarity_') and os.path.isdir(item):
+                sim_dir_n = item
+                for subitem in os.listdir(sim_dir_n):
+                    if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_'):
+                        out_dir = os.path.join(sim_dir_n, subitem)
+                        if os.path.isdir(out_dir):
+                            for f in os.listdir(out_dir):
+                                if f.endswith('.out') or f.endswith('.log'):
+                                    basename = os.path.splitext(f)[0]
+                                    if basename not in actual_completed and basename not in redo_files:
+                                        actual_completed.append(basename)
+        
+        # Update completed_calcs to match reality
+        completed_calcs = actual_completed
+        
+        # CRITICAL: If we found NO completed files but input_files is very small,
+        # this might be a redo scenario where all other files are already done
+        # Count ALL subdirectories in calculation/ as potential completed files
+        if len(completed_calcs) == 0 and calc_dir_exists:
+            for item in os.listdir(calc_dir):
+                item_path = os.path.join(calc_dir, item)
+                if os.path.isdir(item_path) and not item.startswith('_'):
+                    # Even if no .out file, if the subdirectory exists, a calc was attempted
+                    # Check for .out.backup (means it's being redone)
+                    if item not in redo_files and item not in actual_completed:
+                        # Count any subdirectory as a potential completed calc for total count
+                        backup_file = os.path.join(item_path, f"{item}.out.backup")
+                        # Only count if it has either .out or .out.backup
+                        out_file = os.path.join(item_path, f"{item}.out")
+                        if os.path.exists(backup_file) or os.path.exists(out_file):
+                            actual_completed.append(item)
+            completed_calcs = actual_completed
+            print(f"DEBUG: After backup scan, found {len(actual_completed)} total")
         
         if completed_calcs:
             print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
@@ -9565,12 +9827,17 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         for old_inp in glob.glob(os.path.join(calc_dir, "*.inp")) + glob.glob(os.path.join(calc_dir, "*.com")):
             # Only remove if a corresponding subdirectory exists (calculation was run)
             basename = os.path.basename(old_inp).replace('.inp', '').replace('.com', '')
+            
+            # CRITICAL: Do NOT remove if this file was just regenerated by redo logic!
+            if basename in redo_files:
+                continue
+                
             subdir = os.path.join(calc_dir, basename)
             if os.path.isdir(subdir):
                 os.remove(old_inp)
     else:
         # Run calculation system creation with auto_select (in workflow mode)
-        result_msg = create_simple_calculation_system(template_file, launcher_file, auto_select=auto_select, workflow_mode=True)
+        status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="calculation", workflow_mode=True)
         # Don't print result message in workflow mode - output is already shown
         
         # Find the calculation directory that was just created
@@ -9622,16 +9889,28 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 excluded_numbers = cache.get('excluded_calculations_2', [])
             
             # Apply exclusion filtering to completed_calcs and input_files
-            # (completed_calcs was already filtered for file existence earlier)
             completed_calcs = [f for f in completed_calcs if not match_exclusion(f, excluded_numbers)]
             
-            # Count only non-excluded files for accurate total
-            num_inputs = sum(1 for f in input_files if not match_exclusion(f, excluded_numbers))
+            # Count total inputs (including those already completed and cached)
+            # This should be the TOTAL expected calculations, not just new ones
+            all_input_basenames = set()
             
-            # Filter completed_calcs to only include files that have matching input files
-            # This prevents showing 491/490 if there's an orphaned output file
-            input_basenames = {os.path.splitext(os.path.basename(f))[0] for f in input_files if not match_exclusion(f, excluded_numbers)}
-            completed_calcs = [f for f in completed_calcs if os.path.splitext(os.path.basename(f))[0] in input_basenames]
+            # Add basenames from input files (pending calculations)
+            for f in input_files:
+                if not match_exclusion(f, excluded_numbers):
+                    # Handle both simple filenames and paths like "opt_conf_1/opt_conf_1.inp"
+                    basename = os.path.splitext(os.path.basename(f))[0]
+                    all_input_basenames.add(basename)
+            
+            # Add basenames from already completed files (CRITICAL for correct count)
+            for f in completed_calcs:
+                # completed_calcs contains basenames, not full paths
+                all_input_basenames.add(f)
+            
+            num_inputs = len(all_input_basenames)
+            
+            # Store initial completed count (before loop may modify completed_calcs)
+            initial_completed_count = len(completed_calcs)
             
             if completed_calcs:
                 print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
@@ -9837,7 +10116,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 f.write(f"mkdir -p \"$TMPDIR\"\n")
                                 f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                                 f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
-                            else:
+                            elif qm_program == 'gaussian':
                                 f.write(f"$G16_ROOT/g16 {input_file}\n")
                         
                         os.chmod(temp_script, 0o755)
@@ -9888,6 +10167,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                     
                                     # Update cache
                                     completed_calcs.append(input_file)
+                                    # Also add basename to track total
+                                    basename_only = os.path.splitext(os.path.basename(input_file))[0]
+                                    all_input_basenames.add(basename_only)
                                     stage_key = getattr(context, 'current_stage_key', 'calculation')
                                     update_protocol_cache(stage_key, 'in_progress',
                                                         result={'completed_files': completed_calcs,
@@ -9921,9 +10203,15 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             os.remove(backup_input)
                         
                 
-                # Print results using total completed (resumed + new)
-                total_completed = len(completed_calcs) + num_completed
-                print(f"\nCalculation results: {total_completed}/{num_inputs} completed successfully")
+                # Print status (not "results" - that's redundant)
+                # Recalculate num_inputs from the updated set to reflect newly completed calculations
+                num_inputs = len(all_input_basenames)
+                # Total completed = initial completed + newly completed in this run
+                total_completed = initial_completed_count + num_completed
+                # Ensure we don't show more completed than total inputs (can happen if files are removed)
+                if total_completed > num_inputs:
+                    total_completed = num_inputs
+                print(f"\nStatus: {total_completed}/{num_inputs} calculations completed")
                 
                 # Store for protocol summary (use total)
                 context.calc_completed = total_completed
@@ -9954,7 +10242,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 f.write(f'else\n')
                                 f.write(f'    echo "  FAILED: {failed_file}"\n')
                                 f.write(f'fi\n\n')
-                        else:
+                        elif qm_program == 'gaussian':
                             for failed_file in sorted(failed_calculations, key=natural_sort_key):
                                 basename = os.path.splitext(failed_file)[0]
                                 f.write(f"echo \"Processing {failed_file}...\"\n")
@@ -9974,11 +10262,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 if total_completed == 0:
                     print("Error: No calculations completed successfully")
                     return 1
+                # All calculations completed
+                if total_completed == num_inputs:
+                    print(f"All calculations completed successfully")
                 elif total_completed < num_inputs:
-                    print(f"Status: {total_completed}/{num_inputs} calculations completed")
                     # Continue - don't stop workflow, similarity will handle quality control
-                else:
-                    print("All calculations completed successfully")
+                    pass # Status line already printed above
                 
                 # Sort output files by energy (only in workflow mode)
                 if num_completed > 0 and context.is_workflow:
@@ -10018,7 +10307,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 combine_xyz_files()
                                 create_combined_mol()
                                 create_summary_with_tracking(".")
-                                similarity_folder = collect_out_files_with_tracking()
+                                
+                                # Determine if we should reuse existing similarity folder (redo mode)
+                                is_redo = hasattr(context, 'recalculated_files') and bool(context.recalculated_files)
+                                similarity_folder = collect_out_files_with_tracking(reuse_existing=is_redo)
                             
                             # Extract key info from output
                             output = f.getvalue()
@@ -10112,7 +10404,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             return 0  # Not an error
     
     print(f"\nRunning similarity analysis...")
-    print(f"Using similarity script: {similarity_script}")
+    print(f"Using similarity script: {os.path.basename(similarity_script)}")
     
     # Build command - pass '1' via stdin to auto-select the first folder
     cmd = ['python', similarity_script] + other_args
@@ -10126,9 +10418,11 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             for basename in context.recalculated_files:
                 f.write(f"{basename}\n")
         cmd.extend(['--update-cache', update_list_file])
-        print(f"  Incremental cache update: {len(context.recalculated_files)} file(s)")
     
-    print(f"Command: {' '.join(cmd)}\n")
+    if not (hasattr(context, 'recalculated_files') and context.recalculated_files):
+        print(f"{' '.join(cmd)}\n")
+    else:
+        print(f"{' '.join(cmd)}\n")
     print(f"Working directory: {similarity_base}\n")
     
     try:
@@ -10156,7 +10450,8 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             'Only .log files found',
             'Only .out files found',
             'Processing ',
-            'folder(s) for files matching'
+            'folder(s) for files matching',
+            'Created motifs dendrogram'
         ]
         
         # Add blank line before similarity output
@@ -10269,6 +10564,14 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     
     # Store in context for this stage
     context.max_attempts_per_calc = max_opt_retries
+    
+    # Process redo structures at the START of the stage (if need_recalculation exists)
+    # This ensures that when the workflow restarts this stage after a similarity failure,
+    # we immediately regenerate inputs and delete old outputs before checking completion
+    if template_inp:
+        opt_dir = getattr(context, 'optimization_dir', 'optimization')
+        if os.path.exists(opt_dir):
+            process_redo_structures(context, opt_dir, template_inp)
     
     if not template_inp or not launcher_sh:
         print("Error: Optimization requires template input and launcher script")
@@ -10430,9 +10733,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 subdir_files = [os.path.join(subdir, f) for f in os.listdir(subdir_path) if f.endswith(('.inp', '.com', '.gjf'))]
                 input_files.extend(sorted(subdir_files, key=natural_sort_key))
         
-        num_inputs = len(input_files)
-        
-        # Check for resume state and exclusions
+        # Load cache and exclusions BEFORE using them
         cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
         cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
         
@@ -10441,6 +10742,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         
         completed_opts = cache.get('stages', {}).get(stage_key, {}).get('result', {}).get('completed_files', [])
         excluded_numbers = cache.get('excluded_optimizations', [])
+        
+        # Count only non-excluded inputs
+        num_inputs = sum(1 for f in input_files if not match_exclusion(f, excluded_numbers))
         
         if completed_opts:
             print(f"Resuming: {len(completed_opts)}/{num_inputs} optimizations already completed")
@@ -10637,7 +10941,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f"mkdir -p \"$TMPDIR\"\n")
                         f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
                         f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
-                    else:
+                    elif qm_program == 'gaussian':
                         f.write(f"$G16_ROOT/g16 {input_file}\n")
                 
                 os.chmod(temp_script, 0o755)
@@ -10686,8 +10990,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             if os.path.exists(backup_input):
                                 os.remove(backup_input)
                             
-                            # Update cache
-                            completed_opts.append(input_file)
+                            # Update cache - avoid duplicates during redo
+                            if input_file not in completed_opts:
+                                completed_opts.append(input_file)
                             stage_key = getattr(context, 'current_stage_key', 'optimization')
                             update_protocol_cache(stage_key, 'in_progress',
                                                 result={'completed_files': completed_opts,
@@ -10722,7 +11027,30 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     os.remove(backup_input)
             
         
-        print(f"\nOptimization results: {num_completed}/{num_inputs} completed successfully")
+        # Calculate total expected (completed + excluded + failed)
+        # num_inputs is the count of non-excluded files
+        # We want to show X/Y where Y is total inputs (including excluded)
+        
+        # Get total files in optimization folder
+        total_opt_files = len([f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))])
+        # Or better, use the initial count before exclusion filtering
+        
+        # Calculate excluded count
+        num_excluded = 0
+        if excluded_numbers:
+            # Count how many files match exclusion
+            all_inputs = [f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))]
+            num_excluded = sum(1 for f in all_inputs if match_exclusion(f, excluded_numbers))
+        
+        # Adjust num_inputs to be the TOTAL count for display purposes if desired, 
+        # or keep it as "active" inputs. User requested "1/3" where 1 is active and 2 are excluded.
+        # So denominator should be active + excluded
+        total_inputs_display = num_inputs + num_excluded
+        
+        print(f"\nOptimization results: {num_completed}/{total_inputs_display} completed successfully")
+        
+        if num_excluded > 0:
+            print(f"Excluded structures: {num_excluded}/{total_inputs_display}")
         
         # Store completion counts in context
         context.opt_completed = num_completed
@@ -10761,7 +11089,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f'else\n')
                         f.write(f'    echo "  FAILED: {failed_file}"\n')
                         f.write(f'fi\n\n')
-                else:
+                elif qm_program == 'gaussian':
                     for failed_file in sorted(failed_optimizations, key=natural_sort_key):
                         basename = os.path.splitext(failed_file)[0]
                         f.write(f"echo \"Processing {failed_file}...\"\n")
@@ -10778,7 +11106,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             print(f"Manual retry launcher written to: {failed_launcher}")
         
         if num_completed > 0:
-            print("Optimization calculations completed")
+            print("\n\nOptimization calculations completed")
             
             # Organize results using sort command (suppress verbose output in workflow mode)
             import io
@@ -10786,8 +11114,37 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             
             f = io.StringIO()
             with contextlib.redirect_stdout(f):
+                sort_cmd = ['python', os.path.abspath(sys.argv[0]), 'sort']
+                
+                # Check if this is a redo (recalculated files exist)
+                is_redo = hasattr(context, 'recalculated_files') and bool(context.recalculated_files)
+                
+                # If we have a specific similarity folder (e.g., similarity_2 from redo), pass it to sort
+                if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+                    sort_cmd.extend(['--target-sim-folder', context.opt_sim_folder])
+                    if is_redo:
+                        sort_cmd.append('--reuse-existing')
+                else:
+                    # Explicitly calculate next similarity folder to ensure we don't reuse 'similarity'
+                    # The sort command runs in 'optimization' dir, so parent is root
+                    root_dir = os.getcwd()
+                    base_name = "similarity"
+                    counter = 2
+                    next_sim = base_name
+                    
+                    # Check if similarity exists
+                    if os.path.exists(os.path.join(root_dir, next_sim)):
+                        while True:
+                            next_sim = f"{base_name}_{counter}"
+                            if not os.path.exists(os.path.join(root_dir, next_sim)):
+                                break
+                            counter += 1
+                    
+                    # Pass the calculated folder name
+                    sort_cmd.extend(['--target-sim-folder', next_sim])
+                
                 sort_result = subprocess.run(
-                    ['python3', os.path.abspath(sys.argv[0]), 'sort'],
+                    sort_cmd,
                     cwd="optimization",
                     capture_output=True,
                     text=True,
@@ -10797,7 +11154,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # Create combined results using merge command
                 merge_result = subprocess.run(
-                    ['python3', os.path.abspath(sys.argv[0]), 'merge'],
+                    ['python', os.path.abspath(sys.argv[0]), 'merge'],
                     cwd="optimization",
                     capture_output=True,
                     text=True,
@@ -10808,7 +11165,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 # Create ORCA summary if ORCA files
                 if qm_program == 'orca':
                     summary_result = subprocess.run(
-                        ['python3', os.path.abspath(sys.argv[0]), 'summary'],
+                        ['python', os.path.abspath(sys.argv[0]), 'summary'],
                         cwd="optimization",
                         capture_output=True,
                         text=True
@@ -10837,7 +11194,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         folder_path = os.path.join(sim_dir, folder)
                         file_count = len([f for f in os.listdir(folder_path) if f.endswith(('.out', '.log'))])
                         if file_count > 0:
-                            print(f"✓ Ready for similarity: {file_count} files in {sim_dir}/{folder}")
+                            print(f"\n\nReady for similarity: {file_count} files in {sim_dir}/{folder}")
             
             print("\n✓ Files organized and sorted")
         else:
@@ -11025,10 +11382,15 @@ def main_ascec_integrated():
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "protocol":
         input_file = sys.argv[1]
         restart_stage = None
+        incomplete_mode = False  # New flag for -i option
         
-        # Check for stage restart argument
+        # Check for stage restart argument and -i flag
         if len(sys.argv) >= 4:
             restart_stage = sys.argv[3].lower()
+            
+            # Check if -i flag is present
+            if len(sys.argv) >= 5 and sys.argv[4] == "-i":
+                incomplete_mode = True
         
         # Check if input file exists
         if not os.path.exists(input_file):
@@ -11050,15 +11412,17 @@ def main_ascec_integrated():
             print("  --retry: Retry until all calculations succeed (unlimited)")
             print("  --redo=N: Redo entire stage (calc+similarity) up to N times")
             print("\nStage restart:")
-            print("  ascec04 input.in protocol calc   - Restart calculation stage")
+            print("  ascec04 input.in protocol calc   - Restart calculation stage (deletes files)")
             print("  ascec04 input.in protocol calc1  - Restart first calc stage")
             print("  ascec04 input.in protocol calc2  - Restart second calc stage")
             print("  ascec04 input.in protocol opt    - Restart optimization stage")
+            print("  ascec04 input.in protocol 2 -i   - Mark stage 2 as incomplete (keeps files)")
+            print("\nThe -i flag marks a stage as incomplete without deleting files,")
+            print("allowing the workflow to continue from where it left off.")
             sys.exit(1)
         
         # Print ASCII logo
         print("\n======================================================================")
-        print("")
         
         # Helper function to center text
         def center_text(text, width=70):
@@ -11211,53 +11575,59 @@ def main_ascec_integrated():
                             pass
                 
                 if stages_to_restart:
-                    print(f"\nRestarting stage(s): {', '.join(stages_to_restart)}")
+                    if incomplete_mode:
+                        print(f"\nMarking stage(s) as incomplete: {', '.join(stages_to_restart)}")
+                        print(f"  → Keeping existing directories (incomplete mode)")
+                    else:
+                        print(f"\nRestarting stage(s): {', '.join(stages_to_restart)}")
                     
                     # Find the minimum stage number to restart
                     min_restart_num = min([int(key.split('_')[1]) for key in stages_to_restart])
                     
-                    print(f"  → Deleting all directories and cache entries from stage {min_restart_num} onwards\n")
-                    
-                    # Delete directories based on stage type
-                    # Map of directories to delete based on restart stage
-                    if 'calculation' in [k.split('_')[0] for k in stages_to_restart]:
-                        # Restarting calculation: delete calculation/, similarity/, optimization/
-                        for dir_name in ['calculation', 'similarity', 'optimization']:
-                            if os.path.exists(dir_name):
-                                print(f"     Removing {dir_name}/")
-                                shutil.rmtree(dir_name)
-                        # Also remove numbered variants
-                        for pattern in ['calculation_*', 'similarity_*', 'optimization_*']:
-                            for dir_path in glob.glob(pattern):
-                                if os.path.isdir(dir_path):
-                                    print(f"     Removing {dir_path}/")
-                                    shutil.rmtree(dir_path)
-                    
-                    elif 'optimization' in [k.split('_')[0] for k in stages_to_restart]:
-                        # Restarting optimization: delete optimization/ and later similarity/
-                        for dir_name in ['optimization']:
-                            if os.path.exists(dir_name):
-                                print(f"     Removing {dir_name}/")
-                                shutil.rmtree(dir_name)
-                        # Also remove numbered variants
-                        for pattern in ['optimization_*']:
-                            for dir_path in glob.glob(pattern):
-                                if os.path.isdir(dir_path):
-                                    print(f"     Removing {dir_path}/")
-                                    shutil.rmtree(dir_path)
-                        # Remove similarity folders that come after optimization
-                        similarity_dirs = sorted(glob.glob('similarity*'))
-                        for sim_dir in similarity_dirs:
-                            if os.path.isdir(sim_dir):
-                                # Check if it's similarity_N where N > calc similarity number
-                                if '_' in sim_dir:
-                                    try:
-                                        sim_num = int(sim_dir.split('_')[1])
-                                        if sim_num > min_restart_num:
-                                            print(f"     Removing {sim_dir}/")
-                                            shutil.rmtree(sim_dir)
-                                    except:
-                                        pass
+                    # Only delete directories if NOT in incomplete mode
+                    if not incomplete_mode:
+                        print(f"  → Deleting all directories and cache entries from stage {min_restart_num} onwards\n")
+                        
+                        # Delete directories based on stage type
+                        # Map of directories to delete based on restart stage
+                        if 'calculation' in [k.split('_')[0] for k in stages_to_restart]:
+                            # Restarting calculation: delete calculation/, similarity/, optimization/
+                            for dir_name in ['calculation', 'similarity', 'optimization']:
+                                if os.path.exists(dir_name):
+                                    print(f"     Removing {dir_name}/")
+                                    shutil.rmtree(dir_name)
+                            # Also remove numbered variants
+                            for pattern in ['calculation_*', 'similarity_*', 'optimization_*']:
+                                for dir_path in glob.glob(pattern):
+                                    if os.path.isdir(dir_path):
+                                        print(f"     Removing {dir_path}/")
+                                        shutil.rmtree(dir_path)
+                        
+                        elif 'optimization' in [k.split('_')[0] for k in stages_to_restart]:
+                            # Restarting optimization: delete optimization/ and later similarity/
+                            for dir_name in ['optimization']:
+                                if os.path.exists(dir_name):
+                                    print(f"     Removing {dir_name}/")
+                                    shutil.rmtree(dir_name)
+                            # Also remove numbered variants
+                            for pattern in ['optimization_*']:
+                                for dir_path in glob.glob(pattern):
+                                    if os.path.isdir(dir_path):
+                                        print(f"     Removing {dir_path}/")
+                                        shutil.rmtree(dir_path)
+                            # Remove similarity folders that come after optimization
+                            similarity_dirs = sorted(glob.glob('similarity*'))
+                            for sim_dir in similarity_dirs:
+                                if os.path.isdir(sim_dir):
+                                    # Check if it's similarity_N where N > calc similarity number
+                                    if '_' in sim_dir:
+                                        try:
+                                            sim_num = int(sim_dir.split('_')[1])
+                                            if sim_num > min_restart_num:
+                                                print(f"     Removing {sim_dir}/")
+                                                shutil.rmtree(sim_dir)
+                                        except:
+                                            pass
                     
                     # Clear cache entries from restart stage onwards
                     all_stage_keys = sorted(cache.get('stages', {}).keys(), 
@@ -11270,6 +11640,9 @@ def main_ascec_integrated():
                         print(f"\n  → Clearing cache entries: {', '.join(stages_to_remove)}")
                         for stage_key in stages_to_remove:
                             del cache['stages'][stage_key]
+                    
+                    # Mark protocol as incomplete so it resumes automatically
+                    cache['completed'] = False
                     
                     # Save modified cache
                     with open(cache_file, 'wb') as f:
@@ -11360,8 +11733,13 @@ def main_ascec_integrated():
     parser.add_argument("--v", action="store_true", help="Verbose output: print detailed steps every 10 cycles.")
     parser.add_argument("--va", action="store_true", help="Very verbose output: print detailed steps for every cycle.")
     parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
-    parser.add_argument("--nosum", action="store_true", help="Skip summary creation in sort command.")
-    parser.add_argument("--justsum", action="store_true", help="Only create summary files without sorting or moving files.")
+    
+    # Sort command arguments (used when command='sort')
+    parser.add_argument("--nosum", action="store_true", help="Skip summary creation (for sort command)")
+    parser.add_argument("--justsum", action="store_true", help="Just create summary without sorting (for sort command)")
+    parser.add_argument("--target-sim-folder", type=str, default=None, help="Target similarity folder (internal use)")
+    parser.add_argument("--reuse-existing", action="store_true", help="Reuse existing similarity folder if it exists (for sort command)")
+    
     parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
     parser.add_argument("--conformational", type=float, default=None, 
                        help="Override conformational move probability from input file (0.0-1.0)")
@@ -11388,7 +11766,10 @@ def main_ascec_integrated():
         if args.justsum:
             execute_summary_only()
         else:
-            execute_sort_command(include_summary=not args.nosum)
+            # Check for target similarity folder argument
+            target_sim = getattr(args, 'target_sim_folder', None)
+            reuse = getattr(args, 'reuse_existing', False)
+            execute_sort_command(include_summary=not args.nosum, target_sim_folder=target_sim, reuse_existing=reuse)
         return
     
     # Check if box analysis mode is requested
@@ -11398,8 +11779,8 @@ def main_ascec_integrated():
             input_file = args.arg1
         else:
             print("Error: box command requires an input file.")
-            print("Usage: python3 ascec-v04.py box input_file.inp")
-            print("   or: python3 ascec-v04.py box input_file.inp > box_info.txt")
+            print("Usage: python ascec-v04.py box input_file.inp")
+            print("   or: python ascec-v04.py box input_file.inp > box_info.txt")
             sys.exit(1)
         
         execute_box_analysis(input_file)
@@ -11409,9 +11790,9 @@ def main_ascec_integrated():
     if args.command.lower() == "calc":
         if not args.arg1:
             print("Error: calc command requires a template file.")
-            print("Usage: python3 ascec-v04.py calc template_file [launcher_template]")
-            print("Example: python3 ascec-v04.py calc example_input.inp launcher_orca.sh")
-            print("         python3 ascec-v04.py calc example_input.inp  # Creates inputs only")
+            print("Usage: python ascec-v04.py calc template_file [launcher_template]")
+            print("Example: python ascec-v04.py calc example_input.inp launcher_orca.sh")
+            print("         python ascec-v04.py calc example_input.inp  # Creates inputs only")
             sys.exit(1)
         
         result = create_simple_calculation_system(args.arg1, args.arg2)
@@ -11422,9 +11803,9 @@ def main_ascec_integrated():
     if args.command.lower() == "opt":
         if not args.arg1:
             print("Error: opt command requires a template file.")
-            print("Usage: python3 ascec-v04.py opt template_file [launcher_template]")
-            print("Example: python3 ascec-v04.py opt example_input.inp launcher_orca.sh")
-            print("         python3 ascec-v04.py opt example_input.inp  # Creates inputs only")
+            print("Usage: python ascec-v04.py opt template_file [launcher_template]")
+            print("Example: python ascec-v04.py opt example_input.inp launcher_orca.sh")
+            print("         python ascec-v04.py opt example_input.inp  # Creates inputs only")
             sys.exit(1)
         
         result = create_optimization_system(args.arg1, args.arg2)
@@ -11443,8 +11824,8 @@ def main_ascec_integrated():
     if args.command.lower() == "update":
         if not args.arg1:
             print("Error: update command requires a template file.")
-            print("Usage: python3 ascec-v04.py update new_template.inp")
-            print("   or: python3 ascec-v04.py update new_template.inp pattern")
+            print("Usage: python ascec-v04.py update new_template.inp")
+            print("   or: python ascec-v04.py update new_template.inp pattern")
             print("This will search for files with the same extension as the template")
             sys.exit(1)
         
@@ -11476,6 +11857,12 @@ def main_ascec_integrated():
         good_structures = ["good_structures"] if os.path.exists("good_structures") else []
         
         all_temp = temp_calc_folders + temp_sim_folders + retry_input + good_structures
+        
+        # Refactored optimization redo logic:
+        # Instead of creating _tmp_ folders, we now unsort existing folders.
+        # This means the "optimization redo block" is effectively removed,
+        # and the cleanup now just handles the remaining temporary folders.
+        # The "similarity spacing" fix is applied here as a general print spacing.
         
         if all_temp:
             if temp_calc_folders or temp_sim_folders:
@@ -11557,15 +11944,15 @@ def main_ascec_integrated():
                 
             except ValueError as e:
                 print(f"Error: Invalid replication argument '{replication}'. {e}")
-                print("Usage: python3 ascec-v04.py input_file.in r<number> [--box<percentage>]")
-                print("Example: python3 ascec-v04.py example.in r3")
-                print("Example: python3 ascec-v04.py example.in r3 --box10  # Use 10% packing")
+                print("Usage: python ascec-v04.py input_file.in r<number> [--box<percentage>]")
+                print("Example: python ascec-v04.py example.in r3")
+                print("Example: python ascec-v04.py example.in r3 --box10  # Use 10% packing")
                 sys.exit(1)
         else:
             print(f"Error: Invalid replication format '{replication}'.")
-            print("Usage: python3 ascec-v04.py input_file.in r<number> [--box<percentage>]")
-            print("Example: python3 ascec-v04.py example.in r3")
-            print("Example: python3 ascec-v04.py example.in r3 --box10  # Use 10% packing")
+            print("Usage: python ascec-v04.py input_file.in r<number> [--box<percentage>]")
+            print("Example: python ascec-v04.py example.in r3")
+            print("Example: python ascec-v04.py example.in r3 --box10  # Use 10% packing")
             sys.exit(1)
 
     # Initialize file handles and paths to None to prevent UnboundLocalError

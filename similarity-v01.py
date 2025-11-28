@@ -1344,11 +1344,22 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
                     vprint(f"  Extracted {len(xyz_data_list)} individual XYZ file")
         
         total_skipped = len(skipped_clustered_with_normal) + len(skipped_need_recalc)
-        print_step(f"\nProcessed {total_skipped} structures with imaginary frequencies:")
-        print(f"  - {len(skipped_clustered_with_normal)} clustered with normal structures (can be ignored)")
+        print()
+        print()
+        print_step(f"Processed {total_skipped} structures with imaginary frequencies:")
+        print(f"  - {len(skipped_clustered_with_normal)} clustered with true minima (can be ignored)")
+        if skipped_clustered_with_normal:
+            for item in skipped_clustered_with_normal:
+                print(f"         {item['filename']}  -  {item['num_imaginary_freqs']} imaginary freq(s)")
         print(f"  - {len(skipped_need_recalc)} may represent missing motifs (need recalculation)")
+        if skipped_need_recalc:
+            for item in skipped_need_recalc:
+                print(f"         {item['filename']}  -  {item['num_imaginary_freqs']} imaginary freq(s)")
+        
         if len(skipped_need_recalc) > 0 and VERBOSE:
             print(f"  → Review 'skipped_structures/skipped_summary.txt' for details")
+        
+        print()  # Blank line after "Processed"
     
     skipped_info = {
         'clustered_with_normal': skipped_clustered_with_normal,
@@ -1773,7 +1784,9 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
     motifs_dir = os.path.join(output_base_dir, f"motifs_{num_motifs:02d}")
     os.makedirs(motifs_dir, exist_ok=True)
     
-    print_step(f"\nCreating {num_motifs} motifs from cluster representatives...")
+    print()
+    print()
+    print_step(f"Creating {num_motifs} motifs from cluster representatives...")
     vprint(f"  Output directory: {motifs_dir}")
     
     representatives = []
@@ -2245,14 +2258,27 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # For normal mode, output directly to the working directory (no subfolder)
         os.makedirs(output_base_dir, exist_ok=True) # Ensure this base directory exists
         print(f"  All outputs will be placed in the current working directory")
+        print(f"DEBUG: output_base_dir = {output_base_dir}")
     
     # Provide early feedback before expensive operations
     if not is_compare_mode:
         print_step("Initializing data extraction...")
 
-    # Define a generic cache file path
-    cache_file_name = "data_cache.pkl" # Shortened cache file name
-    cache_file_path = os.path.join(output_base_dir, cache_file_name)
+    # Define a generic cache file path with random seed (like ASCEC protocol cache)
+    # Check for existing cache file first
+    import glob
+    existing_caches = glob.glob(os.path.join(output_base_dir, "data_cache_*.pkl"))
+    
+    if existing_caches:
+        # Use the most recent cache file if multiple exist
+        cache_file_path = max(existing_caches, key=os.path.getmtime)
+        vprint(f"Found existing cache file: {os.path.basename(cache_file_path)}")
+    else:
+        # Create new cache file with random seed
+        import random
+        cache_seed = random.randint(0, 999999)
+        cache_file_name = f"data_cache_{cache_seed:06d}.pkl"
+        cache_file_path = os.path.join(output_base_dir, cache_file_name)
 
     all_extracted_data = []
     skipped_files = set()  # Initialize skipped_files early to avoid unbound variable warnings
@@ -2281,6 +2307,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
         # INCREMENTAL CACHE UPDATE MODE (for redo)
         update_cache_file = None
+        incremental_update_done = False  # Flag to track if update happened
+        
         if len(sys.argv) > 1:  # Check if there are arguments
             for i, arg in enumerate(sys.argv):
                 if arg == '--update-cache' and i + 1 < len(sys.argv):
@@ -2301,9 +2329,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 elif os.path.exists(os.path.join(str(input_source), first_basename + '.log')):
                     file_ext = '.log'
             
-            if file_ext:
-                print(f"  Incremental cache update: {len(basenames_to_update)} file(s)")
-                
+            if file_ext:                
                 # Load existing cache
                 cache_exists = os.path.exists(cache_file_path)
                 if cache_exists:
@@ -2350,13 +2376,14 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     pickle.dump(cache_data_to_save, f, protocol=pickle.HIGHEST_PROTOCOL)
                 
                 all_extracted_data = successful_data
+                incremental_update_done = True
                 print(f"    Cache updated with {len(results)} file(s)")
             else:
                 print(f"  Warning: Could not determine file extension for incremental update")
                 force_reprocess_cache = True  # Fallback to full reprocess
         
         # Existing cache logic for normal mode (skip if incremental update was done)
-        if not (update_cache_file and os.path.exists(update_cache_file) and all_extracted_data):
+        if not incremental_update_done:
             if os.path.exists(cache_file_path) and not force_reprocess_cache:
                 print(f"Attempting to load data from cache: '{os.path.basename(cache_file_path)}'")
                 try:
@@ -2377,7 +2404,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                         raise ValueError("Unknown cache format")
                     
                     # Only scan filesystem if cache has data (lightweight check first)
-                    if len(successful_data) > 0:
+                    if len(successful_data) > 0 or len(skipped_files) > 0:
                         # Defer expensive glob until we know cache exists and has data
                         current_files_in_folder = {os.path.basename(f) for f in glob.glob(os.path.join(str(input_source), str(file_extension_pattern)))} if input_source and file_extension_pattern else set()
                         retained_cached_data = [d for d in successful_data if d['filename'] in current_files_in_folder]
@@ -2421,9 +2448,9 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     if os.path.exists(cache_file_path):
                         os.remove(cache_file_path)
         else:
-            # No cache file exists
-            all_extracted_data = []
-            skipped_files = set()
+            # Incremental update was done, so we trust the current state
+            # all_extracted_data is already set
+            pass
 
         files_to_process = glob.glob(os.path.join(str(input_source), str(file_extension_pattern))) if input_source and file_extension_pattern else []
         if not files_to_process:
@@ -2441,7 +2468,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         if len(unprocessed_files) == 0:
             # All files have been processed before
             files_to_actually_process = []
-        elif not all_extracted_data:
+        elif not processed_files:
             # No cached data, process all files
             print_step(f"\nExtracting data from {len(files_to_process)} files...")
             files_to_actually_process = files_to_process
@@ -2486,6 +2513,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         return
 
     print_step("Data extraction complete. Proceeding to clustering.\n")
+    print() # Add extra blank line for readability
     
     clean_data_for_clustering = []
     essential_base_features = ['final_geometry_atomnos', 'final_geometry_coords', 'num_hydrogen_bonds']
@@ -2530,6 +2558,10 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     extracted_data_folder = os.path.join(output_base_dir, "extracted_data")
     extracted_clusters_folder = os.path.join(output_base_dir, "extracted_clusters")
     
+    print(f"DEBUG: Creating dendrogram_images_folder at: {dendrogram_images_folder}")
+    print(f"DEBUG: Creating extracted_data_folder at: {extracted_data_folder}")
+    print(f"DEBUG: Creating extracted_clusters_folder at: {extracted_clusters_folder}")
+    
     os.makedirs(dendrogram_images_folder, exist_ok=True)
     os.makedirs(extracted_data_folder, exist_ok=True)
     os.makedirs(extracted_clusters_folder, exist_ok=True)
@@ -2539,7 +2571,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         print(f"Extracted data files will be saved to '{extracted_data_folder}'")
         print(f"Extracted cluster XYZ/MOL files will be saved to '{extracted_clusters_folder}'")
     else:
-        print_step("Setting up output directories...")
+        print_step("Setting up output directories...\n")
 
     summary_file_content_lines = []
     comparison_specific_summary_lines = [] # New list for comparison-specific details
@@ -2564,7 +2596,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     summary_file_content_lines.append("     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      ")
     summary_file_content_lines.append("     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     ")
     summary_file_content_lines.append("     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    ")
-    summary_file_content_lines.append("     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    ")
+    summary_file_content_lines.append("     =++=       =++=   =+÷     =++=   =+---×××××÷×≠    =×+×÷=÷×+-÷    ")
     summary_file_content_lines.append("     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   ")
     summary_file_content_lines.append("      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   ")
     summary_file_content_lines.append("       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- ")
@@ -2739,6 +2771,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             initial_clusters_data = {}
             for i, label in enumerate(initial_cluster_labels):
                 group_data[i]['_initial_cluster_label'] = label 
+                # The _parent_global_cluster_id should already be set for these from the Boltzmann calculation setup
                 initial_clusters_data.setdefault(label, []).append(group_data[i])
             
             initial_clusters_list_unsorted = list(initial_clusters_data.values())
@@ -2940,7 +2973,10 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 continue # Skip to next hbond group
             
             # Announce clustering start for this group
-            print_step(f"\nH-bond group {hbond_count}: Clustering {len(group_data)} configurations...")
+            print()
+            print()
+            print_step(f"H-bond group {hbond_count}: Clustering {len(group_data)} configurations...")
+            print() # Add extra blank line
             
             # Show information about reduced vibrational frequency weights (only once)
             vib_freq_features = ['first_vib_freq', 'last_vib_freq']
@@ -3144,8 +3180,15 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             # Check if this was a single-config group (before any potential RMSD processing)
             original_group_size = len(group_data)
             if original_group_size < 2:
-                print_step(f"\nH-bond group {hbond_count}: {original_group_size} config(s) - treating as single-config clusters")
+                print()
+                print()
+                print_step(f"H-bond group {hbond_count}: {original_group_size} config(s) - treating as single-config clusters")
+                print()  # Blank line after single-config group
 
+        # Add blank line before multi-config group
+        if len(current_hbond_group_clusters_for_final_output) > 0 and len(group_data) >= 2:
+            print()
+        
         for members_data in current_hbond_group_clusters_for_final_output:
             current_global_cluster_id = cluster_global_id_counter 
 
@@ -3168,6 +3211,10 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     gibbs_str = "N/A"
                 hbond_group_summary_lines.append(f"  - {m_data['filename']} (Gibbs Energy: {gibbs_str})")
             hbond_group_summary_lines.append("\n")
+            
+            # Add newline after cluster info
+            if members_data == current_hbond_group_clusters_for_final_output[-1]:
+                print()
 
             # Print cluster info - verbose shows all files, non-verbose shows summary
             if VERBOSE:
@@ -3362,7 +3409,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             f.write("\n".join(boltzmann_file_content_lines))
         print_step(f"Boltzmann distribution saved to '{os.path.basename(boltzmann_file)}'")
 
-    print_step(f"\nClustering summary saved to '{os.path.basename(summary_file)}'")
+    print()
+    print_step(f"Clustering summary saved to '{os.path.basename(summary_file)}'")
     vprint(f"   Full path: {output_base_dir}")
 
 # Main execution block
@@ -3394,6 +3442,8 @@ if __name__ == "__main__":
                         help="Enable verbose output showing detailed information for each step.")
     parser.add_argument("--update-cache", type=str, default=None,
                         help="File containing list of basenames to update in cache (for incremental redo). One basename per line.")
+    parser.add_argument('input_source', nargs='?', default=None, 
+                        help='Input folder to process (optional). If not provided, interactive mode is used.')
 
 
     # Preprocess arguments to handle -j8 format
@@ -3433,6 +3483,7 @@ if __name__ == "__main__":
         }
 
     current_dir = os.getcwd()
+    print(f"DEBUG: Similarity script current_dir = {current_dir}")
     
     if args.compare:
         if len(args.compare) < 2:
@@ -3480,84 +3531,106 @@ if __name__ == "__main__":
         print(f"\n--- Finished comparing {len(compare_files)} files: {', '.join(file_names)} ---\n")
 
     else: # Normal mode (folder processing)
-        all_potential_folders = [current_dir] + [d for d in glob.glob(os.path.join(current_dir, '*')) if os.path.isdir(d)]
-        
-        folders_with_log_files = []
-        folders_with_out_files = []
-
-        for folder in all_potential_folders:
-            has_log = bool(glob.glob(os.path.join(folder, "*.log")))
-            has_out = bool(glob.glob(os.path.join(folder, "*.out")))
+        if args.input_source:
+            # Non-interactive mode
+            if not os.path.isdir(args.input_source):
+                print(f"Error: Input source '{args.input_source}' is not a directory.")
+                exit(1)
             
-            if has_log:
-                folders_with_log_files.append(folder)
+            selected_folders = [args.input_source]
+            
+            # Auto-detect file extension
+            has_log = bool(glob.glob(os.path.join(args.input_source, "*.log")))
+            has_out = bool(glob.glob(os.path.join(args.input_source, "*.out")))
+            
             if has_out:
-                folders_with_out_files.append(folder)
-
-        all_valid_folders_to_display = sorted(list(set(folders_with_log_files + folders_with_out_files)))
-
-        if not all_valid_folders_to_display:
-            print("No subdirectories containing .log or .out files found, or files are organized directly in the current directory.")
-            exit(0)
-
-        print("\nFound the following folder(s) containing quantum chemistry log/out files:\n")
-        for i, folder in enumerate(all_valid_folders_to_display):
-            display_name = os.path.basename(folder)
-            if folder == current_dir:
-                display_name = "./"
-            
-            folder_types_present = []
-            if folder in folders_with_log_files: folder_types_present.append(".log")
-            if folder in folders_with_out_files: folder_types_present.append(".out")
-            
-            print(f"  [{i+1}] {display_name} (Contains: {', '.join(folder_types_present)})")
-
-        selected_folders = []
-        while True:
-            choice = input("\nEnter the number of the folder to process, or type 'a' to process all: ").strip().lower()
-            
-            if choice == 'a':
-                selected_folders = all_valid_folders_to_display
-                break
-            try:
-                folder_index = int(choice) - 1
-                if 0 <= folder_index < len(all_valid_folders_to_display):
-                    selected_folders = [all_valid_folders_to_display[folder_index]]
-                    break
-                else:
-                    print("\nInvalid number. Please enter a valid number from the list.")
-            except ValueError:
-                print("\nInvalid input. Please enter a number or 'a'.")
-
-        selected_set_has_log = False
-        selected_set_has_out = False
-        for folder_path in selected_folders:
-            if folder_path in folders_with_log_files:
-                selected_set_has_log = True
-            if folder_path in folders_with_out_files:
-                selected_set_has_out = True
-            if selected_set_has_log and selected_set_has_out:
-                break
-
-        file_extension_pattern = None 
-        if selected_set_has_log and selected_set_has_out:
-            while file_extension_pattern is None:
-                type_choice = input("\nBoth .log and .out files are present in the selected folder(s).\nWhich file type would you like to process?\n  [1] .log files\n  [2] .out files\n  Enter your choice (1 or 2): ").strip()
-                if type_choice == '1':
-                    file_extension_pattern = "*.log"
-                elif type_choice == '2':
-                    file_extension_pattern = "*.out"
-                else:
-                    print("Invalid choice. Please enter '1' or '2'.")
-        elif selected_set_has_log:
-            file_extension_pattern = "*.log" 
-            print("\nOnly .log files found in the selected folder(s). Processing .log files.")
-        elif selected_set_has_out:
-            file_extension_pattern = "*.out" 
-            print("\nOnly .out files found in the selected folder(s). Processing .out files.")
+                file_extension_pattern = "*.out"
+            elif has_log:
+                file_extension_pattern = "*.log"
+            else:
+                print(f"Error: No .log or .out files found in '{args.input_source}'.")
+                exit(1)
+                
         else:
-            print("\nNo .log or .out files found in the selected folder(s) that match available types. Exiting.")
-            exit(0)
+            # Interactive mode
+            all_potential_folders = [current_dir] + [d for d in glob.glob(os.path.join(current_dir, '*')) if os.path.isdir(d)]
+            
+            folders_with_log_files = []
+            folders_with_out_files = []
+
+            for folder in all_potential_folders:
+                has_log = bool(glob.glob(os.path.join(folder, "*.log")))
+                has_out = bool(glob.glob(os.path.join(folder, "*.out")))
+                
+                if has_log:
+                    folders_with_log_files.append(folder)
+                if has_out:
+                    folders_with_out_files.append(folder)
+
+            all_valid_folders_to_display = sorted(list(set(folders_with_log_files + folders_with_out_files)))
+
+            if not all_valid_folders_to_display:
+                print("No subdirectories containing .log or .out files found, or files are organized directly in the current directory.")
+                exit(0)
+
+            print("\nFound the following folder(s) containing quantum chemistry log/out files:\n")
+            for i, folder in enumerate(all_valid_folders_to_display):
+                display_name = os.path.basename(folder)
+                if folder == current_dir:
+                    display_name = "./"
+                
+                folder_types_present = []
+                if folder in folders_with_log_files: folder_types_present.append(".log")
+                if folder in folders_with_out_files: folder_types_present.append(".out")
+                
+                print(f"  [{i+1}] {display_name} (Contains: {', '.join(folder_types_present)})")
+
+            selected_folders = []
+            while True:
+                choice = input("\nEnter the number of the folder to process, or type 'a' to process all: ").strip().lower()
+                
+                if choice == 'a':
+                    selected_folders = all_valid_folders_to_display
+                    break
+                try:
+                    folder_index = int(choice) - 1
+                    if 0 <= folder_index < len(all_valid_folders_to_display):
+                        selected_folders = [all_valid_folders_to_display[folder_index]]
+                        break
+                    else:
+                        print("\nInvalid number. Please enter a valid number from the list.")
+                except ValueError:
+                    print("\nInvalid input. Please enter a number or 'a'.")
+
+            selected_set_has_log = False
+            selected_set_has_out = False
+            for folder_path in selected_folders:
+                if folder_path in folders_with_log_files:
+                    selected_set_has_log = True
+                if folder_path in folders_with_out_files:
+                    selected_set_has_out = True
+                if selected_set_has_log and selected_set_has_out:
+                    break
+
+            file_extension_pattern = None 
+            if selected_set_has_log and selected_set_has_out:
+                while file_extension_pattern is None:
+                    type_choice = input("\nBoth .log and .out files are present in the selected folder(s).\nWhich file type would you like to process?\n  [1] .log files\n  [2] .out files\n  Enter your choice (1 or 2): ").strip()
+                    if type_choice == '1':
+                        file_extension_pattern = "*.log"
+                    elif type_choice == '2':
+                        file_extension_pattern = "*.out"
+                    else:
+                        print("Invalid choice. Please enter '1' or '2'.")
+            elif selected_set_has_log:
+                file_extension_pattern = "*.log" 
+                print("\nOnly .log files found in the selected folder(s). Processing .log files.")
+            elif selected_set_has_out:
+                file_extension_pattern = "*.out" 
+                print("\nOnly .out files found in the selected folder(s). Processing .out files.")
+            else:
+                print("\nNo .log or .out files found in the selected folder(s) that match available types. Exiting.")
+                exit(0)
 
         print(f"\nProcessing {len(selected_folders)} folder(s) for files matching '{file_extension_pattern}'...")
         for folder_path in selected_folders:
@@ -3570,4 +3643,5 @@ if __name__ == "__main__":
 
             print(f"\nFinished processing folder: {display_name}\n")
 
-    print_step("\nAll selected molecular analyses complete!")
+    print()
+    print_step("All selected molecular analyses complete!")
