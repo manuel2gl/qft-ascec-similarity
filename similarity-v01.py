@@ -1099,7 +1099,7 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
             skipped_clustered_with_normal.extend(has_imag)
             if VERBOSE:
                 for m in has_imag:
-                    print(f"  INFO: Discarding {m['filename']} (imaginary freq) - clustered with normal structures")
+                    print(f"  INFO: Discarding {m['filename']} (imaginary freq) - clustered with true minima")
         elif has_imag and not no_imag:
             skipped_need_recalc.extend(has_imag)
             if VERBOSE:
@@ -1114,7 +1114,7 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
         os.makedirs(skipped_dir, exist_ok=True)
         
 
-        clustered_dir = os.path.join(skipped_dir, "clustered_with_normal")
+        clustered_dir = os.path.join(skipped_dir, "clustered_with_minima")
         need_recalc_dir = os.path.join(skipped_dir, "need_recalculation")
         os.makedirs(clustered_dir, exist_ok=True)
         os.makedirs(need_recalc_dir, exist_ok=True)
@@ -1163,21 +1163,21 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
         summary_lines.append("=" * 75)
         summary_lines.append("")
         summary_lines.append(f"Total structures with imaginary frequencies: {total_skipped}")
-        summary_lines.append(f"  - Clustered with true minimum structures (can be ignored): {len(skipped_clustered_with_normal)}")
-        summary_lines.append(f"  - NOT clustered structures (need review): {len(skipped_need_recalc)}")
+        summary_lines.append(f"  - Clustered with true minima (can be ignored): {len(skipped_clustered_with_normal)}")
+        summary_lines.append(f"  - Not clustered structures (need review): {len(skipped_need_recalc)}")
         summary_lines.append("")
         
         if len(skipped_clustered_with_normal) > 0:
             percentage_ignored = (len(skipped_clustered_with_normal) / total_skipped * 100)
-            summary_lines.append(f"Percentage that can be ignored: {percentage_ignored:.1f}%")
+            summary_lines.append(f"Percentage of skipped structures that can be ignored: {percentage_ignored:.1f}%")
         if len(skipped_need_recalc) > 0:
             percentage_recalc = (len(skipped_need_recalc) / total_skipped * 100)
-            summary_lines.append(f"Percentage needing review: {percentage_recalc:.1f}%")
+            summary_lines.append(f"Percentage of structures needing review: {percentage_recalc:.1f}%")
         
         if total_processed is not None and total_processed > 0:
             percentage_of_total = (len(skipped_need_recalc) / total_processed * 100)
             summary_lines.append("")
-            summary_lines.append(f"Impact on total dataset: {len(skipped_need_recalc)}/{total_processed} configurations ({percentage_of_total:.1f}%)")
+            summary_lines.append(f"Impact of critical structures on total dataset: {len(skipped_need_recalc)}/{total_processed} configurations ({percentage_of_total:.1f}%)")
             summary_lines.append("")
             
             if percentage_of_total < 10:
@@ -1198,7 +1198,7 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
             summary_lines.append("Structures needing recalculation (potential missing motifs)")
             summary_lines.append("=" * 75)
             summary_lines.append("")
-            summary_lines.append("These structures were NOT clustered with normal structures. They may")
+            summary_lines.append("Structures were not clustered with true minima. They may")
             summary_lines.append("represent missing motifs or transition states. Recalculation recommended")
             summary_lines.append("to verify if they correspond to true minima.")
             summary_lines.append("")
@@ -1256,11 +1256,11 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
             summary_lines.append("Structures clustered with true minima")
             summary_lines.append("=" * 75)
             summary_lines.append("")
-            summary_lines.append("These structures clustered with normal structures (without imaginary")
-            summary_lines.append("frequencies). Better representations exist, so these can be safely ignored.")
+            summary_lines.append("Structures clustered with true minima")
+            summary_lines.append("Better representations exist, so these can be safely ignored.")
             summary_lines.append("")
             summary_lines.append(f"Total structures: {len(skipped_clustered_with_normal)}")
-            summary_lines.append("Files saved in: clustered_with_normal/")
+            summary_lines.append("Files saved in: clustered_with_minima/")
             summary_lines.append("")
             summary_lines.append("File list:")
             for m in skipped_clustered_with_normal:
@@ -1825,7 +1825,27 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
 
     for motif_idx, (representative, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
         base_name = os.path.splitext(representative['filename'])[0]
-        motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+        
+        # Check if base_name already has a motif number
+        if base_name.startswith("motif_"):
+            # Extract the motif number from base_name (e.g., "motif_01_opt" -> 1)
+            import re
+            match = re.match(r"motif_(\d+)", base_name)
+            if match:
+                original_motif_num = int(match.group(1))
+                if original_motif_num == motif_idx:
+                    # Energy rank matches original motif number, no duplication needed
+                    motif_filename = f"{base_name}.xyz"
+                else:
+                    # Energy rank differs, show both to indicate reordering
+                    motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+            else:
+                # Couldn't parse motif number, use full format
+                motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+        else:
+            # Doesn't start with motif_, use full format
+            motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+        
         motif_path = os.path.join(motifs_dir, motif_filename)
         
         write_xyz_file(representative, motif_path)

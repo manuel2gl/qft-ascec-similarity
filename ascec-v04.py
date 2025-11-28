@@ -2125,7 +2125,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                 hours = int(total_wall_time // 3600)
                 minutes = int((total_wall_time % 3600) // 60)
                 seconds = int(total_wall_time % 60)
-                f.write(f"  Total wall time: {hours}h {minutes}m {seconds}s\n\n")
+                f.write(f"  Total time: {hours}h {minutes}m {seconds}s\n\n")
             
             # Timings for individual modules with percentages (skip Similarity stages)
             f.write("Timings for individual modules:\n")
@@ -2142,13 +2142,14 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             continue
                         
                         # For Calculation and Optimization, read time from orca_summary.txt
+                        # For Calculation and Optimization, use wall_time from stage_info if available
                         wall_time = None
-                        if stage_type == 'Calculation' and os.path.exists('calculation/orca_summary.txt'):
+                        if 'wall_time' in stage_info:
+                            wall_time = stage_info['wall_time']
+                        elif stage_type == 'Calculation' and os.path.exists('calculation/orca_summary.txt'):
                             wall_time = _extract_time_from_orca_summary('calculation/orca_summary.txt')
                         elif stage_type == 'Optimization' and os.path.exists('optimization/orca_summary.txt'):
                             wall_time = _extract_time_from_orca_summary('optimization/orca_summary.txt')
-                        elif 'wall_time' in stage_info:
-                            wall_time = stage_info['wall_time']
                         
                         if wall_time:
                             percentage = (wall_time / total_wall_time) * 100
@@ -6655,6 +6656,9 @@ def group_files_by_base_with_tracking(directory='.'):
     base_map = defaultdict(list)
     
     for file in files:
+        # Skip combined results to avoid moving them to subfolders
+        if file.startswith("combined_results"):
+             continue
         base = extract_base(file)
         if base:
             base_map[base].append(file)
@@ -8966,6 +8970,13 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         # If this is a redo attempt, clean similarity folder for fresh analysis
                         # BUT keep orca_out_X/ and data_cache.pkl for incremental updates
                         if attempt > 1:
+                            # Re-detect similarity dir if not set (it might have been created in attempt 1)
+                            if not opt_sim_dir:
+                                if hasattr(context, 'similarity_dir') and context.similarity_dir:
+                                    opt_sim_dir = context.similarity_dir
+                                elif os.path.exists("similarity_2"):
+                                    opt_sim_dir = "similarity_2"
+                            
                             if opt_sim_dir and os.path.exists(opt_sim_dir):
                                 print(f"\nCleaning {opt_sim_dir}/ for fresh analysis...")
                                 # Remove all subdirectories EXCEPT orca_out_*, opt_out_*
