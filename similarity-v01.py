@@ -471,7 +471,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         return extracted_props
 
     except Exception as e:
-        print(f"  DEBUG: Error in detect_hydrogen_bonds: {e}")
+
         return {
             'num_hydrogen_bonds': 0,
             'hbond_details': [],
@@ -2278,7 +2278,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         # For normal mode, output directly to the working directory (no subfolder)
         os.makedirs(output_base_dir, exist_ok=True) # Ensure this base directory exists
         print(f"  All outputs will be placed in the current working directory")
-        print(f"DEBUG: output_base_dir = {output_base_dir}")
+
     
     # Provide early feedback before expensive operations
     if not is_compare_mode:
@@ -2374,7 +2374,6 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 files_to_reprocess = [os.path.join(str(input_source), f) for f in filenames_to_update 
                                      if os.path.exists(os.path.join(str(input_source), f))]
                 
-                print(f"    Reprocessing {len(files_to_reprocess)} file(s)...")
                 effective_cores = min(num_cores, len(files_to_reprocess)) if len(files_to_reprocess) > 0 else 1
                 
                 with mp.Pool(processes=effective_cores) as pool:
@@ -2578,9 +2577,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     extracted_data_folder = os.path.join(output_base_dir, "extracted_data")
     extracted_clusters_folder = os.path.join(output_base_dir, "extracted_clusters")
     
-    print(f"DEBUG: Creating dendrogram_images_folder at: {dendrogram_images_folder}")
-    print(f"DEBUG: Creating extracted_data_folder at: {extracted_data_folder}")
-    print(f"DEBUG: Creating extracted_clusters_folder at: {extracted_clusters_folder}")
+
     
     os.makedirs(dendrogram_images_folder, exist_ok=True)
     os.makedirs(extracted_data_folder, exist_ok=True)
@@ -2591,7 +2588,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         print(f"Extracted data files will be saved to '{extracted_data_folder}'")
         print(f"Extracted cluster XYZ/MOL files will be saved to '{extracted_clusters_folder}'")
     else:
-        print_step("Setting up output directories...\n")
+        print_step("Setting up output directories...")
 
     summary_file_content_lines = []
     comparison_specific_summary_lines = [] # New list for comparison-specific details
@@ -2993,10 +2990,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 continue # Skip to next hbond group
             
             # Announce clustering start for this group
-            print()
-            print()
             print_step(f"H-bond group {hbond_count}: Clustering {len(group_data)} configurations...")
-            print() # Add extra blank line
             
             # Show information about reduced vibrational frequency weights (only once)
             vib_freq_features = ['first_vib_freq', 'last_vib_freq']
@@ -3503,7 +3497,7 @@ if __name__ == "__main__":
         }
 
     current_dir = os.getcwd()
-    print(f"DEBUG: Similarity script current_dir = {current_dir}")
+
     
     if args.compare:
         if len(args.compare) < 2:

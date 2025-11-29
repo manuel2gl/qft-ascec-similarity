@@ -2402,7 +2402,7 @@ def preserve_failed_initial_qm_files(state: SystemState, run_dir: str, attempt_n
     The files are already preserved by preserve_last_qm_files_debug.
     """
     _print_verbose(f"", 0, state)
-    _print_verbose(f"DEBUG: Final failed attempt files preserved as:", 0, state)
+
     
     input_file = os.path.join(run_dir, "anneal.inp" if state.qm_program == "orca" else "anneal.com")
     output_file = os.path.join(run_dir, "anneal.out")
@@ -6776,6 +6776,29 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
         
         # Create the orca_out_### subfolder inside similarity folder
         if reuse_existing and os.path.exists(os.path.join(similarity_dir, base_destination_folder_name)):
+            # Cleanup old artifacts before reusing the folder
+            print(f"Cleaning up previous similarity results in {os.path.basename(similarity_dir)}...")
+            items_to_remove = [
+                'dendrogram_images', 'extracted_clusters', 'extracted_data', 
+                'skipped_structures', 'clustering_summary.txt', 'boltzmann_distribution.txt'
+            ]
+            
+            # Also remove motifs folders
+            for item in os.listdir(similarity_dir):
+                if item.startswith('motifs_'):
+                    items_to_remove.append(item)
+            
+            for item in items_to_remove:
+                item_path = os.path.join(similarity_dir, item)
+                if os.path.exists(item_path):
+                    try:
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+                    except Exception as e:
+                        print(f"Warning: Could not remove {item}: {e}")
+
             destination_folder_name = base_destination_folder_name
             destination_path = os.path.join(similarity_dir, destination_folder_name)
         else:
@@ -8913,14 +8936,51 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     
                     # Determine the similarity folder for THIS optimization stage BEFORE the loop
-                    # Check for similarity_2 first (opt stage), not similarity (calc stage)
+                    # Determine next similarity folder dynamically (not hardcoded)
+                    # If calculation used "similarity", optimization uses "similarity_2"
+                    # If calculation used "similarity_3", optimization uses "similarity_4"
                     opt_sim_dir = None
-                    if os.path.exists("similarity_2"):
-                        opt_sim_dir = "similarity_2"
-                    elif os.path.exists("similarity_3"):
-                        opt_sim_dir = "similarity_3"
-                    elif os.path.exists("similarity_4"):
-                        opt_sim_dir = "similarity_4"
+                    
+                    # Check if calculation stage already set a similarity folder
+                    if hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
+                        # Extract base folder from calc (e.g., "similarity" from "similarity/orca_out_62")
+                        calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+                        
+                        # Calculate next folder number
+                        if calc_base == "similarity":
+                            opt_sim_dir = "similarity_2"
+                        else:
+                            # Extract number from calc_base (e.g., "similarity_2" -> 2)
+                            import re
+                            match = re.search(r'similarity_(\d+)', calc_base)
+                            if match:
+                                next_num = int(match.group(1)) + 1
+                                opt_sim_dir = f"similarity_{next_num}"
+                            else:
+                                opt_sim_dir = "similarity_2"  # Fallback
+                    else:
+                        # No calc_sim_folder - search for existing similarity folders
+                        parent_dir = os.getcwd()
+                        existing_sims = []
+                        for item in os.listdir(parent_dir):
+                            if item.startswith("similarity") and os.path.isdir(item):
+                                existing_sims.append(item)
+                        
+                        if existing_sims:
+                            # Sort and get the latest
+                            existing_sims.sort(key=lambda x: (int(re.search(r'_(\d+)', x).group(1)) if '_' in x else 0))
+                            latest = existing_sims[-1]
+                            
+                            # Determine next
+                            if latest == "similarity":
+                                opt_sim_dir = "similarity_2"
+                            else:
+                                match = re.search(r'similarity_(\d+)', latest)
+                                if match:
+                                    next_num = int(match.group(1)) + 1
+                                    opt_sim_dir = f"similarity_{next_num}"
+                        else:
+                            opt_sim_dir = "similarity_2"  # First optimization
                     
                     # Store in context for execute_optimization_stage to use
                     if opt_sim_dir:
@@ -9827,7 +9887,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         if os.path.exists(backup_file) or os.path.exists(out_file):
                             actual_completed.append(item)
             completed_calcs = actual_completed
-            print(f"DEBUG: After backup scan, found {len(actual_completed)} total")
+
         
         if completed_calcs:
             print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
@@ -10468,11 +10528,16 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         # Add blank line before similarity output
         print()
         
-        # Lines that should have blank line after them for better readability
+        # Lines that should have blank line BEFORE them
+        add_blank_before = [
+            'H-bond group',
+            'Creating ',
+            'Processed '
+        ]
+        
+        # Lines that should have blank line AFTER them for better readability
         add_blank_after = [
             'Data extraction complete. Proceeding to clustering.',
-            'Setting up output directories...',
-            'Creating ',
             'Motifs created:',
             'Clustering summary saved to'
         ]
@@ -10495,8 +10560,13 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 continue
             # Print everything else
             if line.strip():
+                # Add blank line BEFORE certain lines
+                if any(marker in line for marker in add_blank_before):
+                    print()
+                
                 print(line)
-                # Add blank line after certain lines for better spacing
+                
+                # Add blank line AFTER certain lines
                 if any(marker in line for marker in add_blank_after):
                     print()
                 # Capture motifs created count for protocol summary
@@ -10576,14 +10646,6 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     # Store in context for this stage
     context.max_attempts_per_calc = max_opt_retries
     
-    # Process redo structures at the START of the stage (if need_recalculation exists)
-    # This ensures that when the workflow restarts this stage after a similarity failure,
-    # we immediately regenerate inputs and delete old outputs before checking completion
-    if template_inp:
-        opt_dir = getattr(context, 'optimization_dir', 'optimization')
-        if os.path.exists(opt_dir):
-            process_redo_structures(context, opt_dir, template_inp)
-    
     if not template_inp or not launcher_sh:
         print("Error: Optimization requires template input and launcher script")
         return 1
@@ -10599,12 +10661,44 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         print(f"Error: Launcher script not found: {launcher_sh}")
         return 1
     
-    # Use similarity motifs as input source
-    # Look for motifs in similarity/motifs_*/ directories
-    motif_dirs = glob.glob("similarity/motifs_*/")
+    # CRITICAL: Optimization needs to READ motifs from calculation's similarity folder
+    # The calculation stage created motifs in similarity/motifs_XX/
+    # Optimization will READ from similarity/ and WRITE outputs to similarity_2/
+    
+    # Step 1: Find where the MOTIFS are (from calculation's similarity stage)
+    motifs_source_folder = None
+    
+    # Check if calculation stage set a similarity folder
+    if hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
+        # Extract base folder (e.g., "similarity" from "similarity/orca_out_10")
+        calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+        motifs_source_folder = calc_base
+    else:
+        # Fallback: search for existing similarity folders with motifs
+        import re
+        parent_dir = os.getcwd()
+        existing_sims = []
+        for item in os.listdir(parent_dir):
+            if item.startswith("similarity") and os.path.isdir(item):
+                existing_sims.append(item)
+        
+        if existing_sims:
+            # Sort numerically
+            existing_sims.sort(key=lambda x: (int(re.search(r'_(\d+)', x).group(1)) if '_' in x else 0))
+            # Find the first one with motifs
+            for sim_folder in existing_sims:
+                if glob.glob(os.path.join(sim_folder, "motifs_*/")):
+                    motifs_source_folder = sim_folder
+                    break
+    
+    if not motifs_source_folder:
+        motifs_source_folder = "similarity"  # Default
+    
+    # Step 2: Find motifs in the source folder
+    motif_dirs = glob.glob(os.path.join(motifs_source_folder, "motifs_*/"))
     
     if not motif_dirs:
-        print("Warning: No motif directories found in similarity/")
+        print(f"Warning: No motif directories found in {motifs_source_folder}/")
         print("  Skipping optimization stage")
         return 0
     
@@ -10612,10 +10706,40 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     motif_dirs.sort()
     motif_dir = motif_dirs[-1]
     
+    # Step 3: Determine where optimization OUTPUTS will go
+    # This is typically the next similarity folder (similarity_2, similarity_3, etc.)
+    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+        used_sim_folder = context.opt_sim_folder
+    else:
+        # Calculate next folder for outputs
+        if motifs_source_folder == "similarity":
+            used_sim_folder = "similarity_2"
+        else:
+            # Extract number and increment
+            match = re.search(r'similarity_(\d+)', motifs_source_folder)
+            if match:
+                next_num = int(match.group(1)) + 1
+                used_sim_folder = f"similarity_{next_num}"
+            else:
+                used_sim_folder = "similarity_2"
+    
+    # Store similarity folder in context BEFORE calling process_redo_structures
+    if used_sim_folder:
+        context.similarity_dir = used_sim_folder
+    
     # Store motifs source in context
     context.opt_motifs_source = motif_dir
     
     print(f"Using motifs from: {motif_dir}")
+    
+    # NOW call process_redo_structures (it will use context.similarity_dir)
+    # Process redo structures at the START of the stage (if need_recalculation exists)
+    # This ensures that when the workflow restarts this stage after a similarity failure,
+    # we immediately regenerate inputs and delete old outputs before checking completion
+    if template_inp:
+        opt_dir = getattr(context, 'optimization_dir', 'optimization')
+        if os.path.exists(opt_dir):
+            process_redo_structures(context, opt_dir, template_inp)
     
     # Get motif XYZ files from the motifs directory
     motif_files = glob.glob(os.path.join(motif_dir, "motif_*.xyz"))
@@ -10665,19 +10789,45 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     with open(template_inp, 'r') as f:
         template_content = f.read()
     
-    # Process each XYZ file and create input files
-    all_input_files = []
-    for xyz_file in all_xyz_files:
-        # Call _process_xyz_file_for_opt with the correct parameters
-        xyz_file_data = (xyz_file, template_content, opt_dir, qm_program, input_ext)
-        result_files, message = _process_xyz_file_for_opt(xyz_file_data)
-        all_input_files.extend(result_files)
+    # Check if this is a redo scenario (process_redo_structures was called and found files)
+    is_redo = hasattr(context, 'recalculated_files') and bool(context.recalculated_files)
     
-    if not all_input_files:
-        print("Error: No input files created")
-        return 1
-    
-    print(f"Created {len(all_input_files)} input file(s)")
+    # Only generate new input files if NOT in redo mode
+    # In redo mode, we reuse existing inputs and process_redo_structures handles the failed ones
+    if not is_redo:
+        # Process each XYZ file and create input files
+        all_input_files = []
+        for xyz_file in all_xyz_files:
+            # Call _process_xyz_file_for_opt with the correct parameters
+            xyz_file_data = (xyz_file, template_content, opt_dir, qm_program, input_ext)
+            result_files, message = _process_xyz_file_for_opt(xyz_file_data)
+            all_input_files.extend(result_files)
+        
+        if not all_input_files:
+            print("Error: No input files created")
+            return 1
+        
+        print(f"Created {len(all_input_files)} input file(s)")
+    else:
+        # Redo mode: reuse existing input files (process_redo_structures already updated the failed ones)
+        # Get list of input files from optimization directory
+        all_input_files = []
+        
+        # Check root directory
+        root_inputs = [f for f in os.listdir(opt_dir) if f.endswith(('.inp', '.com', '.gjf'))]
+        all_input_files.extend(root_inputs)
+        
+        # Check subdirectories
+        if not all_input_files:
+            for item in os.listdir(opt_dir):
+                item_path = os.path.join(opt_dir, item)
+                if os.path.isdir(item_path):
+                    subdir_inputs = [os.path.join(item, f) for f in os.listdir(item_path) if f.endswith(('.inp', '.com', '.gjf'))]
+                    all_input_files.extend(subdir_inputs)
+        
+        if not all_input_files:
+            print("Error: No existing input files found in optimization directory")
+            return 1
     
     # Create launcher script if provided
     if launcher_sh:
@@ -10790,7 +10940,33 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             
             # Skip if output already exists AND is successfully completed
             # This handles redo scenarios where failed .out files were deleted
+            output_exists = False
+            
+            # Check root directory first
             if os.path.exists(output_path):
+                output_exists = True
+            else:
+                # Check subdirectory (if files were sorted)
+                # E.g. optimization/motif_01_opt/motif_01_opt.out
+                subdir_path = os.path.join("optimization", basename, output_file)
+                if os.path.exists(subdir_path):
+                    output_path = subdir_path
+                    output_exists = True
+                else:
+                    # Also check shortened basename subdirectory
+                    # E.g. optimization/motif_01/motif_01_opt.out
+                    short_basename = basename
+                    if '_opt' in basename:
+                        short_basename = basename.replace('_opt', '')
+                    elif '_calc' in basename:
+                        short_basename = basename.replace('_calc', '')
+                    
+                    subdir_path = os.path.join("optimization", short_basename, output_file)
+                    if os.path.exists(subdir_path):
+                        output_path = subdir_path
+                        output_exists = True
+
+            if output_exists:
                 with open(output_path, 'r') as f:
                     output_content = f.read()
                 if qm_program == 'orca':
@@ -11038,30 +11214,14 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     os.remove(backup_input)
             
         
-        # Calculate total expected (completed + excluded + failed)
-        # num_inputs is the count of non-excluded files
-        # We want to show X/Y where Y is total inputs (including excluded)
+        # Print status (use total completed from cache + newly completed)
+        # Calculate initial + new completed
+        total_completed = len(completed_opts)
+        # Ensure we don't show more completed than total inputs
+        if total_completed > num_inputs:
+            total_completed = num_inputs
         
-        # Get total files in optimization folder
-        total_opt_files = len([f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))])
-        # Or better, use the initial count before exclusion filtering
-        
-        # Calculate excluded count
-        num_excluded = 0
-        if excluded_numbers:
-            # Count how many files match exclusion
-            all_inputs = [f for f in os.listdir("optimization") if f.endswith(('.inp', '.com', '.gjf'))]
-            num_excluded = sum(1 for f in all_inputs if match_exclusion(f, excluded_numbers))
-        
-        # Adjust num_inputs to be the TOTAL count for display purposes if desired, 
-        # or keep it as "active" inputs. User requested "1/3" where 1 is active and 2 are excluded.
-        # So denominator should be active + excluded
-        total_inputs_display = num_inputs + num_excluded
-        
-        print(f"\nOptimization results: {num_completed}/{total_inputs_display} completed successfully")
-        
-        if num_excluded > 0:
-            print(f"Excluded structures: {num_excluded}/{total_inputs_display}")
+        print(f"\nStatus: {total_completed}/{num_inputs} optimizations completed")
         
         # Store completion counts in context
         context.opt_completed = num_completed
@@ -11119,95 +11279,80 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         if num_completed > 0:
             print("\n\nOptimization calculations completed")
             
-            # Organize results using sort command (suppress verbose output in workflow mode)
-            import io
-            import contextlib
-            
-            f = io.StringIO()
-            with contextlib.redirect_stdout(f):
-                sort_cmd = ['python', os.path.abspath(sys.argv[0]), 'sort']
-                
+            # Organize results - mimic calculation stage logic
+            saved_cwd = os.getcwd()
+            try:
                 # Check if this is a redo (recalculated files exist)
                 is_redo = hasattr(context, 'recalculated_files') and bool(context.recalculated_files)
                 
-                # If we have a specific similarity folder (e.g., similarity_2 from redo), pass it to sort
+                # Determine similarity folder
                 if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                    sort_cmd.extend(['--target-sim-folder', context.opt_sim_folder])
-                    if is_redo:
-                        sort_cmd.append('--reuse-existing')
+                    sim_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else 'similarity_2'
                 else:
-                    # Explicitly calculate next similarity folder to ensure we don't reuse 'similarity'
-                    # The sort command runs in 'optimization' dir, so parent is root
+                    # Calculate next similarity folder
                     root_dir = os.getcwd()
                     base_name = "similarity"
                     counter = 2
-                    next_sim = base_name
+                    sim_base = base_name
                     
-                    # Check if similarity exists
-                    if os.path.exists(os.path.join(root_dir, next_sim)):
+                    if os.path.exists(os.path.join(root_dir, sim_base)):
                         while True:
-                            next_sim = f"{base_name}_{counter}"
-                            if not os.path.exists(os.path.join(root_dir, next_sim)):
+                            sim_base = f"{base_name}_{counter}"
+                            if not os.path.exists(os.path.join(root_dir, sim_base)):
                                 break
                             counter += 1
                     
-                    # Pass the calculated folder name
-                    sort_cmd.extend(['--target-sim-folder', next_sim])
+                    context.opt_sim_folder = sim_base
                 
-                sort_result = subprocess.run(
-                    sort_cmd,
-                    cwd="optimization",
-                    capture_output=True,
-                    text=True,
-                    input="\n"  # Auto-accept (press enter to continue)
-                )
-                print(sort_result.stdout, end='')
+                os.chdir("optimization")
                 
-                # Create combined results using merge command
-                merge_result = subprocess.run(
-                    ['python', os.path.abspath(sys.argv[0]), 'merge'],
-                    cwd="optimization",
-                    capture_output=True,
-                    text=True,
-                    input="a\n"  # Auto-select all files
-                )
-                print(merge_result.stdout, end='')
-                
-                # Create ORCA summary if ORCA files
-                if qm_program == 'orca':
-                    summary_result = subprocess.run(
-                        ['python', os.path.abspath(sys.argv[0]), 'summary'],
-                        cwd="optimization",
-                        capture_output=True,
-                        text=True
+                # Group files by base names into subfolders (silent in workflow)
+                import io
+                import contextlib
+                f = io.StringIO()
+                with contextlib.redirect_stdout(f):
+                    group_files_by_base_with_tracking(".")
+                    combine_xyz_files()
+                    create_combined_mol()
+                    create_summary_with_tracking(".")
+                    
+                    # Collect output files - reuse existing similarity folder in redo mode
+                    similarity_folder = collect_out_files_with_tracking(
+                        reuse_existing=is_redo,
+                        target_sim_folder=sim_base
                     )
-                    print(summary_result.stdout, end='')
+                
+                # Extract key info from output
+                output = f.getvalue()
+                if 'Summary written to' in output:
+                    print("\nSummary written to orca_summary.txt")
+                if 'Copied' in output and 'similarity' in output:
+                    # Extract the copy message and similarity folder
+                    for line in output.split('\n'):
+                        if 'Copied' in line and '.out files to' in line:
+                            print(line)
+                            # Extract similarity folder name
+                            import re
+                            match = re.search(r'to\s+(similarity[^\s]*)', line)
+                            if match:
+                                context.opt_sim_folder = match.group(1)
+                            break
+                
+                # Show "Updating X files" similar to calculation stage
+                if is_redo and hasattr(context, 'recalculated_files') and context.recalculated_files:
+                    # Check if files were updated in similarity folder
+                    if similarity_folder and os.path.exists(similarity_folder):
+                        updated_count = len(context.recalculated_files)
+                        print(f"\n  Updating {updated_count} file(s) in {os.path.basename(similarity_folder)}/")
+                        for basename in context.recalculated_files:
+                            out_file = f"{basename}.out"
+                            print(f"    Copied {out_file} to similarity folder")
             
-            # Extract only key lines from captured output and capture similarity folder
-            output = f.getvalue()
-            for line in output.split('\n'):
-                if 'Summary written to' in line or 'Copied' in line and 'files to' in line:
-                    print(line)
-                    # Extract similarity folder if mentioned
-                    if 'Copied' in line and 'files to' in line:
-                        # Parse "Copied X .out files to similarity_2/opt_out_3"
-                        import re
-                        match = re.search(r'files to (similarity_\d+/[^\s]+)', line)
-                        if match:
-                            context.opt_sim_folder = match.group(1)
-            
-            # Verify files were copied to similarity_2
-            sim_dir = "similarity_2"
-            if os.path.exists(sim_dir):
-                out_folders = [f for f in os.listdir(sim_dir) if f.startswith(('orca_out_', 'opt_out_'))]
-                if out_folders:
-                    for folder in out_folders:
-                        folder_path = os.path.join(sim_dir, folder)
-                        file_count = len([f for f in os.listdir(folder_path) if f.endswith(('.out', '.log'))])
-                        if file_count > 0:
-                            print(f"\n\nReady for similarity: {file_count} files in {sim_dir}/{folder}")
-            
-            print("\n✓ Files organized and sorted")
+                print(f"\n✓ Files organized and sorted")
+            except Exception as e:
+                print(f"⚠ Warning: Could not organize files: {e}")
+            finally:
+                os.chdir(saved_cwd)
         else:
             print("✗ No output files found")
             return 1
