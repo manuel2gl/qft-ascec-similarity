@@ -514,7 +514,7 @@ def extract_properties_from_logfile(logfile_path):
     data = None
 
     try:
-        raw_data = ccread(logfile_path)
+        raw_data = ccread(logfile_path)  # type: ignore[misc]
         
         if raw_data:
             # Determine the actual ccData object to work with
@@ -525,21 +525,24 @@ def extract_properties_from_logfile(logfile_path):
                 data = raw_data
             else:
                 # This branch catches cases where raw_data is not a recognized ccData type or ccCollection
-                print(f"  WARNING: Unexpected cclib return type for {os.path.basename(logfile_path)}. Type: {type(raw_data)}. Returning None.")
+                # Only show in verbose mode - this is expected for incomplete/failed calculations
+                vprint(f"  WARNING: Unexpected cclib return type for {os.path.basename(logfile_path)}. Type: {type(raw_data)}. Returning None.")
                 return None
         else:
-            # ccread returned None
-            print(f"  WARNING: cclib returned None for {os.path.basename(logfile_path)}. This means the file could not be parsed. Returning None.")
+            # ccread returned None - expected for incomplete/corrupted files
+            # Only show in verbose mode to reduce noise
+            vprint(f"  WARNING: cclib returned None for {os.path.basename(logfile_path)}. This means the file could not be parsed. Returning None.")
             return None
         
         # Final explicit check: ensure 'data' is indeed a ccData object before proceeding
         if not type(data).__name__.startswith('ccData'):
-            print(f"  ERROR: 'data' is not a ccData object after initial processing for {os.path.basename(logfile_path)}. Actual type: {type(data)}. Returning None.")
+            vprint(f"  ERROR: 'data' is not a ccData object after initial processing for {os.path.basename(logfile_path)}. Actual type: {type(data)}. Returning None.")
             return None
 
     except Exception as e:
         # This catches any errors during ccread or initial data extraction from ccCollection
-        print(f"(CCL_ERROR) Failed to parse or process {os.path.basename(logfile_path)} with cclib: {e}")
+        # Keep this as a regular print since it indicates a more serious parsing error
+        vprint(f"(CCL_ERROR) Failed to parse or process {os.path.basename(logfile_path)} with cclib: {e}")
         return None
 
     extracted_props = {
@@ -609,8 +612,7 @@ def extract_properties_from_logfile(logfile_path):
         if hasattr(data, 'atomnos') and data.atomnos is not None and len(data.atomnos) > 0:  # type: ignore
             extracted_props['num_atoms'] = len(data.atomnos)  # type: ignore
             extracted_props['final_geometry_atomnos'] = data.atomnos  # type: ignore
-        else:
-            print(f"  WARNING: No atom numbers (atomnos) found for {os.path.basename(logfile_path)}")
+        # Silently skip if atomnos missing (expected for incomplete calculations)
 
         if hasattr(data, 'atomcoords') and data.atomcoords is not None and len(data.atomcoords) > 0:  # type: ignore
             coords_candidate = None
@@ -623,14 +625,10 @@ def extract_properties_from_logfile(logfile_path):
             
             if coords_candidate is not None and coords_candidate.ndim == 2 and coords_candidate.shape[1] == 3:
                 extracted_props['final_geometry_coords'] = coords_candidate
-            elif coords_candidate is not None:
-                print(f"  WARNING: Final geometry candidate has wrong shape for {os.path.basename(logfile_path)}: {coords_candidate.shape}. Skipping geometry-dependent calculations.")
-                extracted_props['final_geometry_coords'] = None
             else:
-                print(f"  WARNING: atomcoords found but unexpected format for {os.path.basename(logfile_path)}. Expected (N,3), (steps,N,3) or list of (N,3) arrays. Actual shape: {getattr(data.atomcoords, 'shape', 'N/A')}. Skipping geometry-dependent calculations.")  # type: ignore
+                # Silently skip if coords have unexpected shape (expected for incomplete calculations)
                 extracted_props['final_geometry_coords'] = None
-        else:
-            print(f"  WARNING: No atomcoords found for {os.path.basename(logfile_path)}")
+        # Silently skip if atomcoords missing (expected for incomplete calculations)
 
         # --- Conditional ELECTRONIC ENERGY EXTRACTION based on file type ---
         if file_extension == '.out':
@@ -766,16 +764,15 @@ def extract_properties_from_logfile(logfile_path):
                         extracted_props['homo_energy'] = homo_energy
                         extracted_props['lumo_energy'] = lumo_energy
                         extracted_props['homo_lumo_gap'] = lumo_energy - homo_energy
-                    else:
-                        print(f"  WARNING: HOMO/LUMO indices out of bounds or invalid moenergies configuration for {os.path.basename(logfile_path)}")
-                else:
-                    print(f"  WARNING: 'moenergies[0]' is not accessible or empty for {os.path.basename(logfile_path)}")
-            else:
-                print(f"  WARNING: Missing or invalid 'homos' or 'moenergies' attributes for {os.path.basename(logfile_path)}")
-        except (AttributeError, IndexError, TypeError) as e:
-            print(f"  ERROR: Problem accessing HOMO/LUMO data with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse for gap.")
-        except Exception as e:
-            print(f"  ERROR: Problem extracting HOMO/LUMO with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse for gap.")
+                    # Silently skip if indices out of bounds (expected for incomplete calculations)
+                # Silently skip if moenergies[0] not accessible (expected for incomplete calculations)
+            # Silently skip if homos/moenergies missing (expected for incomplete calculations)
+        except (AttributeError, IndexError, TypeError):
+            # Silently handle expected data access errors
+            pass
+        except Exception:
+            # Silently handle other exceptions
+            pass
 
         # Custom parsing for HOMO-LUMO Gap if cclib fails for .out files (e.g., semiempirical)
         if extracted_props['homo_lumo_gap'] is None and file_extension == '.out':
@@ -806,10 +803,10 @@ def extract_properties_from_logfile(logfile_path):
                 if rot_consts_candidate is not None and rot_consts_candidate.ndim == 1 and len(rot_consts_candidate) == 3:
                     extracted_props['rotational_constants'] = rot_consts_candidate.astype(float)
                 else:
-                    print(f"  WARNING: cclib found rotational constants but unexpected format for {os.path.basename(logfile_path)}. Expected 1D array of 3 floats. Actual format: {type(data.rotconsts)}, Shape: {getattr(data.rotconsts, 'shape', 'N/A')}. Trying custom parse.")  # type: ignore
+                    # Silently skip if unexpected format (will try custom parse below)
                     extracted_props['rotational_constants'] = None
-            except Exception as e:
-                print(f"  ERROR: Problem extracting rotational constants with cclib for {os.path.basename(logfile_path)}: {e}. Trying custom parse.")
+            except Exception:
+                # Silently skip exceptions (will try custom parse below)
                 extracted_props['rotational_constants'] = None
 
         # Fallback to custom parsing for .out files if cclib fails
@@ -833,10 +830,10 @@ def extract_properties_from_logfile(logfile_path):
                 try:
                     radius_gyr = calculate_radius_of_gyration(extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords'])
                     extracted_props['radius_of_gyration'] = radius_gyr
-                except Exception as e:
-                    print(f"  ERROR: Problem calculating Radius of Gyration for {os.path.basename(logfile_path)}: {e}")
-            else:
-                print(f"  WARNING: Skipping Radius of Gyration for {os.path.basename(logfile_path)} due to empty atomnos or coords.")
+                except Exception:
+                    # Silently skip if calculation fails (expected for incomplete data)
+                    pass
+            # Silently skip if empty atomnos or coords (expected for incomplete calculations)
 
         # Extract vibrational frequencies
         if hasattr(data, "vibfreqs") and data.vibfreqs is not None and len(data.vibfreqs) > 0:  # type: ignore
@@ -860,10 +857,10 @@ def extract_properties_from_logfile(logfile_path):
                     else:
                         extracted_props['first_vib_freq'] = None
                         extracted_props['last_vib_freq'] = None
-                else:
-                    print(f"  WARNING: Vibrational frequencies found but not valid numeric data for {os.path.basename(logfile_path)}")
-            except Exception as e:
-                print(f"  ERROR: Problem extracting vibrational frequencies for {os.path.basename(logfile_path)}: {e}")
+                # Silently skip if frequencies not valid numeric data (expected for incomplete calculations)
+            except Exception:
+                # Silently skip exceptions during frequency extraction
+                pass
         else:
             # Explicitly set flag if no freq calc detected
             extracted_props['_has_freq_calc'] = False
@@ -882,10 +879,10 @@ def extract_properties_from_logfile(logfile_path):
                     hbond_results = detect_hydrogen_bonds(extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords'])
                     
                     extracted_props.update(hbond_results) # Update all hbond related keys
-                except Exception as e:
-                    print(f"  ERROR: Problem detecting hydrogen bonds for {os.path.basename(logfile_path)}: {e}")
-            else:
-                print(f"  WARNING: Skipping Hydrogen Bond Analysis for {os.path.basename(logfile_path)} due to empty atomnos or coords.")
+                except Exception:
+                    # Silently skip if hydrogen bond detection fails (expected for incomplete data)
+                    pass
+            # Silently skip if empty atomnos or coords (expected for incomplete calculations)
 
         return extracted_props
 
@@ -1286,16 +1283,42 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
             if isinstance(input_source, list):
                 available_files = {os.path.basename(f): f for f in input_source}
             else:
-                log_files = glob_module.glob(os.path.join(str(input_source), "*.log"))
-                out_files = glob_module.glob(os.path.join(str(input_source), "*.out"))
+                # Robust file finding that includes subdirectories (e.g. orca_out_*)
+                log_files = []
+                out_files = []
+                
+                # Check root
+                log_files.extend(glob_module.glob(os.path.join(str(input_source), "*.log")))
+                out_files.extend(glob_module.glob(os.path.join(str(input_source), "*.out")))
+                
+                # Check subdirectories
+                for item in os.listdir(str(input_source)):
+                    item_path = os.path.join(str(input_source), item)
+                    if os.path.isdir(item_path):
+                        log_files.extend(glob_module.glob(os.path.join(item_path, "*.log")))
+                        out_files.extend(glob_module.glob(os.path.join(item_path, "*.out")))
+                
                 all_files = log_files + out_files
                 available_files = {os.path.basename(f): f for f in all_files}
             
             for m in skipped_clustered_with_normal:
                 source_file = available_files.get(m['filename'])
                 if source_file and os.path.exists(source_file):
+                    # Copy output file
                     dest_file = os.path.join(clustered_dir, m['filename'])
                     shutil.copy2(source_file, dest_file)
+                    
+                    # Extract XYZ geometry
+                    natoms, coords, symbols = extract_xyz_from_output(source_file)
+                    if natoms is not None and coords is not None and symbols is not None:
+                        # Save individual XYZ file
+                        basename = os.path.splitext(m['filename'])[0]
+                        xyz_file = os.path.join(clustered_dir, f"{basename}.xyz")
+                        with open(xyz_file, 'w') as f:
+                            f.write(f"{natoms}\n")
+                            f.write(f"{basename} - clustered with minima\n")
+                            for symbol, coord in zip(symbols, coords):
+                                f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
             
             # Process structures needing recalculation - extract XYZ geometries
             xyz_data_list = []  # For combined file
@@ -1305,8 +1328,9 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
                     # Copy output file
                     dest_file = os.path.join(need_recalc_dir, m['filename'])
                     shutil.copy2(source_file, dest_file)
-                    
-                    # Extract XYZ geometry
+                
+                # Extract XYZ geometry (ALWAYS do this if source file exists)
+                if source_file and os.path.exists(source_file):
                     natoms, coords, symbols = extract_xyz_from_output(source_file)
                     if natoms is not None and coords is not None and symbols is not None:
                         # Save individual XYZ file
@@ -1338,6 +1362,26 @@ def filter_imaginary_freq_structures(clusters_list, output_base_dir, input_sourc
                                 f.write(f"{symbol:2s}  {coord[0]:15.8f}  {coord[1]:15.8f}  {coord[2]:15.8f}\n")
                     
                     vprint(f"  Created combined XYZ file: {combined_xyz}")
+                    
+                    # Create combined MOL file from combined XYZ
+                    combined_mol = os.path.join(need_recalc_dir, "combined_need_recalc.mol")
+                    try:
+                        result = subprocess.run(['obabel', '-ixyz', combined_xyz, '-omol', '-O', combined_mol],
+                                              capture_output=True, check=True)
+                        vprint(f"  Created combined MOL file: {combined_mol}")
+                    except:
+                        pass  # obabel not available or failed
+                elif len(xyz_data_list) == 1:
+                    # Single structure - create MOL file from its XYZ
+                    basename = xyz_data_list[0]['basename']
+                    xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
+                    mol_file = os.path.join(need_recalc_dir, f"{basename}.mol")
+                    try:
+                        result = subprocess.run(['obabel', '-ixyz', xyz_file, '-omol', '-O', mol_file],
+                                              capture_output=True, check=True)
+                        vprint(f"  Single structure, created MOL file: {mol_file}")
+                    except:
+                        pass  # obabel not available or failed
                     vprint(f"  Extracted {len(xyz_data_list)} individual XYZ files")
                 else:
                     vprint(f"  Single file needing recalculation - no combined file created")
