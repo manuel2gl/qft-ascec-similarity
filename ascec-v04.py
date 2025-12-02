@@ -2985,155 +2985,224 @@ def check_intramolecular_overlap(mol_coords: np.ndarray, mol_atomic_numbers: Lis
 def propose_conformational_move(state: SystemState, current_rp: np.ndarray, 
                                current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
     """
-    Proposes a conformational change by rotating around a randomly selected rotatable bond.
-    Returns the new full system coordinates, the coordinates of the moved molecule,
-    the index of the moved molecule, and the move type.
+    DEPRECATED: This function is no longer used in the main annealing loop.
+    Use propose_unified_move() instead, which properly handles all molecules.
+    
+    Kept for backward compatibility only.
     """
-    # Randomly select a molecule
-    molecule_idx = np.random.randint(0, state.num_molecules)
-    
-    start_atom_idx = current_imolec[molecule_idx] 
-    end_atom_idx = current_imolec[molecule_idx + 1]
-    
-    # Get molecule coordinates and atomic numbers
-    mol_coords = current_rp[start_atom_idx:end_atom_idx, :]
-    mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
-    
-    # Find rotatable bonds in this molecule
-    rotatable_bonds = find_rotatable_bonds(mol_coords, mol_atomic_numbers, state)
-    
-    if not rotatable_bonds:
-        # No rotatable bonds found, fall back to rigid-body move
-        return propose_move(state, current_rp, current_imolec)
-    
-    # Randomly select a rotatable bond
-    bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
-    
-    # Generate random rotation angle using the user-specified max_dihedral_angle_rad
-    # Default to 60 degrees (π/3) if not set
-    max_rotation = state.max_dihedral_angle_rad if state.max_dihedral_angle_rad > 0 else np.pi / 3
-    rotation_angle = (np.random.rand() - 0.5) * 2.0 * max_rotation
-    
-    # Apply rotation to molecule coordinates
-    new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
-                                       moving_atoms, rotation_angle)
-    
-    # Check for intramolecular overlaps (atom clashes) after the conformational change
-    # If severe overlap is detected, fall back to rigid-body move instead
-    if check_intramolecular_overlap(new_mol_coords, mol_atomic_numbers, state):
-        _print_verbose(f"  Conformational move caused atom overlap. Falling back to rigid-body move.", 2, state)
-        return propose_move(state, current_rp, current_imolec)
-    
-    # Create new full system coordinates
-    proposed_rp_full_system = np.copy(current_rp)
-    proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = new_mol_coords
-    
-    return proposed_rp_full_system, new_mol_coords, molecule_idx, "conformational"
+    # Redirect to propose_unified_move for correct behavior
+    return propose_unified_move(state, current_rp, current_imolec)
 
 def propose_unified_move(state: SystemState, current_rp: np.ndarray, 
                         current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
     """
-    Proposes either a conformational move or a rigid-body move based on probability.
-    This function provides the enhanced Monte Carlo sampling that includes 
-    intramolecular conformational changes.
+    Proposes moves for ALL molecules simultaneously with each molecule independently deciding:
+    1. Attempt a conformational change (dihedral rotation) based on conformational_move_prob, OR
+    2. Attempt rigid-body moves (translation and/or rotation - independent and random magnitude)
     
-    The probability of attempting a conformational move is controlled by
-    state.conformational_move_prob (stored as 0.0-1.0). If a conformational move fails
-    (e.g., no rotatable bonds found), it falls back to a rigid-body move.
+    All molecules are moved in each annealing attempt. For rigid-body moves:
+    - Translation and rotation are INDEPENDENT (can have both, just one, or neither)
+    - Each has random magnitude up to max limits (max_displacement_a ≤ 1 Å, max_rotation_angle_rad ≤ 1 rad)
+    - Can result in: both translation+rotation, only translation, only rotation, or minimal movement
+    
+    The probability of attempting a conformational move per molecule is controlled by
+    state.conformational_move_prob (0.0-1.0, can be 0% if disabled by user).
     """
-    # Decide whether to attempt a conformational move based on probability
-    # state.conformational_move_prob is stored as 0.0-1.0 (e.g., 0.10 for 10%)
-    if state.conformational_move_prob > 0 and np.random.rand() < state.conformational_move_prob:
-        # Attempt conformational move (it will fall back to rigid-body if no rotatable bonds)
-        return propose_conformational_move(state, current_rp, current_imolec)
-    else:
-        # Perform rigid-body move (translation + rotation)
-        return propose_move(state, current_rp, current_imolec)
+    # Start with a copy of current coordinates
+    proposed_rp_full_system = np.copy(current_rp)
+    last_moved_mol_idx = -1
+    move_type_used = "translate_rotate"
+    
+    # Iterate through ALL molecules
+    for molecule_idx in range(state.num_molecules):
+        start_atom_idx = current_imolec[molecule_idx] 
+        end_atom_idx = current_imolec[molecule_idx + 1]
+        
+        # Each molecule independently decides whether to attempt conformational or rigid-body move
+        attempt_conformational = (state.conformational_move_prob > 0 and 
+                                 np.random.rand() < state.conformational_move_prob)
+        
+        conformational_success = False
+        if attempt_conformational:
+            # Try conformational move for this molecule
+            mol_coords = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
+            mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
+            
+            # Find rotatable bonds in this molecule
+            rotatable_bonds = find_rotatable_bonds(mol_coords, mol_atomic_numbers, state)
+            
+            if rotatable_bonds:
+                # Randomly select a rotatable bond
+                bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[np.random.randint(len(rotatable_bonds))]
+                
+                # Generate random rotation angle (can be up to max_dihedral_angle_rad)
+                max_rotation = state.max_dihedral_angle_rad if state.max_dihedral_angle_rad > 0 else np.pi / 3
+                rotation_angle = (np.random.rand() - 0.5) * 2.0 * max_rotation
+                
+                # Apply rotation to molecule coordinates
+                new_mol_coords = rotate_around_bond(mol_coords, bond_atom1, bond_atom2, 
+                                                   moving_atoms, rotation_angle)
+                
+                # Check for intramolecular overlaps
+                if not check_intramolecular_overlap(new_mol_coords, mol_atomic_numbers, state):
+                    proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = new_mol_coords
+                    last_moved_mol_idx = molecule_idx
+                    move_type_used = "conformational"
+                    conformational_success = True
+        
+        # If conformational move succeeded, this molecule is done (skip rigid-body moves)
+        if conformational_success:
+            continue
+        
+        # Apply rigid-body moves (translation and/or rotation - both are independent and random)
+        mol_coords_current = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
+        mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
+        mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
+                               for anum in mol_atomic_numbers])
+        
+        current_rcm = calculate_mass_center(mol_coords_current, mol_masses)
+
+        # Translation Part - random displacement with random magnitude up to max_displacement_a
+        # This generates a random vector where each component is in range [-max_displacement_a, +max_displacement_a]
+        # The actual magnitude will be random (can be small or up to the max)
+        random_displacement_vector = (np.random.rand(3) - 0.5) * 2.0 * state.max_displacement_a
+        half_xbox = state.cube_length / 2.0 
+        
+        new_rcm_after_translation = np.copy(current_rcm)
+        actual_atom_displacement = np.copy(random_displacement_vector)
+
+        for dim in range(3):
+            new_rcm_after_translation[dim] += random_displacement_vector[dim]
+            if np.abs(new_rcm_after_translation[dim]) > half_xbox:
+                new_rcm_after_translation[dim] -= 2.0 * random_displacement_vector[dim] 
+                actual_atom_displacement[dim] = -random_displacement_vector[dim] 
+        
+        proposed_rp_full_system[start_atom_idx:end_atom_idx, :] += actual_atom_displacement
+
+        # Rotation Part - random Euler angles with random magnitude up to max_rotation_angle_rad
+        # Each angle is independently random (can be small or up to the max)
+        alpha_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
+        beta_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad  
+        gamma_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
+
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(gamma_rot), -np.sin(gamma_rot)],
+            [0, np.sin(gamma_rot), np.cos(gamma_rot)]
+        ], dtype=np.float64)
+
+        Ry = np.array([
+            [np.cos(beta_rot), 0, np.sin(beta_rot)],
+            [0, 1, 0],
+            [-np.sin(beta_rot), 0, np.cos(beta_rot)]
+        ], dtype=np.float64)
+
+        Rz = np.array([
+            [np.cos(alpha_rot), -np.sin(alpha_rot), 0],
+            [np.sin(alpha_rot), np.cos(alpha_rot), 0],
+            [0, 0, 1]
+        ], dtype=np.float64)
+
+        rotation_matrix = Rz @ Ry @ Rx
+
+        mol_coords_after_translation = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
+        mol_coords_relative_to_cm = mol_coords_after_translation - new_rcm_after_translation
+        
+        rotated_relative_coords = (rotation_matrix @ mol_coords_relative_to_cm.T).T
+        proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = rotated_relative_coords + new_rcm_after_translation
+        
+        last_moved_mol_idx = molecule_idx
+    
+    # Return results
+    return proposed_rp_full_system, proposed_rp_full_system[current_imolec[last_moved_mol_idx]:current_imolec[last_moved_mol_idx + 1], :] if last_moved_mol_idx >= 0 else np.array([]), last_moved_mol_idx, move_type_used
 
 # 15. Propose Move Function (No longer used for full system randomization in annealing)
 # Keeping this function definition for reference if a future iterative single-molecule
 # movement strategy is desired.
 def propose_move(state: SystemState, current_rp: np.ndarray, current_imolec: List[int]) -> Tuple[np.ndarray, np.ndarray, int, str]:
     """
-    Proposes a random translation and rotation for a single molecule,
+    Proposes a random translation and rotation for ALL molecules,
     applying Fortran's 'trans' (CM bounce) and 'rotac' (Euler angle rotation) logic.
-    Returns the new full system coordinates, the coordinates of the moved molecule,
-    the index of the moved molecule, and the move type.
+    Each molecule independently has a probability to be moved/rotated.
+    Returns the new full system coordinates, the coordinates of the last moved molecule,
+    the index of the last moved molecule, and the move type.
     """
-    # Randomly select a molecule to move
-    molecule_idx = np.random.randint(0, state.num_molecules)
-
-    start_atom_idx = current_imolec[molecule_idx] 
-    end_atom_idx = current_imolec[molecule_idx + 1] 
-    
-    # Prepare proposed_rf as a copy of current_rp
+    # Start with a copy of current coordinates
     proposed_rp_full_system = np.copy(current_rp)
-
-    # Get the current coordinates of the selected molecule
-    mol_coords_current = current_rp[start_atom_idx:end_atom_idx, :]
+    last_moved_mol_idx = -1
     
-    # Calculate current center of mass for the selected molecule
-    # Ensure state.iznu and state.atomic_number_to_mass are correctly populated
-    mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
-    mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
-                           for anum in mol_atomic_numbers])
-    
-    current_rcm = calculate_mass_center(mol_coords_current, mol_masses)
+    # Iterate through ALL molecules
+    for molecule_idx in range(state.num_molecules):
+        start_atom_idx = current_imolec[molecule_idx] 
+        end_atom_idx = current_imolec[molecule_idx + 1] 
+        
+        # Get the current coordinates of the selected molecule (from proposed_rp_full_system to accumulate changes)
+        mol_coords_current = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
+        
+        # Calculate current center of mass for the selected molecule
+        # Ensure state.iznu and state.atomic_number_to_mass are correctly populated
+        mol_atomic_numbers = [state.iznu[i] for i in range(start_atom_idx, end_atom_idx)]
+        mol_masses = np.array([state.atomic_number_to_mass.get(anum, 1.0) 
+                               for anum in mol_atomic_numbers])
+        
+        current_rcm = calculate_mass_center(mol_coords_current, mol_masses)
 
-    # Translation Part (matching Fortran's 'trans' subroutine)
-    # Generate random displacement vector for CM, range [-max_displacement_a, +max_displacement_a]
-    random_displacement_vector = (np.random.rand(3) - 0.5) * 2.0 * state.max_displacement_a
+        # Translation Part (matching Fortran's 'trans' subroutine)
+        # Generate random displacement vector for CM, range [-max_displacement_a, +max_displacement_a]
+        random_displacement_vector = (np.random.rand(3) - 0.5) * 2.0 * state.max_displacement_a
 
-    half_xbox = state.cube_length / 2.0 
-    
-    new_rcm_after_translation = np.copy(current_rcm)
-    actual_atom_displacement = np.copy(random_displacement_vector)
+        half_xbox = state.cube_length / 2.0 
+        
+        new_rcm_after_translation = np.copy(current_rcm)
+        actual_atom_displacement = np.copy(random_displacement_vector)
 
-    for dim in range(3):
-        new_rcm_after_translation[dim] += random_displacement_vector[dim]
+        for dim in range(3):
+            new_rcm_after_translation[dim] += random_displacement_vector[dim]
 
-        if np.abs(new_rcm_after_translation[dim]) > half_xbox:
-            new_rcm_after_translation[dim] -= 2.0 * random_displacement_vector[dim] 
-            actual_atom_displacement[dim] = -random_displacement_vector[dim] 
-    
-    proposed_rp_full_system[start_atom_idx:end_atom_idx, :] += actual_atom_displacement
+            if np.abs(new_rcm_after_translation[dim]) > half_xbox:
+                new_rcm_after_translation[dim] -= 2.0 * random_displacement_vector[dim] 
+                actual_atom_displacement[dim] = -random_displacement_vector[dim] 
+        
+        proposed_rp_full_system[start_atom_idx:end_atom_idx, :] += actual_atom_displacement
 
-    # Rotation Part (matching Fortran's 'rotac' subroutine with Euler angles)
-    # Generate random Euler angles (alpha, beta, gamma) for Z, Y, X rotations respectively
-    alpha_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
-    beta_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad  
-    gamma_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
+        # Rotation Part (matching Fortran's 'rotac' subroutine with Euler angles)
+        # Generate random Euler angles (alpha, beta, gamma) for Z, Y, X rotations respectively
+        alpha_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
+        beta_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad  
+        gamma_rot = (np.random.rand() - 0.5) * 2.0 * state.max_rotation_angle_rad 
 
-    Rx = np.array([
-        [1, 0, 0],
-        [0, np.cos(gamma_rot), -np.sin(gamma_rot)],
-        [0, np.sin(gamma_rot), np.cos(gamma_rot)]
-    ], dtype=np.float64)
+        Rx = np.array([
+            [1, 0, 0],
+            [0, np.cos(gamma_rot), -np.sin(gamma_rot)],
+            [0, np.sin(gamma_rot), np.cos(gamma_rot)]
+        ], dtype=np.float64)
 
-    Ry = np.array([
-        [np.cos(beta_rot), 0, np.sin(beta_rot)],
-        [0, 1, 0],
-        [-np.sin(beta_rot), 0, np.cos(beta_rot)]
-    ], dtype=np.float64)
+        Ry = np.array([
+            [np.cos(beta_rot), 0, np.sin(beta_rot)],
+            [0, 1, 0],
+            [-np.sin(beta_rot), 0, np.cos(beta_rot)]
+        ], dtype=np.float64)
 
-    Rz = np.array([
-        [np.cos(alpha_rot), -np.sin(alpha_rot), 0],
-        [np.sin(alpha_rot), np.cos(alpha_rot), 0],
-        [0, 0, 1]
-    ], dtype=np.float64)
+        Rz = np.array([
+            [np.cos(alpha_rot), -np.sin(alpha_rot), 0],
+            [np.sin(alpha_rot), np.cos(alpha_rot), 0],
+            [0, 0, 1]
+        ], dtype=np.float64)
 
-    rotation_matrix = Rz @ Ry @ Rx
+        rotation_matrix = Rz @ Ry @ Rx
 
-    mol_coords_after_translation = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
-    mol_coords_relative_to_cm = mol_coords_after_translation - new_rcm_after_translation
-    
-    rotated_relative_coords = (rotation_matrix @ mol_coords_relative_to_cm.T).T
+        mol_coords_after_translation = proposed_rp_full_system[start_atom_idx:end_atom_idx, :]
+        mol_coords_relative_to_cm = mol_coords_after_translation - new_rcm_after_translation
+        
+        rotated_relative_coords = (rotation_matrix @ mol_coords_relative_to_cm.T).T
 
-    proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = rotated_relative_coords + new_rcm_after_translation
+        proposed_rp_full_system[start_atom_idx:end_atom_idx, :] = rotated_relative_coords + new_rcm_after_translation
+        
+        last_moved_mol_idx = molecule_idx
 
-    # Return the full system coordinates, the coordinates of the moved molecule (for potential debugging),
-    # the index of the moved molecule, and a string indicating the move type.
-    return proposed_rp_full_system, proposed_rp_full_system[start_atom_idx:end_atom_idx, :], molecule_idx, "translate_rotate"
+    # Return the full system coordinates, the coordinates of the last moved molecule (for potential debugging),
+    # the index of the last moved molecule, and a string indicating the move type.
+    return proposed_rp_full_system, proposed_rp_full_system[current_imolec[last_moved_mol_idx]:current_imolec[last_moved_mol_idx + 1], :] if last_moved_mol_idx >= 0 else np.array([]), last_moved_mol_idx, "translate_rotate"
 
 def propose_conformational_or_rigid_move(state: SystemState) -> bool:
     """
