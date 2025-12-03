@@ -4908,7 +4908,9 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
 
 def extract_qm_executable_from_launcher(launcher_content: str, qm_program_idx: int) -> str:
     """
-    Extract the QM executable path from the launcher template.
+    Extract the QM executable path from the launcher template by looking for
+    any exported variable ending in _ROOT and constructing the executable path,
+    or by finding existing run commands in the template.
     
     Args:
         launcher_content (str): Content of the launcher template
@@ -4917,100 +4919,92 @@ def extract_qm_executable_from_launcher(launcher_content: str, qm_program_idx: i
     Returns:
         str: The executable path or command to use
     """
+    import re
+    
     qm_name = qm_program_details.get(qm_program_idx, {}).get('name', 'unknown')
     
+    # Get default executable based on program type
+    if qm_name == 'orca':
+        default_exe = qm_program_details.get(qm_program_idx, {}).get('default_exe', 'orca')
+    elif qm_name == 'gaussian':
+        default_exe = qm_program_details.get(qm_program_idx, {}).get('default_exe', 'g16')
+    else:
+        default_exe = qm_program_details.get(qm_program_idx, {}).get('default_exe', 'unknown')
+    
     if not launcher_content:
-        # Fallback to bare commands if no launcher content provided
-        if qm_name == 'orca':
-            return "orca"
-        else:  # gaussian
-            return "g16"
+        return default_exe
     
     lines = launcher_content.split('\n')
     
-    if qm_name == 'orca':
-        # Look for ORCA root definitions - enhanced patterns to catch custom variable names
-        orca_root_patterns = [
-            r'export\s+(ORCA\d*_ROOT)\s*=\s*(.+)',  # ORCA5_ROOT, ORCA66_ROOT, etc.
-            r'export\s+(ORCA_ROOT)\s*=\s*(.+)',     # Standard ORCA_ROOT
-            r'(ORCA\d*_ROOT)\s*=\s*(.+)',           # Without export
-            r'(ORCA_ROOT)\s*=\s*(.+)',              # Without export
-        ]
+    # Strategy 1: Look for existing run commands after the ### separator
+    # This extracts the actual command the user intends to use
+    after_separator = False
+    for line in lines:
+        if line.strip() == '###':
+            after_separator = True
+            continue
         
-        orca_root_var = None
-        orca_in_path = False
-        
-        for line in lines:
-            line = line.strip()
+        if after_separator:
+            # Look for command patterns like: $VAR/exe file > output or exe file > output
+            # Match patterns: <executable> <input_file> [>] [output_file] [&&]
+            match = re.search(r'^\s*(\S+)\s+\S+\.(inp|gjf|com)\s*(?:>|\s)', line)
+            if match:
+                return match.group(1)  # Return the executable part
+    
+    # Strategy 2: Look for any *_ROOT variable exports and construct executable path
+    # This is generic and works with any naming convention (ORCA5_ROOT, GAUSSIAN_ROOT, QM_ROOT, etc.)
+    root_pattern = r'export\s+([A-Z_0-9]+ROOT)\s*=\s*(.+)'
+    root_var = None
+    root_value = None
+    
+    for line in lines:
+        match = re.search(root_pattern, line)
+        if match:
+            var_name = match.group(1)
+            var_value = match.group(2).strip().strip('"\'')
             
-            # Check if ORCA is added to PATH
-            if 'PATH=' in line and 'ORCA' in line:
-                orca_in_path = True
-            
-            # Look for ORCA root variable definitions
-            for pattern in orca_root_patterns:
-                import re
-                match = re.search(pattern, line)
-                if match:
-                    var_name = match.group(1)  # e.g., ORCA66_ROOT, ORCA5_ROOT
-                    orca_root = match.group(2).strip().strip('"\'')
-                    
-                    # Handle variable expansion like $ORCA_BASE/orca_5_0_4
-                    if '$' in orca_root:
-                        # For complex paths, use the variable as-is and let shell expand
-                        orca_root_var = f"${var_name}/orca"
-                    else:
-                        # Direct path
-                        orca_root_var = f"{orca_root}/orca"
-                    break
-        
-        # Return the found root variable, or use 'orca' if it's in PATH
-        if orca_root_var:
-            return orca_root_var
-        elif orca_in_path:
-            return "orca"
+            # For ORCA, any variable containing "ORCA" in the name
+            if qm_name == 'orca' and 'ORCA' in var_name.upper():
+                root_var = var_name
+                root_value = var_value
+                break
+            # For Gaussian, look for variables containing G09, G16, or GAUSS
+            elif qm_name == 'gaussian' and any(x in var_name.upper() for x in ['G09', 'G16', 'GAUSS']):
+                root_var = var_name
+                root_value = var_value
+                # Try to detect version from variable name
+                if 'G09' in var_name.upper():
+                    default_exe = 'g09'
+                elif 'G16' in var_name.upper():
+                    default_exe = 'g16'
+                break
+    
+    # If we found a ROOT variable, construct the executable path
+    if root_var and root_value:
+        if '$' in root_value or not root_value.startswith('/'):
+            # Variable expansion in path, use the variable
+            return f"${root_var}/{default_exe}"
         else:
-            # Default fallback
-            return "orca"
-        
-    else:  # gaussian
-        # Look for Gaussian root definitions
-        gaussian_root_patterns = [
-            r'export\s+G16_ROOT\s*=\s*(.+)',
-            r'export\s+G09_ROOT\s*=\s*(.+)',
-            r'export\s+GAUSS_EXEDIR\s*=\s*(.+)',
-            r'G16_ROOT\s*=\s*(.+)',
-            r'G09_ROOT\s*=\s*(.+)',
-        ]
-        
-        gaussian_in_path = False
-        
-        for line in lines:
-            line = line.strip()
-            
-            # Check if Gaussian is in PATH
-            if 'PATH=' in line and ('G16' in line or 'G09' in line or 'gaussian' in line.lower()):
-                gaussian_in_path = True
-            
-            # Look for Gaussian root variable definitions
-            for pattern in gaussian_root_patterns:
-                import re
-                match = re.search(pattern, line)
-                if match:
-                    gauss_root = match.group(1).strip().strip('"\'')
-                    if '$' in gauss_root:
-                        if 'G16_ROOT' in line:
-                            return "$G16_ROOT/g16"
-                        elif 'G09_ROOT' in line:
-                            return "$G09_ROOT/g09"
-                        else:
-                            return "$GAUSS_EXEDIR/g16"
-                    else:
-                        return f"{gauss_root}/g16"
-        
-        # If Gaussian appears to be in PATH or no specific root found, use bare command
-        return "g16"
-
+            # Absolute path
+            return f"{root_value}/{default_exe}"
+    
+    # Strategy 3: Check if executable appears to be in PATH
+    # Look for any sourcing of profiles or PATH modifications
+    for line in lines:
+        # If we see the QM program mentioned in PATH or source commands
+        if 'PATH=' in line or 'source' in line.lower() or '. ' in line:
+            if qm_name == 'orca' and 'orca' in line.lower():
+                return default_exe
+            elif qm_name == 'gaussian':
+                if 'g09' in line.lower():
+                    return 'g09'
+                elif 'g16' in line.lower():
+                    return 'g16'
+                elif 'gaussian' in line.lower():
+                    return default_exe
+    
+    # Default fallback
+    return default_exe
 
 
 def calculate_input_files(template_file: str, launcher_template: Optional[str] = None, 
@@ -5034,17 +5028,17 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
         qm_program = 'orca'
         input_ext = '.inp'
         output_ext = '.out'
-        qm_program_idx = 0 # For extract_qm_executable_from_launcher
+        qm_program_idx = 2 # For extract_qm_executable_from_launcher (matches qm_program_details key)
     elif template_file.lower().endswith('.com'):
         qm_program = 'gaussian'
         input_ext = '.com'
         output_ext = '.log'
-        qm_program_idx = 1
+        qm_program_idx = 1 # For extract_qm_executable_from_launcher (matches qm_program_details key)
     elif template_file.lower().endswith('.gjf'):
         qm_program = 'gaussian'
         input_ext = '.gjf'
         output_ext = '.log'
-        qm_program_idx = 1
+        qm_program_idx = 1 # For extract_qm_executable_from_launcher (matches qm_program_details key)
     else:
         return f"Error: Unsupported template file extension. Use .inp for ORCA or .com/.gjf for Gaussian."
     
@@ -5218,21 +5212,37 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program_idx)
             print(f"Using QM executable: {qm_program}")
             
-            # Group commands (logic slightly different for calc vs opt, but can be unified)
-            # For simplicity, we'll use a unified approach or split if needed
+            # Deduplicate input files: keep only flat filenames (basenames)
+            # This prevents duplicate commands like motif_29/motif_29_opt.inp AND motif_29_opt.inp
+            seen_basenames = set()
+            deduplicated_files = []
+            for input_file in all_input_files:
+                basename = os.path.basename(input_file)
+                if basename not in seen_basenames:
+                    seen_basenames.add(basename)
+                    # Prefer flat filename (basename) over directory-qualified paths
+                    deduplicated_files.append(basename)
+            all_input_files = deduplicated_files
             
             with open(launcher_path, 'w') as f:
-                # Header
+                # Header - copy everything up to ### separator, skip any existing run commands
                 launcher_lines = launcher_content.rstrip().split('\n')
                 separator_found = False
+                import re
+                
                 for line in launcher_lines:
                     if line.strip() == '###':
                         separator_found = True
                         f.write(line + "\n\n# Run QM using the full path\n")
                         break
                     else:
-                        if '$ORCA5_ROOT/orca' in line and '.inp' in line: continue
-                        if line.strip() == '&&' or line.strip() == '&& \\': continue
+                        # Skip lines that look like run commands (generic pattern)
+                        # Pattern: <command> <file>.<ext> [> <output>] [&&]
+                        if re.search(r'\S+\s+\S+\.(inp|gjf|com)\s*(?:>|&&|\s*$)', line):
+                            continue
+                        # Skip standalone && or && \ lines
+                        if line.strip() in ('&&', '&& \\', '\\'):
+                            continue
                         f.write(line + "\n")
                 
                 if not separator_found:
@@ -5249,10 +5259,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                 
                 for i, input_file in enumerate(all_input_files):
                     output_file = input_file.replace(input_ext, output_ext)
-                    if qm_program == 'orca':
-                        cmd = f"{qm_executable} {input_file} > {output_file}"
-                    else:
-                        cmd = f"{qm_executable} {input_file} {output_file}"
+                    # Use consistent > redirection format for both ORCA and Gaussian
+                    cmd = f"{qm_executable} {input_file} > {output_file}"
                         
                     if i < len(all_input_files) - 1:
                         f.write(f"{cmd} && \\\n")
