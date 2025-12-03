@@ -8788,6 +8788,13 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         result = execute_optimization_stage(context, stage)
                         if result != 0:
                             print(f"\nError: Optimization failed with code {result}")
+                            # Invalidate cache so we can resume from this stage
+                            opt_key = f"optimization_{stage_num}"
+                            if use_cache and 'stages' in cache and opt_key in cache['stages']:
+                                del cache['stages'][opt_key]
+                                with open(cache_file, 'wb') as f:
+                                    pickle.dump(cache, f)
+                                print(f"  Cache invalidated for stage {stage_num}")
                             return result
                         
                         # If this is a redo attempt and we have recalculated files, copy them to similarity folder
@@ -10519,6 +10526,8 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     
     # Store similarity folder for protocol summary
     context.sim_folder = similarity_base
+    # CRITICAL: Also update similarity_dir so redo logic uses correct folder
+    context.similarity_dir = similarity_base
     
     # Verify orca_out_N or opt_out_N subfolder exists
     out_folder_found = False
@@ -11106,14 +11115,26 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         continue
                     
                     # Check if this subdirectory has a completed calculation
-                    out_file = os.path.join(item_path, f"{item}.out")
-                    if os.path.exists(out_file):
+                    # Try different naming patterns: motif_01/motif_01.out or motif_01/motif_01_opt.out
+                    possible_names = [f"{item}.out", f"{item}_opt.out", f"{item}_calc.out"]
+                    out_file = None
+                    for name in possible_names:
+                        test_path = os.path.join(item_path, name)
+                        if os.path.exists(test_path):
+                            out_file = test_path
+                            break
+                    
+                    if out_file:
                         # Verify completion
                         try:
                             with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
                                 content = f.read()
                                 if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                    actual_completed.append(item)
+                                    # Store with _opt suffix for consistency
+                                    if '_opt' not in item and '_calc' not in item:
+                                        actual_completed.append(f"{item}_opt")
+                                    else:
+                                        actual_completed.append(item)
                         except Exception:
                             pass
             
