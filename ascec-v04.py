@@ -10354,7 +10354,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             print(f"\r  Running: {display_name}... ⚠ (interrupted)\033[K")
                         else:
                             # Limited retries - max attempts reached
-                            print(f"\r  Running: {display_name}... ✗\033[K")
+                            if max_attempts > 1:
+                                print(f"\r  Running: {display_name}... ✗ (failed after {attempt_counter} attempts)\033[K")
+                            else:
+                                print(f"\r  Running: {display_name}... ✗\033[K")
                             num_failed += 1
                             failed_calculations.append(input_file)
                         
