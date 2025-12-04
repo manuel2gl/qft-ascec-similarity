@@ -8435,7 +8435,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     for attempt in range(1, max_redos + 1):
                         final_attempt = attempt
                         if attempt > 1:
-                            print(f"\nRedo attempt {attempt}/{max_redos}")
+                            print(f"\n{'-' * 60}")
+                            print(f"Redo attempt {attempt}/{max_redos}")
                         
                         # Don't delete similarity folder - we'll update it with corrected calculations
                         
@@ -8459,7 +8460,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 
                                 # Clean similarity directory BEFORE copying files (keep only orca_out and cache)
                                 if sim_dir and os.path.exists(sim_dir):
-                                    print(f"\n  Cleaning similarity directory before update...")
                                     items_to_remove = [
                                         'dendrogram_images', 'extracted_clusters', 'extracted_data',
                                         'skipped_structures', 'clustering_summary.txt', 'boltzmann_distribution.txt'
@@ -8477,7 +8477,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                                     shutil.rmtree(item_path)
                                                 else:
                                                     os.remove(item_path)
-                                                print(f"    Removed: {item}")
                                             except Exception as e:
                                                 print(f"    Error removing {item}: {e}")
                                 
@@ -8790,7 +8789,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     for attempt in range(1, max_redos + 1):
                         final_attempt = attempt
                         if attempt > 1:
-                            print(f"\nRedo attempt {attempt}/{max_redos}")
+                            print(f"\n{'-' * 60}")
+                            print(f"Redo attempt {attempt}/{max_redos}")
                         
                         # Run optimization (includes organizing/copying files to similarity)
                         result = execute_optimization_stage(context, stage)
@@ -11224,7 +11224,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         
         excluded_numbers = cache.get('excluded_optimizations', [])
         
-        # Count only non-excluded inputs
+        # Always count all non-excluded inputs (even in redo mode)
         num_inputs = sum(1 for f in input_files if not match_exclusion(f, excluded_numbers))
         
         if completed_opts:
@@ -11542,14 +11542,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     os.remove(backup_input)
             
         
-        # Print status (use total completed from cache + newly completed)
-        # Calculate initial + new completed
-        total_completed = len(completed_opts)
-        # Ensure we don't show more completed than total inputs
-        if total_completed > num_inputs:
-            total_completed = num_inputs
-        
-        print(f"\nStatus: {total_completed}/{num_inputs} optimizations completed")
+        # Print status - use num_completed which tracks newly completed in this run
+        # For redo: num_completed = initial_completed + redo files that just finished
+        print(f"\nStatus: {num_completed}/{num_inputs} optimizations completed")
         
         # Store completion counts in context
         context.opt_completed = num_completed
