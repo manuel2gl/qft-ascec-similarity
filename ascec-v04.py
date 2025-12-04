@@ -10569,6 +10569,9 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     print(f"\nRunning similarity analysis...")
     print(f"Using similarity script: {os.path.basename(similarity_script)}")
     
+    # Import re for pattern matching
+    import re
+    
     # Build command - pass '1' via stdin to auto-select the first folder
     cmd = ['python', similarity_script] + other_args
     
@@ -10590,23 +10593,17 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     
     try:
         # Auto-select folder 1 by providing '1\n' as stdin
-        # Use Popen + communicate() to avoid hanging on large outputs
+        # Stream output to avoid pipe buffer deadlock on large outputs
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, 
-                               stderr=subprocess.PIPE, text=True, cwd=similarity_base)
-        stdout, stderr = proc.communicate(input='1\n')
+                               stderr=subprocess.STDOUT, text=True, bufsize=1, 
+                               cwd=similarity_base, universal_newlines=True)
         
-        if proc.returncode != 0:
-            raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, stderr)
+        # Send input and close stdin immediately
+        if proc.stdin:
+            proc.stdin.write('1\n')
+            proc.stdin.close()
         
-        # Create result object compatible with subprocess.run
-        class Result:
-            def __init__(self, returncode, stdout, stderr):
-                self.returncode = returncode
-                self.stdout = stdout
-                self.stderr = stderr
-        result = Result(proc.returncode, stdout, stderr)
-        
-        # Filter output to skip folder selection prompts
+        # Filter patterns for output
         skip_lines = [
             'Found the following folder(s) containing quantum chemistry',
             'Enter the number of the folder to process',
@@ -10617,9 +10614,6 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             'Created motifs dendrogram'
         ]
         
-        # Add blank line before similarity output
-        print()
-        
         # Lines that should have blank line BEFORE them
         add_blank_before = [
             'H-bond group',
@@ -10627,15 +10621,67 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             'Processed '
         ]
         
-        # Lines that should have blank line AFTER them for better readability
+        # Lines that should have blank line AFTER them
         add_blank_after = [
             'Data extraction complete. Proceeding to clustering.',
             'Motifs created:',
             'Clustering summary saved to'
         ]
         
+        # Stream output line by line in real-time and collect for post-processing
+        print()
+        stdout_lines = []
         prev_line = ""
-        for line in result.stdout.split('\n'):
+        
+        if proc.stdout:
+            for line in iter(proc.stdout.readline, ''):
+                line = line.rstrip('\n')
+                stdout_lines.append(line)
+                
+                # Capture processing folder line
+                if 'Processing folder:' in line:
+                    match = re.search(r'Processing folder:\s+(\S+)', line)
+                    if match:
+                        folder_name = match.group(1)
+                        context.sim_folder = f"{similarity_base}/{folder_name}"
+                
+                # Skip interactive prompts and folder listing
+                if any(skip in line for skip in skip_lines):
+                    continue
+                # Skip folder listing lines
+                if re.match(r'\s*\[\d+\]\s+\S+', line):
+                    continue
+                
+                # Skip blank lines
+                if not line.strip():
+                    prev_line = line
+                    continue
+                
+                # Add blank line before certain sections
+                if any(phrase in line for phrase in add_blank_before):
+                    if prev_line.strip():  # Only if previous wasn't blank
+                        print()
+                
+                print(line)
+                
+                # Add blank line after certain sections
+                if any(phrase in line for phrase in add_blank_after):
+                    print()
+                
+                prev_line = line
+            
+            proc.stdout.close()
+        
+        proc.wait()
+        
+        stdout = '\n'.join(stdout_lines)
+        
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, '')
+        
+        # Skip the old output processing loop since we already printed in real-time
+        # Just need to parse for motifs count
+        for line in stdout_lines:
             # Capture processing folder line (e.g., "Processing folder: orca_out_3")
             if 'Processing folder:' in line:
                 import re
