@@ -10679,41 +10679,13 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         if proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, '')
         
-        # Skip the old output processing loop since we already printed in real-time
-        # Just need to parse for motifs count
+        # Parse collected output for motifs count (already printed in real-time above)
         for line in stdout_lines:
-            # Capture processing folder line (e.g., "Processing folder: orca_out_3")
-            if 'Processing folder:' in line:
-                import re
-                match = re.search(r'Processing folder:\s+(\S+)', line)
+            # Capture motifs created count for protocol summary
+            if 'Motifs created:' in line and 'representatives' in line:
+                match = re.search(r'(\d+)\s+representatives', line)
                 if match:
-                    folder_name = match.group(1)
-                    context.sim_folder = f"{similarity_base}/{folder_name}"
-            
-            # Skip interactive prompts and folder listing
-            if any(skip in line for skip in skip_lines):
-                continue
-            # Skip folder listing lines like "  [1] orca_out_2 (Contains: .out)"
-            if line.strip().startswith('[') and '] ' in line and '(Contains:' in line:
-                continue
-            # Print everything else
-            if line.strip():
-                # Add blank line BEFORE certain lines
-                if any(marker in line for marker in add_blank_before):
-                    print()
-                
-                print(line)
-                
-                # Add blank line AFTER certain lines
-                if any(marker in line for marker in add_blank_after):
-                    print()
-                # Capture motifs created count for protocol summary
-                if 'Motifs created:' in line and 'representatives' in line:
-                    import re
-                    match = re.search(r'(\d+)\s+representatives', line)
-                    if match:
-                        context.sim_motifs_created = int(match.group(1))
-            prev_line = line
+                    context.sim_motifs_created = int(match.group(1))
         
         print("\n✓ Similarity analysis completed")
         
