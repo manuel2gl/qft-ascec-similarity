@@ -7248,6 +7248,10 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
         ascec04 at_annealing.in, r3, calc --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
         ascec04 .in, r3 --retry=5, calc -c --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
         
+        With pause after stage (using dot separator):
+        ascec04 .in, r3, calc --redo=3 --retry=10 preopt.inp launcher.sh. similarity --th=2
+            (dot after launcher.sh means pause after calc stage for manual review)
+        
         With auto-selection flags:
         ascec04 at_annealing.in , r3 , calc -a --redo=3 --retry=10 preopt.inp launcher.sh
             (-a: Process all result_*.xyz files separately)
@@ -7260,16 +7264,27 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
             --redo=N: Redo entire stage (calc+similarity or opt+similarity) up to N times
     
     Returns:
-        List of stage dictionaries with 'type' and 'args' keys
+        List of stage dictionaries with 'type', 'args', and optional 'pause_after' keys
     """
     stages = []
     current_stage = []
+    pause_after_current = False
     
     for arg in args:
-        # Handle comma attached to argument (e.g., "r3," or ".in,")
-        if ',' in arg and arg != ',':
-            # Split by comma and handle parts
-            parts = arg.split(',')
+        # Handle comma or dot attached to argument (e.g., "r3," or "launcher.sh.")
+        has_comma = ',' in arg and arg != ','
+        has_dot = '.' in arg and not arg.startswith('.') and not arg.endswith(('.inp', '.sh', '.xyz', '.in'))
+        
+        if has_comma or (has_dot and len(arg) > 1 and arg[-1] == '.'):
+            # Split by separator (comma or dot)
+            if has_dot and arg[-1] == '.':
+                # Dot at end means pause after this stage
+                parts = [arg[:-1]]  # Remove the dot
+                pause_after_current = True
+            else:
+                # Split by comma
+                parts = arg.split(',')
+            
             for i, part in enumerate(parts):
                 part = part.strip()
                 if part:
@@ -7277,38 +7292,44 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
                 # After each part except the last, finalize stage
                 if i < len(parts) - 1:
                     if current_stage:
-                        stage = finalize_stage(current_stage)
+                        stage = finalize_stage(current_stage, pause_after=pause_after_current)
                         if stage:
                             stages.append(stage)
                         current_stage = []
+                        pause_after_current = False
         elif arg in [',', 'then']:
             # Separator found - finalize current stage if it has content
             if current_stage:
-                stage = finalize_stage(current_stage)
+                stage = finalize_stage(current_stage, pause_after=pause_after_current)
                 if stage:
                     stages.append(stage)
                 current_stage = []
+                pause_after_current = False
+        elif arg == '.':
+            # Standalone dot - mark current stage for pause
+            pause_after_current = True
         else:
             # Regular argument - add to current stage
             current_stage.append(arg)
     
     # Don't forget the last stage
     if current_stage:
-        stage = finalize_stage(current_stage)
+        stage = finalize_stage(current_stage, pause_after=pause_after_current)
         if stage:
             stages.append(stage)
     
     return stages
 
-def finalize_stage(stage_args: List[str]) -> Optional[Dict[str, Any]]:
+def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional[Dict[str, Any]]:
     """
     Convert raw stage arguments into structured stage dictionary.
     
     Args:
         stage_args: List of arguments between ',' or 'then' separators
+        pause_after: If True, workflow should pause after this stage completes
         
     Returns:
-        Dictionary with 'type' and 'args' keys, or None if invalid
+        Dictionary with 'type', 'args', and optional 'pause_after' keys, or None if invalid
     """
     if not stage_args:
         return None
@@ -7317,25 +7338,34 @@ def finalize_stage(stage_args: List[str]) -> Optional[Dict[str, Any]]:
     
     # Replication stage: r3, r5, etc.
     if first_arg.startswith('r') and first_arg[1:].isdigit():
-        return {
+        stage_dict = {
             'type': 'replication',
             'num_replicas': int(first_arg[1:]),
             'args': stage_args[1:]
         }
+        if pause_after:
+            stage_dict['pause_after'] = True
+        return stage_dict
     
     # Calculation stage: calc ...
     elif first_arg == 'calc':
-        return {
+        stage_dict = {
             'type': 'calculation',
             'args': stage_args[1:]
         }
+        if pause_after:
+            stage_dict['pause_after'] = True
+        return stage_dict
     
     # Similarity stage: similarity ... or sim ...
     elif first_arg in ['similarity', 'sim']:
-        return {
+        stage_dict = {
             'type': 'similarity',
             'args': stage_args[1:]
         }
+        if pause_after:
+            stage_dict['pause_after'] = True
+        return stage_dict
     
     # Optimization stage: opt ...
     elif first_arg == 'opt':
@@ -7355,12 +7385,15 @@ def finalize_stage(stage_args: List[str]) -> Optional[Dict[str, Any]]:
         template_inp = files[0] if len(files) >= 1 else None
         launcher_sh = files[1] if len(files) >= 2 else None
         
-        return {
+        stage_dict = {
             'type': 'optimization',
             'args': flags,  # Only flags, not file paths
             'template_inp': template_inp,
             'launcher_sh': launcher_sh
         }
+        if pause_after:
+            stage_dict['pause_after'] = True
+        return stage_dict
     
     else:
         print(f"Warning: Unknown stage type '{first_arg}', skipping.")
@@ -8067,6 +8100,237 @@ def extract_final_geometry(out_file: str, calc_dir: str):
     except Exception as e:
         return None
 
+def check_workflow_pause(stage: Dict[str, Any], stage_num: int, total_stages: int, 
+                        cache_file: str, use_cache: bool) -> bool:
+    """
+    Check if workflow should pause after this stage.
+    
+    Args:
+        stage: Stage dictionary that was just completed
+        stage_num: Current stage number (1-indexed)
+        total_stages: Total number of stages in workflow
+        cache_file: Path to protocol cache file
+        use_cache: Whether protocol caching is enabled
+        
+    Returns:
+        True if workflow should continue, False if paused (will exit)
+    """
+    if not stage.get('pause_after', False):
+        return True  # No pause requested, continue
+    
+    # Save pause state in cache
+    if use_cache:
+        cache = load_protocol_cache(cache_file)
+        if not cache:
+            cache = {}
+        cache['paused_at_stage'] = stage_num
+        cache['pause_timestamp'] = datetime.now().isoformat()
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache, f)
+    
+    # Display pause message
+    print(f"\n{'='*70}")
+    print(f"⏸  WORKFLOW PAUSED FOR MANUAL REVIEW")
+    print(f"{'='*70}")
+    print(f"\nCompleted stage {stage_num}/{total_stages}: {stage['type'].capitalize()}")
+    print(f"\nPlease review the results before continuing.")
+    print(f"\nTo resume the workflow, run the same command again:")
+    print(f"  The workflow will automatically continue from stage {stage_num + 1}")
+    if use_cache:
+        print(f"\nCache file: {cache_file}")
+    print(f"\n{'='*70}\n")
+    
+    return False  # Signal to stop execution
+
+def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_num: int, 
+                                    stages: List[Dict[str, Any]], stage_idx: int,
+                                    cache_file: str) -> Tuple[bool, int]:
+    """
+    Validate cached calculation+similarity results against thresholds.
+    
+    Returns:
+        Tuple of (should_skip, new_stage_idx)
+        - should_skip: True if cache is valid and should be skipped
+        - new_stage_idx: Updated stage index if validation changes flow
+    """
+    stage_type = stage['type']
+    stage_key = f"{stage_type}_{stage_num}"
+    
+    # Check if next stage is similarity AND it's also cached
+    next_is_similarity = (stage_idx < len(stages) and stages[stage_idx]['type'] == 'similarity')
+    if not next_is_similarity:
+        return True, stage_idx
+    
+    next_stage_num = stage_idx + 1
+    next_stage_key = f"similarity_{next_stage_num}"
+    if next_stage_key not in cache.get('stages', {}) or \
+       cache['stages'][next_stage_key].get('status') != 'completed':
+        return True, stage_idx
+    
+    # Check if calculation stage has redo parameters
+    calc_args = stage['args']
+    max_critical = None
+    max_skipped = None
+    
+    for arg in calc_args:
+        if arg.startswith('--critical='):
+            max_critical = float(arg.split('=')[1])
+        elif arg.startswith('--skipped='):
+            max_skipped = float(arg.split('=')[1])
+    
+    # If no thresholds set, cache is valid
+    if max_critical is None and max_skipped is None:
+        # Print skipped similarity stage
+        sim_stage_cache = cache['stages'][next_stage_key]
+        print(f"\n{'-' * 60}")
+        print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+        print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+        print('-' * 60)
+        return True, stage_idx + 1
+    
+    # Get similarity directory from cache and validate
+    sim_cache = cache['stages'][next_stage_key]
+    sim_dir = sim_cache.get('result', {}).get('working_dir', 'similarity')
+    summary_file = os.path.join(sim_dir, "clustering_summary.txt")
+    
+    if not os.path.exists(summary_file):
+        # Can't validate, accept cache
+        sim_stage_cache = cache['stages'][next_stage_key]
+        print(f"\n{'-' * 60}")
+        print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+        print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+        print('-' * 60)
+        return True, stage_idx + 1
+    
+    critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+    
+    threshold_met = True
+    if max_critical is not None:
+        threshold_met = critical_pct <= max_critical
+        if not threshold_met:
+            print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
+            print(f"  Invalidating cache and re-running calculation with redo logic...")
+    elif max_skipped is not None:
+        threshold_met = skipped_pct <= max_skipped
+        if not threshold_met:
+            print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
+            print(f"  Invalidating cache and re-running calculation with redo logic...")
+    
+    if not threshold_met:
+        # Remove both calc and similarity from cache
+        if stage_key in cache.get('stages', {}):
+            del cache['stages'][stage_key]
+        if next_stage_key in cache.get('stages', {}):
+            del cache['stages'][next_stage_key]
+        # Save updated cache
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache, f)
+        # Go back to re-execute this stage
+        return False, stage_idx - 1
+    
+    # Threshold met - skip both stages
+    sim_stage_cache = cache['stages'][next_stage_key]
+    print(f"\n{'-' * 60}")
+    print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+    print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+    print('-' * 60)
+    return True, stage_idx + 1
+
+def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num: int, 
+                                   stages: List[Dict[str, Any]], stage_idx: int,
+                                   cache_file: str) -> Tuple[bool, int]:
+    """
+    Validate cached optimization+similarity results against thresholds.
+    
+    Returns:
+        Tuple of (should_skip, new_stage_idx)
+        - should_skip: True if cache is valid and should be skipped
+        - new_stage_idx: Updated stage index if validation changes flow
+    """
+    stage_type = stage['type']
+    stage_key = f"{stage_type}_{stage_num}"
+    
+    # Check if next stage is similarity AND it's also cached
+    next_is_similarity = (stage_idx < len(stages) and stages[stage_idx]['type'] == 'similarity')
+    if not next_is_similarity:
+        return True, stage_idx
+    
+    next_stage_num = stage_idx + 1
+    next_stage_key = f"similarity_{next_stage_num}"
+    if next_stage_key not in cache.get('stages', {}) or \
+       cache['stages'][next_stage_key].get('status') != 'completed':
+        return True, stage_idx
+    
+    # Check if optimization stage has redo parameters
+    opt_args = stage['args']
+    max_critical = None
+    max_skipped = None
+    
+    for arg in opt_args:
+        if arg.startswith('--critical='):
+            max_critical = float(arg.split('=')[1])
+        elif arg.startswith('--skipped='):
+            max_skipped = float(arg.split('=')[1])
+    
+    # If no thresholds set, cache is valid
+    if max_critical is None and max_skipped is None:
+        # Print skipped similarity stage
+        sim_stage_cache = cache['stages'][next_stage_key]
+        print(f"\n{'-' * 60}")
+        print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+        print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+        print('-' * 60)
+        return True, stage_idx + 1
+    
+    # Get similarity directory from cache and validate
+    sim_cache = cache['stages'][next_stage_key]
+    sim_dir = sim_cache.get('result', {}).get('working_dir', 'similarity')
+    summary_file = os.path.join(sim_dir, "clustering_summary.txt")
+    
+    if not os.path.exists(summary_file):
+        # Can't validate, accept cache
+        sim_stage_cache = cache['stages'][next_stage_key]
+        print(f"\n{'-' * 60}")
+        print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+        print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+        print('-' * 60)
+        return True, stage_idx + 1
+    
+    critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+    
+    threshold_met = True
+    if max_critical is not None:
+        threshold_met = critical_pct <= max_critical
+        if not threshold_met:
+            print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
+    elif max_skipped is not None:
+        threshold_met = skipped_pct <= max_skipped
+        if not threshold_met:
+            print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
+    
+    if not threshold_met:
+        # Remove both opt and similarity from cache
+        if stage_key in cache.get('stages', {}):
+            del cache['stages'][stage_key]
+        if next_stage_key in cache.get('stages', {}):
+            del cache['stages'][next_stage_key]
+        # Save updated cache
+        with open(cache_file, 'wb') as f:
+            pickle.dump(cache, f)
+        # Go back to re-execute this stage
+        return False, stage_idx - 1
+    
+    # Threshold met - skip both stages
+    sim_stage_cache = cache['stages'][next_stage_key]
+    print(f"\n{'-' * 60}")
+    print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
+    print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
+    print('-' * 60)
+    return True, stage_idx + 1
+
+# pyright: reportGeneralTypeIssues=false
 def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]], 
                            use_cache: bool = False, protocol_text: str = "") -> int:
     """
@@ -8249,80 +8513,25 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     print(f"  ✓ Skipped (completed at {stage_cache.get('timestamp', 'unknown')})")
                     print('-' * 60)
                     stage_idx += 1
+                    
+                    # Validate cached calc+similarity if applicable
                     if stage_type == 'calculation':
-                        # Check if next stage is similarity AND it's also cached - check threshold before skipping
-                        next_is_similarity = (stage_idx < len(stages) and 
-                                            stages[stage_idx]['type'] == 'similarity')
-                        if next_is_similarity:
-                            # Check if the similarity stage is also cached
-                            next_stage_num = stage_idx + 1
-                            next_stage_key = f"similarity_{next_stage_num}"
-                            if next_stage_key in cache.get('stages', {}) and \
-                               cache['stages'][next_stage_key].get('status') == 'completed':
-                                
-                                # Check if calculation stage has redo parameters
-                                calc_args = stage['args']
-                                max_critical = None
-                                max_skipped = None
-                                
-                                for arg in calc_args:
-                                    if arg.startswith('--critical='):
-                                        max_critical = float(arg.split('=')[1])
-                                    elif arg.startswith('--skipped='):
-                                        max_skipped = float(arg.split('=')[1])
-                                
-                                # If thresholds are set, check if they're met
-                                if max_critical is not None or max_skipped is not None:
-                                    # Get similarity directory from cache
-                                    sim_cache = cache['stages'][next_stage_key]
-                                    sim_dir = sim_cache.get('result', {}).get('working_dir', 'similarity')
-                                    summary_file = os.path.join(sim_dir, "clustering_summary.txt")
-                                    
-                                    if os.path.exists(summary_file):
-                                        critical_pct, skipped_pct = parse_similarity_summary(summary_file)
-                                        
-                                        threshold_met = True
-                                        if max_critical is not None:
-                                            threshold_met = critical_pct <= max_critical
-                                            if not threshold_met:
-                                                print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
-                                                print(f"  Invalidating cache and re-running calculation with redo logic...")
-                                                # Remove both calc and similarity from cache
-                                                if stage_key in cache.get('stages', {}):
-                                                    del cache['stages'][stage_key]
-                                                if next_stage_key in cache.get('stages', {}):
-                                                    del cache['stages'][next_stage_key]
-                                                # Save updated cache
-                                                with open(cache_file, 'wb') as f:
-                                                    pickle.dump(cache, f)
-                                                # Go back to re-execute this stage
-                                                stage_idx -= 1
-                                                continue
-                                        elif max_skipped is not None:
-                                            threshold_met = skipped_pct <= max_skipped
-                                            if not threshold_met:
-                                                print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
-                                                print(f"  Invalidating cache and re-running calculation with redo logic...")
-                                                # Remove both calc and similarity from cache
-                                                if stage_key in cache.get('stages', {}):
-                                                    del cache['stages'][stage_key]
-                                                if next_stage_key in cache.get('stages', {}):
-                                                    del cache['stages'][next_stage_key]
-                                                # Save updated cache
-                                                with open(cache_file, 'wb') as f:
-                                                    pickle.dump(cache, f)
-                                                # Go back to re-execute this stage
-                                                stage_idx -= 1
-                                                continue
-                                
-                                # If we get here, threshold is met or not set - skip both stages
-                                # Print skipped similarity stage
-                                sim_stage_cache = cache['stages'][next_stage_key]
-                                print(f"\n{'-' * 60}")
-                                print(f"[{next_stage_num}/{len(stages)}] Similarity (cached)")
-                                print(f"  ✓ Skipped (completed at {sim_stage_cache.get('timestamp', 'unknown')})")
-                                print('-' * 60)
-                                stage_idx += 1
+                        should_skip, new_idx = validate_cached_calc_similarity(
+                            cache, stage, stage_num, stages, stage_idx, cache_file
+                        )
+                        if not should_skip:
+                            stage_idx = new_idx
+                            continue
+                        stage_idx = new_idx
+                    # Validate cached opt+similarity if applicable
+                    elif stage_type == 'optimization':
+                        should_skip, new_idx = validate_cached_opt_similarity(
+                            cache, stage, stage_num, stages, stage_idx, cache_file
+                        )
+                        if not should_skip:
+                            stage_idx = new_idx
+                            continue
+                        stage_idx = new_idx
                     continue
         
         # Display name for stage (Annealing instead of Replication)
@@ -8391,6 +8600,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     update_protocol_cache(stage_key, 'completed', 
                                         result=result_data, 
                                         cache_file=cache_file)
+                
+                # Check if workflow should pause after this stage
+                if result == 0:
+                    if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                        return 0  # Paused successfully
                 
                 stage_idx += 1
                 
@@ -8635,11 +8849,27 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         update_protocol_cache(sim_key, 'completed', 
                                             result=sim_result, cache_file=cache_file)
                     
+                    # Check if workflow should pause after calc stage (check calc stage for pause marker)
+                    if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                        return 0  # Paused after calculation
+                    
+                    # Check if workflow should pause after similarity stage (check next stage for pause marker)
+                    if stage_idx + 1 < len(stages):
+                        sim_stage = stages[stage_idx + 1]
+                        if not check_workflow_pause(sim_stage, stage_num + 1, len(stages), cache_file, use_cache):
+                            return 0  # Paused after similarity
+                    
                     # Skip both calc and similarity stages since we handled them
                     stage_idx += 2
                 else:
                     # Standalone calc without similarity
                     result = execute_calculation_stage(context, stage)
+                    
+                    # Check if workflow should pause after this stage
+                    if result == 0:
+                        if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                            return 0  # Paused successfully
+                    
                     stage_idx += 1
                     
             elif stage_type == 'similarity':
@@ -8749,6 +8979,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     update_protocol_cache(sim_key, 'completed', 
                                         result=sim_result, cache_file=cache_file)
+                
+                # Check if workflow should pause after this stage
+                if result == 0:
+                    if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                        return 0  # Paused successfully
                 
                 stage_idx += 1
                 
@@ -8970,6 +9205,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         update_protocol_cache(sim_key, 'completed', result=sim_result, cache_file=cache_file)
                     
+                    # Check if workflow should pause after opt stage (check opt stage for pause marker)
+                    if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                        return 0  # Paused after optimization
+                    
+                    # Check if workflow should pause after similarity stage (check next stage for pause marker)
+                    if stage_idx + 1 < len(stages):
+                        sim_stage = stages[stage_idx + 1]
+                        if not check_workflow_pause(sim_stage, stage_num + 1, len(stages), cache_file, use_cache):
+                            return 0  # Paused after similarity
+                    
                     # Skip the similarity stage (already executed)
                     stage_idx += 2
                     continue
@@ -9016,6 +9261,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     # Save to cache
                     update_protocol_cache(opt_key, 'completed', 
                                         result=opt_result, cache_file=cache_file)
+                
+                # Check if workflow should pause after this stage
+                if result == 0:
+                    if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
+                        return 0  # Paused successfully
                 
                 stage_idx += 1
                 
@@ -9320,11 +9570,8 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     if not xyz_files:
         return False
-        
-    print(f"\nProcessing redo structures from: {need_recalc_dir}")
-    print(f"Found {len(xyz_files)} structure(s) to retry")
     
-    # Get basenames
+    # Get basenames and filter out combined files BEFORE printing count
     need_recalc_basenames = [os.path.splitext(os.path.basename(f))[0] for f in xyz_files]
     filtered_basenames = []
     for b in need_recalc_basenames:
@@ -9336,6 +9583,9 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     if not need_recalc_basenames:
         return False
+        
+    print(f"\nProcessing redo structures from: {need_recalc_dir}")
+    print(f"\nFound {len(need_recalc_basenames)} structure(s) to retry")
 
     processed_count = 0
     processed_basenames = []
@@ -10585,8 +10835,8 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         # Lines that should have blank line BEFORE them
         add_blank_before = [
             'H-bond group',
-            'Creating ',
-            'Processed '
+            'Processed ',
+            'Creating '
         ]
         
         # Lines that should have blank line AFTER them
@@ -10616,13 +10866,13 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 # Skip interactive prompts and folder listing
                 if any(skip in line for skip in skip_lines):
                     continue
+                
                 # Skip folder listing lines
                 if re.match(r'\s*\[\d+\]\s+\S+', line):
                     continue
                 
                 # Skip blank lines
                 if not line.strip():
-                    prev_line = line
                     continue
                 
                 # Add blank line before certain sections
