@@ -9536,41 +9536,6 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                         except Exception:
                             pass
     
-    if processed_count > 0:
-        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
-        
-        # Store recalculated basenames in context
-        context.recalculated_files = processed_basenames
-        
-        # CRITICAL: Rename (not delete) output files for structures needing recalculation
-        # This preserves the old .out file in case the new calculation fails
-        print(f"  Backing up old output files for structures needing recalculation")
-        for basename in processed_basenames:
-            # Build list of subdirectories to search, including shortened basename variants
-            subdirs_to_search = ['orca_out', 'gaussian_out', 'completed', basename]
-            
-            # Add shortened versions for common patterns (e.g., "motif_01" for "motif_01_opt")
-            if '_opt' in basename:
-                subdirs_to_search.insert(0, basename.replace('_opt', ''))
-            elif '_calc' in basename:
-                subdirs_to_search.insert(0, basename.replace('_calc', ''))
-            
-            # Check in subdirectories
-            search_dirs_for_out = [stage_dir] + [os.path.join(stage_dir, sd) for sd in subdirs_to_search]
-            
-            for search_dir in search_dirs_for_out:
-                if not os.path.exists(search_dir):
-                    continue
-                
-                # Remove auxiliary files from all possible locations
-                for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.engrad']:
-                    aux_file = os.path.join(search_dir, f"{basename}{ext}")
-                    if os.path.exists(aux_file):
-                        try:
-                            os.remove(aux_file)
-                        except Exception:
-                            pass
-    
     return processed_count > 0
 def process_optimization_redo(context: WorkflowContext, stage_dir: str, template_file: str) -> bool:
     """
