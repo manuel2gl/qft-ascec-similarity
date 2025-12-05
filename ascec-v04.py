@@ -8483,13 +8483,24 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     
     # Cleaner output for protocol mode
     if use_cache:
-        stage_display_names = [stage_display_map.get(s['type'], s['type'].capitalize()) or s['type'].capitalize() for s in stages]
+        stage_display_names = []
+        for s in stages:
+            display_name = stage_display_map.get(s['type'], s['type'].capitalize()) or s['type'].capitalize()
+            if s.get('pause_after', False):
+                display_name += ' ⏸'
+            stage_display_names.append(display_name)
         stage_names = ' → '.join(stage_display_names)
         print(f"\nWorkflow: {stage_names}\n")
     else:
         print("-" * 60)
         print(f"Workflow: {input_file}")
-        stage_names = ' → '.join(s['type'] for s in stages)
+        stage_display_parts = []
+        for s in stages:
+            part = s['type']
+            if s.get('pause_after', False):
+                part += ' ⏸'
+            stage_display_parts.append(part)
+        stage_names = ' → '.join(stage_display_parts)
         print(f"Pipeline: {stage_names}")
         print("-" * 60)
     
