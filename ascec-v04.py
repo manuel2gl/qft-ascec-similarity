@@ -1542,11 +1542,11 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
                 
                 # If in protocol section, collect continuation lines
                 if in_protocol_section:
-                    # Stop if we hit a line that doesn't end with comma and isn't empty
+                    # Stop if we hit a line that doesn't end with comma or dot (pause marker)
                     if stripped:
                         protocol_lines.append(stripped)
-                        # Stop collecting if line doesn't end with comma
-                        if not stripped.endswith(','):
+                        # Stop collecting if line doesn't end with comma or dot
+                        if not stripped.endswith(',') and not stripped.endswith('.'):
                             break
             
             # Join multi-line protocol into single command
@@ -7279,24 +7279,31 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
             # Split by separator (comma or dot)
             if has_dot and arg[-1] == '.':
                 # Dot at end means pause after this stage
-                parts = [arg[:-1]]  # Remove the dot
-                pause_after_current = True
+                part = arg[:-1].strip()  # Remove the dot
+                if part:
+                    current_stage.append(part)
+                # Finalize stage with pause marker
+                if current_stage:
+                    stage = finalize_stage(current_stage, pause_after=True)
+                    if stage:
+                        stages.append(stage)
+                    current_stage = []
+                    pause_after_current = False
             else:
                 # Split by comma
                 parts = arg.split(',')
-            
-            for i, part in enumerate(parts):
-                part = part.strip()
-                if part:
-                    current_stage.append(part)
-                # After each part except the last, finalize stage
-                if i < len(parts) - 1:
-                    if current_stage:
-                        stage = finalize_stage(current_stage, pause_after=pause_after_current)
-                        if stage:
-                            stages.append(stage)
-                        current_stage = []
-                        pause_after_current = False
+                for i, part in enumerate(parts):
+                    part = part.strip()
+                    if part:
+                        current_stage.append(part)
+                    # After each part except the last, finalize stage
+                    if i < len(parts) - 1:
+                        if current_stage:
+                            stage = finalize_stage(current_stage, pause_after=pause_after_current)
+                            if stage:
+                                stages.append(stage)
+                            current_stage = []
+                            pause_after_current = False
         elif arg in [',', 'then']:
             # Separator found - finalize current stage if it has content
             if current_stage:
