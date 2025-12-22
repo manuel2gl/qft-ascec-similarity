@@ -437,7 +437,7 @@
                     
                     <div class="form-group">
                         <label>Simulation Cube Length (Å)</label>
-                        <input type="number" id="box-size" value="5.0" step="0.5" min="1">
+                        <input type="number" id="box-size" value="5.0" step="0.5" min="1" onchange="updatePreview()">
                     </div>
                 </div>
                 
@@ -591,7 +591,7 @@
                             📝 Manual XYZ Input
                         </button>
                         <button class="btn btn-secondary" id="btn-sketcher-mode" onclick="setInputMode('sketcher')">
-                            🧪 SMILES / Name → XYZ
+                            🧪 SMILES → XYZ
                         </button>
                     </div>
                     
@@ -708,6 +708,19 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     </div>
                 </div>
                 
+                <!-- Simulation Box Viewer -->
+                <div class="card">
+                    <h2>📦 Simulation Box Preview</h2>
+                    <p class="help-text" style="margin-bottom: 10px;">
+                        Box with dummy atoms at vertices (magenta). All molecules centered at origin.
+                    </p>
+                    <div id="box-viewer" style="width: 100%; height: 300px; position: relative; border: 1px solid #ddd; border-radius: 4px; background: #f0f0ff;"></div>
+                    <div class="btn-group" style="margin-top: 10px;">
+                        <button class="btn btn-sm btn-secondary" onclick="updateBoxViewer()">🔄 Refresh</button>
+                        <button class="btn btn-sm btn-secondary" onclick="resetBoxView()">🎯 Reset View</button>
+                    </div>
+                </div>
+                
                 <!-- Quick Reference -->
                 <div class="card">
                     <h2 class="collapsible open" onclick="toggleCollapsible(this)">📖 Quick Reference</h2>
@@ -750,12 +763,14 @@ H  -0.757000  0.586000  0.000000"></textarea>
         let inputMode = 'manual';
         let currentMolData = null; // Store current converted molecule data
         let viewer = null; // 3Dmol viewer instance
+        let boxViewer = null; // Box viewer instance
         
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             updatePreview();
             updateQuenchVisibility();
             updateSimModeUI();
+            initBoxViewer();
         });
         
         function updateSimModeUI() {
@@ -802,11 +817,14 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 }
                 
                 const sdfData = await response.text();
-                const xyzData = sdfToXyz(sdfData);
+                let xyzData = sdfToXyz(sdfData);
                 
                 if (xyzData.atoms.length === 0) {
                     throw new Error('Could not parse 3D structure.');
                 }
+                
+                // Center the molecule at origin
+                xyzData = centerMolecule(xyzData.atoms, xyzData.coords);
                 
                 // Store the data
                 currentMolData = xyzData;
@@ -826,8 +844,8 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 document.getElementById('generated-xyz').value = xyzText.trim();
                 document.getElementById('sketcher-mol-name').value = input.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
                 
-                // Display in 3Dmol viewer
-                show3DViewer(sdfData);
+                // Display in 3Dmol viewer with centered coordinates
+                show3DViewer(xyzData);
                 
             } catch (e) {
                 alert('Error: ' + e.message);
@@ -837,7 +855,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
             }
         }
         
-        function show3DViewer(sdfData) {
+        function show3DViewer(xyzData) {
             const container = document.getElementById('mol-viewer');
             
             // Clear previous viewer
@@ -850,7 +868,14 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     antialias: true
                 });
                 
-                viewer.addModel(sdfData, 'sdf');
+                // Convert xyzData to XYZ format string
+                let xyzString = `${xyzData.atoms.length}\nGenerated structure\n`;
+                xyzData.atoms.forEach((atom, i) => {
+                    const [x, y, z] = xyzData.coords[i];
+                    xyzString += `${atom} ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}\n`;
+                });
+                
+                viewer.addModel(xyzString, 'xyz');
                 viewer.setStyle({}, {
                     stick: {radius: 0.12, colorscheme: 'Jmol'},
                     sphere: {radius: 0.25, colorscheme: 'Jmol'}
@@ -864,6 +889,121 @@ H  -0.757000  0.586000  0.000000"></textarea>
             } catch (e) {
                 console.error('3Dmol error:', e);
                 container.innerHTML = '<p style="padding: 20px; color: #999; text-align: center;">3D preview unavailable</p>';
+            }
+        }
+        
+        function initBoxViewer() {
+            const container = document.getElementById('box-viewer');
+            try {
+                boxViewer = $3Dmol.createViewer(container, {
+                    backgroundColor: 0xf0f0ff,
+                    antialias: true
+                });
+                updateBoxViewer();
+            } catch (e) {
+                console.error('Box viewer init error:', e);
+                container.innerHTML = '<p style="padding: 20px; color: #999; text-align: center;">3D preview unavailable</p>';
+            }
+        }
+        
+        function updateBoxViewer() {
+            if (!boxViewer) return;
+            
+            boxViewer.removeAllModels();
+            boxViewer.removeAllShapes();
+            
+            // Get box dimension from form (cube)
+            const boxSize = parseFloat(document.getElementById('box-size').value) || 5;
+            const half = boxSize / 2;
+            
+            // Create dummy atoms at box vertices (like ASCEC resultbox)
+            const vertices = [
+                [-half, -half, -half],
+                [ half, -half, -half],
+                [-half,  half, -half],
+                [ half,  half, -half],
+                [-half, -half,  half],
+                [ half, -half,  half],
+                [-half,  half,  half],
+                [ half,  half,  half]
+            ];
+            
+            // Build XYZ string with dummy atoms (X) at vertices
+            let xyzString = '';
+            let totalAtoms = 8; // 8 dummy atoms for vertices
+            
+            // Add all molecules (centered at origin, overlapping)
+            molecules.forEach(mol => {
+                totalAtoms += mol.atoms.length;
+            });
+            
+            xyzString = `${totalAtoms}\nSimulation box with dummy atoms\n`;
+            
+            // Add dummy atoms at vertices
+            vertices.forEach(([x, y, z]) => {
+                xyzString += `X ${x.toFixed(4)} ${y.toFixed(4)} ${z.toFixed(4)}\n`;
+            });
+            
+            // Add all molecules (already centered)
+            molecules.forEach(mol => {
+                mol.atoms.forEach((atom, i) => {
+                    const [x, y, z] = mol.coords[i];
+                    xyzString += `${atom} ${x.toFixed(6)} ${y.toFixed(6)} ${z.toFixed(6)}\n`;
+                });
+            });
+            
+            boxViewer.addModel(xyzString, 'xyz');
+            
+            // Style dummy atoms (X) as magenta spheres
+            boxViewer.setStyle({elem: 'X'}, {
+                sphere: {radius: 0.4, color: 'magenta'}
+            });
+            
+            // Style regular atoms
+            boxViewer.setStyle({elem: 'X', invert: true}, {
+                stick: {radius: 0.12, colorscheme: 'Jmol'},
+                sphere: {radius: 0.25, colorscheme: 'Jmol'}
+            });
+            
+            // Draw box edges as lines
+            const edgeColor = 0x6666ff;
+            const edges = [
+                // Bottom face
+                [[-half, -half, -half], [half, -half, -half]],
+                [[half, -half, -half], [half, half, -half]],
+                [[half, half, -half], [-half, half, -half]],
+                [[-half, half, -half], [-half, -half, -half]],
+                // Top face
+                [[-half, -half, half], [half, -half, half]],
+                [[half, -half, half], [half, half, half]],
+                [[half, half, half], [-half, half, half]],
+                [[-half, half, half], [-half, -half, half]],
+                // Vertical edges
+                [[-half, -half, -half], [-half, -half, half]],
+                [[half, -half, -half], [half, -half, half]],
+                [[half, half, -half], [half, half, half]],
+                [[-half, half, -half], [-half, half, half]]
+            ];
+            
+            edges.forEach(([start, end]) => {
+                boxViewer.addCylinder({
+                    start: {x: start[0], y: start[1], z: start[2]},
+                    end: {x: end[0], y: end[1], z: end[2]},
+                    radius: 0.05,
+                    color: edgeColor,
+                    fromCap: true,
+                    toCap: true
+                });
+            });
+            
+            boxViewer.zoomTo();
+            boxViewer.render();
+        }
+        
+        function resetBoxView() {
+            if (boxViewer) {
+                boxViewer.zoomTo();
+                boxViewer.render();
             }
         }
         
@@ -926,6 +1066,29 @@ H  -0.757000  0.586000  0.000000"></textarea>
             return { atoms, coords };
         }
         
+        function centerMolecule(atoms, coords) {
+            if (coords.length === 0) return { atoms, coords };
+            
+            // Calculate centroid
+            let sumX = 0, sumY = 0, sumZ = 0;
+            for (const [x, y, z] of coords) {
+                sumX += x;
+                sumY += y;
+                sumZ += z;
+            }
+            const n = coords.length;
+            const centroid = [sumX / n, sumY / n, sumZ / n];
+            
+            // Translate all coordinates to center at origin
+            const centeredCoords = coords.map(([x, y, z]) => [
+                x - centroid[0],
+                y - centroid[1],
+                z - centroid[2]
+            ]);
+            
+            return { atoms, coords: centeredCoords };
+        }
+        
         function updateQuenchVisibility() {
             const route = document.getElementById('quench-route').value;
             document.getElementById('linear-params').style.opacity = route === '1' ? '1' : '0.5';
@@ -955,12 +1118,17 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 return;
             }
             
-            const { atoms, coords } = parseXyzText(xyzText);
+            let { atoms, coords } = parseXyzText(xyzText);
             
             if (atoms.length === 0) {
                 alert('Could not parse XYZ coordinates. Check format.');
                 return;
             }
+            
+            // Center the molecule at origin
+            const centered = centerMolecule(atoms, coords);
+            atoms = centered.atoms;
+            coords = centered.coords;
             
             for (let i = 0; i < count; i++) {
                 const molName = count > 1 ? `${baseName}${molecules.length + 1}` : baseName;
@@ -1281,6 +1449,7 @@ H   0.437918   1.068869  -0.889981`;
         
         function updatePreview() {
             document.getElementById('in-preview').textContent = generateInFile();
+            updateBoxViewer();
         }
         
         function downloadInFile() {
