@@ -453,36 +453,36 @@
                         </select>
                     </div>
                     
-                    <h3>Linear Quenching (Ti, ΔT, steps)</h3>
+                    <h3>Linear Quenching (To, dT, nT)</h3>
                     <div class="form-row-3" id="linear-params">
                         <div class="form-group">
-                            <label>Initial Temp (K)</label>
+                            <label>Initial Temp (To/K)</label>
                             <input type="number" id="linear-ti" value="100.0" step="10">
                         </div>
                         <div class="form-group">
-                            <label>Temp Reduction ΔT (K)</label>
+                            <label>Temp Reduction (dT/K)</label>
                             <input type="number" id="linear-dt" value="10.0" step="1">
                             <p class="help-text">T(n+1) = T(n) - ΔT</p>
                         </div>
                         <div class="form-group">
-                            <label>Steps</label>
+                            <label>Steps (nT)</label>
                             <input type="number" id="linear-steps" value="50" min="1">
                         </div>
                     </div>
                     
-                    <h3>Geometric Quenching (Ti, factor%, steps)</h3>
+                    <h3>Geometric Quenching (To, %dism, nT)</h3>
                     <div class="form-row-3" id="geometric-params">
                         <div class="form-group">
-                            <label>Initial Temp (K)</label>
+                            <label>Initial Temp (To/K)</label>
                             <input type="number" id="geom-ti" value="600.0" step="50">
                         </div>
                         <div class="form-group">
-                            <label>Cooling Factor (%)</label>
+                            <label>Cooling Factor (%dism)</label>
                             <input type="number" id="geom-factor" value="5.0" step="0.5" min="0.1" max="100">
                             <p class="help-text">T(n+1) = T(n) × (1 - factor/100)</p>
                         </div>
                         <div class="form-group">
-                            <label>Steps</label>
+                            <label>Steps (nT)</label>
                             <input type="number" id="geom-steps" value="100" min="1">
                         </div>
                     </div>
