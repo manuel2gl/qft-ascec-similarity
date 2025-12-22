@@ -629,15 +629,16 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         
                         <div class="form-group">
                             <label>SMILES or IUPAC Name</label>
-                            <input type="text" id="smiles-input" placeholder="e.g., CCO (ethanol), water, methanol, benzene">
-                            <p class="help-text">Examples: O (water), CCO (ethanol), CC(=O)O (acetic acid), c1ccccc1 (benzene)</p>
+                            <input type="text" id="smiles-input" placeholder="e.g., CCO (ethanol), water, alanine, taxol">
+                            <p class="help-text">Examples: O (water), CCO (ethanol), C(=O)O (formic acid), C[C@@H](C(=O)O)N (alanine)</p>
                         </div>
                         
                         <div class="btn-group">
                             <button class="btn btn-primary" onclick="convertToXYZ()">🔄 Generate 3D Coordinates</button>
                             <button class="btn btn-secondary" onclick="loadSmilesExample('O')">Water</button>
                             <button class="btn btn-secondary" onclick="loadSmilesExample('CCO')">Ethanol</button>
-                            <button class="btn btn-secondary" onclick="loadSmilesExample('CC(=O)O')">Acetic Acid</button>
+                            <button class="btn btn-secondary" onclick="loadSmilesExample('C(=O)O')">Formic Acid</button>
+                            <button class="btn btn-secondary" onclick="loadSmilesExample('C[C@@H](C(=O)O)N')">Alanine</button>
                         </div>
                         
                         <div id="viewer-section" style="display: none; margin-top: 15px;">
