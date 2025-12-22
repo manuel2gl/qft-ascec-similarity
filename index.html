@@ -616,8 +616,10 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         </div>
                         <div class="btn-group">
                             <button class="btn btn-primary" onclick="addMoleculeManual()">➕ Add Molecule(s)</button>
-                            <button class="btn btn-secondary" onclick="loadExampleWater()">💧 Water</button>
-                            <button class="btn btn-secondary" onclick="loadExampleMethanol()">🧪 Methanol</button>
+                            <button class="btn btn-secondary" onclick="loadExampleWater()">Water</button>
+                            <button class="btn btn-secondary" onclick="loadExampleEthanol()">Ethanol</button>
+                            <button class="btn btn-secondary" onclick="loadExampleFormicAcid()">Formic Acid</button>
+                            <button class="btn btn-secondary" onclick="loadExampleAlanine()">Alanine</button>
                         </div>
                     </div>
                     
@@ -1226,19 +1228,48 @@ H  -0.757000  0.586000  0.000000"></textarea>
         
         function loadExampleWater() {
             document.getElementById('manual-mol-name').value = 'water';
-            document.getElementById('manual-xyz').value = `O   0.000000  0.000000  0.000000
-H   0.757000  0.586000  0.000000
-H  -0.757000  0.586000  0.000000`;
+            document.getElementById('manual-xyz').value = `O   0.000000  0.000000  0.117300
+H   0.756950  0.000000 -0.469200
+H  -0.756950  0.000000 -0.469200`;
         }
         
-        function loadExampleMethanol() {
-            document.getElementById('manual-mol-name').value = 'methanol';
-            document.getElementById('manual-xyz').value = `C  -0.046282   0.664569   0.000000
-O  -0.046282  -0.758531   0.000000
-H   0.876618  -1.068931   0.000000
-H  -1.088782   1.007869   0.000000
-H   0.437918   1.068869   0.889981
-H   0.437918   1.068869  -0.889981`;
+        function loadExampleEthanol() {
+            document.getElementById('manual-mol-name').value = 'ethanol';
+            document.getElementById('manual-xyz').value = `C  -1.269262 -0.262636  0.000000
+C   0.046282  0.496364  0.000000
+O   1.163682 -0.379636  0.000000
+H  -2.138262  0.401364  0.000000
+H  -1.310062 -0.907836  0.883300
+H  -1.310062 -0.907836 -0.883300
+H   0.087082  1.141564  0.883300
+H   0.087082  1.141564 -0.883300
+H   1.981282  0.134064  0.000000`;
+        }
+        
+        function loadExampleFormicAcid() {
+            document.getElementById('manual-mol-name').value = 'formic_acid';
+            document.getElementById('manual-xyz').value = `C   0.000000  0.424924  0.000000
+O   1.028869 -0.219576  0.000000
+O  -1.141931 -0.219576  0.000000
+H   0.000000  1.524924  0.000000
+H  -1.041931 -1.179576  0.000000`;
+        }
+        
+        function loadExampleAlanine() {
+            document.getElementById('manual-mol-name').value = 'alanine';
+            document.getElementById('manual-xyz').value = `N  -0.966731  0.493854  0.474632
+C   0.257869 -0.230446  0.117032
+C   1.500169  0.590754  0.446832
+O   1.450869  1.649154  1.052932
+O   2.641469  0.079054  0.006332
+C   0.424069 -0.580746 -1.368168
+H  -0.804531  1.436754  0.142832
+H  -1.073731  0.546654  1.478132
+H   0.172669 -1.167546  0.689232
+H   3.394469  0.626054  0.253632
+H   0.511569  0.328754 -1.968068
+H  -0.449831 -1.132346 -1.715168
+H   1.310269 -1.190546 -1.540368`;
         }
         
         function updateMoleculeList() {
