@@ -801,26 +801,77 @@ H  -0.757000  0.586000  0.000000"></textarea>
             
             const btn = event.target;
             btn.disabled = true;
-            btn.textContent = '⏳ Loading...';
+            btn.textContent = '⏳ Searching PubChem...';
             
             try {
-                // Try as SMILES first, then as name
+                let sdfData = null;
+                let foundMethod = '';
+                
+                // Strategy 1: Try as SMILES with 3D conformer
+                btn.textContent = '⏳ Trying SMILES (3D)...';
                 let response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(input)}/SDF?record_type=3d`);
+                if (response.ok) {
+                    sdfData = await response.text();
+                    foundMethod = 'SMILES (3D)';
+                }
                 
-                if (!response.ok) {
-                    // Try as IUPAC/common name
+                // Strategy 2: Try as name with 3D conformer
+                if (!sdfData) {
+                    btn.textContent = '⏳ Trying name (3D)...';
                     response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(input)}/SDF?record_type=3d`);
+                    if (response.ok) {
+                        sdfData = await response.text();
+                        foundMethod = 'Name (3D)';
+                    }
                 }
                 
-                if (!response.ok) {
-                    throw new Error('Could not find compound. Check the SMILES or name.');
+                // Strategy 3: Try synonyms search (handles brand names like Taxol)
+                if (!sdfData) {
+                    btn.textContent = '⏳ Searching synonyms...';
+                    // First get CID from synonym search
+                    response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(input)}/cids/JSON`);
+                    if (response.ok) {
+                        const cidData = await response.json();
+                        if (cidData.IdentifierList && cidData.IdentifierList.CID && cidData.IdentifierList.CID.length > 0) {
+                            const cid = cidData.IdentifierList.CID[0];
+                            btn.textContent = `⏳ Found CID ${cid}, getting 3D...`;
+                            response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/${cid}/SDF?record_type=3d`);
+                            if (response.ok) {
+                                sdfData = await response.text();
+                                foundMethod = `CID ${cid} (3D)`;
+                            }
+                        }
+                    }
                 }
                 
-                const sdfData = await response.text();
+                // Strategy 4: Try 2D structure and convert (fallback)
+                if (!sdfData) {
+                    btn.textContent = '⏳ Trying 2D structure...';
+                    response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(input)}/SDF`);
+                    if (response.ok) {
+                        sdfData = await response.text();
+                        foundMethod = 'Name (2D - may need optimization)';
+                    }
+                }
+                
+                // Strategy 5: Try SMILES 2D (last resort)
+                if (!sdfData) {
+                    btn.textContent = '⏳ Trying SMILES (2D)...';
+                    response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(input)}/SDF`);
+                    if (response.ok) {
+                        sdfData = await response.text();
+                        foundMethod = 'SMILES (2D - may need optimization)';
+                    }
+                }
+                
+                if (!sdfData) {
+                    throw new Error('Could not find compound in PubChem database. Try a different name, SMILES, or CID number.');
+                }
+                
                 let xyzData = sdfToXyz(sdfData);
                 
                 if (xyzData.atoms.length === 0) {
-                    throw new Error('Could not parse 3D structure.');
+                    throw new Error('Could not parse 3D structure from PubChem response.');
                 }
                 
                 // Center the molecule at origin
@@ -846,6 +897,9 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 
                 // Display in 3Dmol viewer with centered coordinates
                 show3DViewer(xyzData);
+                
+                // Show success message with method used
+                console.log(`Found via: ${foundMethod}`);
                 
             } catch (e) {
                 alert('Error: ' + e.message);
