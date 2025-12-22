@@ -1,0 +1,1330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASCEC Input Generator</title>
+    <!-- 3Dmol.js for molecule visualization -->
+    <script src="https://3dmol.org/build/3Dmol-min.js"></script>
+    <style>
+        :root {
+            --primary-color: #2c3e50;
+            --secondary-color: #3498db;
+            --accent-color: #e74c3c;
+            --bg-color: #ecf0f1;
+            --card-bg: #ffffff;
+            --text-color: #2c3e50;
+            --border-radius: 8px;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 20px;
+            text-align: center;
+            border-radius: var(--border-radius);
+            margin-bottom: 20px;
+        }
+        
+        header h1 {
+            font-size: 2em;
+            margin-bottom: 5px;
+        }
+        
+        header p {
+            opacity: 0.9;
+            font-size: 0.95em;
+        }
+        
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        .card h2 {
+            color: var(--primary-color);
+            border-bottom: 2px solid var(--secondary-color);
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+        
+        .card h3 {
+            color: var(--secondary-color);
+            margin: 15px 0 10px 0;
+            font-size: 1em;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        
+        .form-row-3 {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        
+        input[type="text"],
+        input[type="number"],
+        select,
+        textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus,
+        select:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--secondary-color);
+            box-shadow: 0 0 5px rgba(52, 152, 219, 0.3);
+        }
+        
+        .help-text {
+            font-size: 0.8em;
+            color: #7f8c8d;
+            margin-top: 3px;
+        }
+        
+        .sketcher-container {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+            height: 400px;
+            background: #fff;
+        }
+        
+        #ketcher-frame {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+        
+        .molecule-list {
+            max-height: 250px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        
+        .molecule-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .molecule-item:last-child {
+            border-bottom: none;
+        }
+        
+        .molecule-item .name {
+            font-weight: 500;
+        }
+        
+        .molecule-item .atoms {
+            font-size: 0.85em;
+            color: #7f8c8d;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: all 0.3s;
+        }
+        
+        .btn-primary {
+            background: var(--secondary-color);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #2980b9;
+        }
+        
+        .btn-success {
+            background: #27ae60;
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #219a52;
+        }
+        
+        .btn-danger {
+            background: var(--accent-color);
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #c0392b;
+        }
+        
+        .btn-secondary {
+            background: #95a5a6;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #7f8c8d;
+        }
+        
+        .btn-sm {
+            padding: 5px 10px;
+            font-size: 12px;
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .preview-container {
+            background: #f8f9fa;
+            color: #333;
+            font-family: 'Consolas', 'Monaco', monospace;
+            padding: 15px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 12px;
+            line-height: 1.5;
+            white-space: pre;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .protocol-builder {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            background: #f9f9f9;
+        }
+        
+        .protocol-stage {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        
+        .protocol-stage select {
+            width: auto;
+            min-width: 90px;
+            flex-shrink: 0;
+        }
+        
+        .protocol-stage input[type="number"] {
+            width: 55px;
+            flex-shrink: 0;
+        }
+        
+        .protocol-stage input[type="text"] {
+            flex: 1;
+            min-width: 150px;
+        }
+        
+        .protocol-stage .btn-danger {
+            flex-shrink: 0;
+        }
+        
+        .stage-arrow {
+            color: var(--secondary-color);
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+        
+        .alert {
+            padding: 12px 15px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+        }
+        
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        .xyz-input {
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            min-height: 120px;
+        }
+        
+        .collapsible {
+            cursor: pointer;
+            user-select: none;
+        }
+        
+        .collapsible::before {
+            content: '▶ ';
+            font-size: 0.8em;
+        }
+        
+        .collapsible.open::before {
+            content: '▼ ';
+        }
+        
+        .collapsible-content {
+            display: none;
+            padding-top: 10px;
+        }
+        
+        .collapsible-content.open {
+            display: block;
+        }
+        
+        footer {
+            text-align: center;
+            padding: 20px;
+            color: #7f8c8d;
+            font-size: 0.85em;
+        }
+        
+        .ketcher-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #7f8c8d;
+        }
+        
+        .ketcher-placeholder .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid #ddd;
+            border-top-color: var(--secondary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 15px;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .input-mode-toggle {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        
+        .input-mode-toggle .btn {
+            flex: 1;
+        }
+        
+        .input-mode-toggle .btn.active {
+            background: var(--primary-color);
+        }
+        
+        .inline-group {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+        
+        .inline-group .form-group {
+            flex: 1;
+            margin-bottom: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔬 ASCEC Input Generator</h1>
+            <p>Annealing Simulado Con Energía Cuántica - Input File Creator</p>
+        </header>
+        
+        <div class="main-content">
+            <!-- Left Column: Parameters -->
+            <div class="left-column">
+                <!-- Basic Settings -->
+                <div class="card">
+                    <h2>⚙️ Basic Settings</h2>
+                    
+                    <div class="form-group">
+                        <label>Simulation Name</label>
+                        <input type="text" id="sim-name" value="water_pentamer" placeholder="e.g., water_pentamer">
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Simulation Mode</label>
+                            <select id="sim-mode" onchange="updateSimModeUI()">
+                                <option value="1">1 - Annealing</option>
+                                <option value="0">0 - Random configurations</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="num-configs-group">
+                            <label>Number of Configs to Save</label>
+                            <input type="number" id="num-configs" value="10" min="1" disabled placeholder="10">
+                            <p class="help-text">Only for random configuration mode</p>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Simulation Cube Length (Å)</label>
+                        <input type="number" id="box-size" value="5.0" step="0.5" min="1">
+                    </div>
+                </div>
+                
+                <!-- Quenching Parameters -->
+                <div class="card">
+                    <h2>🌡️ Quenching Parameters</h2>
+                    
+                    <div class="form-group">
+                        <label>Quenching Route</label>
+                        <select id="quench-route" onchange="updateQuenchVisibility()">
+                            <option value="1">1 - Linear</option>
+                            <option value="2" selected>2 - Geometrical</option>
+                        </select>
+                    </div>
+                    
+                    <h3>Linear Quenching (Ti, ΔT, steps)</h3>
+                    <div class="form-row-3" id="linear-params">
+                        <div class="form-group">
+                            <label>Initial Temp (K)</label>
+                            <input type="number" id="linear-ti" value="100.0" step="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Temp Reduction ΔT (K)</label>
+                            <input type="number" id="linear-dt" value="10.0" step="1">
+                            <p class="help-text">T(n+1) = T(n) - ΔT</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Steps</label>
+                            <input type="number" id="linear-steps" value="50" min="1">
+                        </div>
+                    </div>
+                    
+                    <h3>Geometric Quenching (Ti, factor%, steps)</h3>
+                    <div class="form-row-3" id="geometric-params">
+                        <div class="form-group">
+                            <label>Initial Temp (K)</label>
+                            <input type="number" id="geom-ti" value="600.0" step="50">
+                        </div>
+                        <div class="form-group">
+                            <label>Cooling Factor (%)</label>
+                            <input type="number" id="geom-factor" value="5.0" step="0.5" min="0.1" max="100">
+                            <p class="help-text">T(n+1) = T(n) × (1 - factor/100)</p>
+                        </div>
+                        <div class="form-group">
+                            <label>Steps</label>
+                            <input type="number" id="geom-steps" value="100" min="1">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Monte Carlo Settings -->
+                <div class="card">
+                    <h2>🎲 Monte Carlo Settings</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Max MC Cycles per T</label>
+                            <input type="number" id="mc-cycles" value="3000" min="100">
+                        </div>
+                        <div class="form-group">
+                            <label>Floor Value</label>
+                            <input type="number" id="mc-floor" value="50" min="1">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Max Displacement (Å)</label>
+                            <input type="number" id="max-disp" value="1.0" step="0.1" min="0.1">
+                        </div>
+                        <div class="form-group">
+                            <label>Max Rotation (radians)</label>
+                            <input type="number" id="max-rot" value="1.0" step="0.1" min="0.1">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Conformational Sampling (%)</label>
+                            <input type="number" id="conf-sampling" value="30" min="0" max="100">
+                        </div>
+                        <div class="form-group">
+                            <label>Max Dihedral Rotation (°)</label>
+                            <input type="number" id="max-dihedral" value="60" min="0" max="180">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- QM Settings -->
+                <div class="card">
+                    <h2>🔬 Quantum Chemistry Settings</h2>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>QM Program</label>
+                            <select id="qm-program">
+                                <option value="2">2 - ORCA</option>
+                                <option value="1">1 - Gaussian</option>
+                                <option value="3">3 - Other</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>Program Alias</label>
+                            <input type="text" id="qm-alias" value="orca" placeholder="e.g., orca, g16">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Hamiltonian / Method</label>
+                            <input type="text" id="qm-method" value="pm3" placeholder="e.g., pm3, hf, b3lyp">
+                        </div>
+                        <div class="form-group">
+                            <label>Basis Set (optional)</label>
+                            <input type="text" id="qm-basis" placeholder="e.g., 6-31G*, def2-SVP">
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>QM Processors</label>
+                            <input type="number" id="qm-nproc" value="1" min="1">
+                            <p class="help-text">CPUs per QM calculation</p>
+                        </div>
+                        <div class="form-group">
+                            <label>ASCEC Processors</label>
+                            <input type="number" id="ascec-nproc" value="8" min="1">
+                            <p class="help-text">Parallel evaluations</p>
+                        </div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Charge</label>
+                            <input type="number" id="charge" value="0">
+                        </div>
+                        <div class="form-group">
+                            <label>Spin Multiplicity</label>
+                            <input type="number" id="multiplicity" value="1" min="1">
+                            <p class="help-text">1=singlet, 2=doublet, 3=triplet</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Molecular Structure -->
+                <div class="card">
+                    <h2>📐 Molecular Structure</h2>
+                    
+                    <div class="input-mode-toggle">
+                        <button class="btn btn-primary active" id="btn-manual-mode" onclick="setInputMode('manual')">
+                            📝 Manual XYZ Input
+                        </button>
+                        <button class="btn btn-secondary" id="btn-sketcher-mode" onclick="setInputMode('sketcher')">
+                            🧪 SMILES / Name → XYZ
+                        </button>
+                    </div>
+                    
+                    <!-- Manual Mode -->
+                    <div id="manual-mode" class="tab-content active">
+                        <div class="inline-group" style="margin-bottom: 10px;">
+                            <div class="form-group">
+                                <label>Molecule Label</label>
+                                <input type="text" id="manual-mol-name" placeholder="e.g., water1">
+                            </div>
+                            <div class="form-group" style="flex: 0 0 80px;">
+                                <label>Count</label>
+                                <input type="number" id="mol-count" value="1" min="1" max="20">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>XYZ Coordinates</label>
+                            <textarea class="xyz-input" id="manual-xyz" rows="6" placeholder="O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000"></textarea>
+                            <p class="help-text">Format: Element X Y Z (one atom per line)</p>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-primary" onclick="addMoleculeManual()">➕ Add Molecule(s)</button>
+                            <button class="btn btn-secondary" onclick="loadExampleWater()">💧 Water</button>
+                            <button class="btn btn-secondary" onclick="loadExampleMethanol()">🧪 Methanol</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Sketcher Mode -->
+                    <div id="sketcher-mode" class="tab-content">
+                        <div class="alert alert-info">
+                            <strong>Enter SMILES or IUPAC name</strong> to generate 3D coordinates automatically.
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>SMILES or IUPAC Name</label>
+                            <input type="text" id="smiles-input" placeholder="e.g., CCO (ethanol), water, methanol, benzene">
+                            <p class="help-text">Examples: O (water), CCO (ethanol), CC(=O)O (acetic acid), c1ccccc1 (benzene)</p>
+                        </div>
+                        
+                        <div class="btn-group">
+                            <button class="btn btn-primary" onclick="convertToXYZ()">🔄 Generate 3D Coordinates</button>
+                            <button class="btn btn-secondary" onclick="loadSmilesExample('O')">Water</button>
+                            <button class="btn btn-secondary" onclick="loadSmilesExample('CCO')">Ethanol</button>
+                            <button class="btn btn-secondary" onclick="loadSmilesExample('CC(=O)O')">Acetic Acid</button>
+                        </div>
+                        
+                        <div id="viewer-section" style="display: none; margin-top: 15px;">
+                            <label>3D Preview (3Dmol.js)</label>
+                            <div id="mol-viewer" style="width: 100%; height: 250px; position: relative; border: 1px solid #ddd; border-radius: 4px; background: #fff;"></div>
+                            
+                            <div class="inline-group" style="margin-top: 10px;">
+                                <div class="form-group">
+                                    <label>Molecule Label</label>
+                                    <input type="text" id="sketcher-mol-name" placeholder="e.g., molecule1">
+                                </div>
+                                <div class="form-group" style="flex: 0 0 80px;">
+                                    <label>Count</label>
+                                    <input type="number" id="sketcher-mol-count" value="1" min="1" max="20">
+                                </div>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-success" onclick="addMoleculeFromConverter()">➕ Add Molecule(s)</button>
+                            </div>
+                            
+                            <div class="form-group" style="margin-top: 10px;">
+                                <label>Generated XYZ Coordinates</label>
+                                <textarea id="generated-xyz" class="xyz-input" rows="6" readonly style="background: #f8f9fa;"></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Molecule List -->
+                    <h3>Added Molecules (nmo = <span id="mol-count-display">0</span>)</h3>
+                    <div class="molecule-list" id="molecule-list">
+                        <div style="padding: 20px; text-align: center; color: #7f8c8d;">
+                            No molecules added yet
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-danger btn-sm" onclick="clearAllMolecules()">🗑️ Clear All</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Right Column: Protocol & Preview -->
+            <div class="right-column">
+                <!-- Protocol Builder -->
+                <div class="card">
+                    <h2>📋 Protocol Builder (Optional)</h2>
+                    <p class="help-text" style="margin-bottom: 15px;">
+                        Define a workflow. Leave empty for annealing-only runs.
+                    </p>
+                    
+                    <div class="protocol-builder" id="protocol-builder">
+                        <div id="protocol-stages"></div>
+                        <button class="btn btn-sm btn-primary" onclick="addProtocolStage()">➕ Add Stage</button>
+                    </div>
+                    
+                    <div class="form-group" style="margin-top: 15px;">
+                        <label>Protocol Preview</label>
+                        <textarea id="protocol-preview" rows="2" readonly style="font-family: monospace; font-size: 12px; resize: none;" placeholder="No protocol defined"></textarea>
+                    </div>
+                </div>
+                
+                <!-- Preview -->
+                <div class="card">
+                    <h2>📄 Input File Preview</h2>
+                    <div class="preview-container" id="in-preview"># Add molecules and set parameters to generate preview</div>
+                    <div class="btn-group">
+                        <button class="btn btn-success" onclick="downloadInFile()">⬇️ Download .in File</button>
+                        <button class="btn btn-primary" onclick="copyToClipboard()">📋 Copy to Clipboard</button>
+                    </div>
+                </div>
+                
+                <!-- Quick Reference -->
+                <div class="card">
+                    <h2 class="collapsible open" onclick="toggleCollapsible(this)">📖 Quick Reference</h2>
+                    <div class="collapsible-content open">
+                        <h3>Protocol Stage Types:</h3>
+                        <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
+                            <li><strong>rN:</strong> Run N replica annealings (e.g., r1, r3, r5)
+                                <br><code>--box10</code></li>
+                            <li><strong>calc:</strong> Single-point calculations
+                                <br><code>--critical=0 --retry=3 ../input.inp ../launcher.sh</code></li>
+                            <li><strong>similarity:</strong> Cluster similar structures
+                                <br><code>--th=2 --cores=8</code></li>
+                            <li><strong>opt:</strong> Geometry optimization
+                                <br><code>--skipped=0 --retry=3 ../input.inp ../launcher.sh</code></li>
+                        </ul>
+                        
+                        <h3 style="margin-top: 15px;">Common Flags:</h3>
+                        <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
+                            <li><code>--box10</code> - Use box with 10% effective packing</li>
+                            <li><code>--retry=N</code> - Retry failed calcs N times</li>
+                            <li><code>--critical=N</code> - Max N% critical errors allowed</li>
+                            <li><code>--th=N</code> - Similarity threshold</li>
+                            <li><code>--skipped=N</code> - Max N% skipped structures allowed</li>
+                            <li><code>-c</code> - Combine XYZ files before processing</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <footer>
+            ASCEC v04 - Universidad de Antioquia - Química Física Teórica
+        </footer>
+    </div>
+    
+    <script>
+        // Global state
+        let molecules = [];
+        let protocolStages = [];
+        let inputMode = 'manual';
+        let currentMolData = null; // Store current converted molecule data
+        let viewer = null; // 3Dmol viewer instance
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            updatePreview();
+            updateQuenchVisibility();
+            updateSimModeUI();
+        });
+        
+        function updateSimModeUI() {
+            const simMode = document.getElementById('sim-mode').value;
+            const numConfigsInput = document.getElementById('num-configs');
+            const numConfigsGroup = document.getElementById('num-configs-group');
+            
+            if (simMode === '1') {
+                // Annealing mode - disable num configs
+                numConfigsInput.disabled = true;
+                numConfigsInput.value = '10';
+                numConfigsGroup.style.opacity = '0.6';
+            } else {
+                // Random config mode - enable num configs
+                numConfigsInput.disabled = false;
+                numConfigsGroup.style.opacity = '1';
+            }
+            updatePreview();
+        }
+        
+        // Convert SMILES or IUPAC to XYZ using PubChem API
+        async function convertToXYZ() {
+            const input = document.getElementById('smiles-input').value.trim();
+            if (!input) {
+                alert('Please enter a SMILES string or IUPAC name');
+                return;
+            }
+            
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '⏳ Loading...';
+            
+            try {
+                // Try as SMILES first, then as name
+                let response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/smiles/${encodeURIComponent(input)}/SDF?record_type=3d`);
+                
+                if (!response.ok) {
+                    // Try as IUPAC/common name
+                    response = await fetch(`https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encodeURIComponent(input)}/SDF?record_type=3d`);
+                }
+                
+                if (!response.ok) {
+                    throw new Error('Could not find compound. Check the SMILES or name.');
+                }
+                
+                const sdfData = await response.text();
+                const xyzData = sdfToXyz(sdfData);
+                
+                if (xyzData.atoms.length === 0) {
+                    throw new Error('Could not parse 3D structure.');
+                }
+                
+                // Store the data
+                currentMolData = xyzData;
+                
+                // Format as XYZ text with proper column alignment
+                let xyzText = '';
+                xyzData.atoms.forEach((atom, i) => {
+                    const [x, y, z] = xyzData.coords[i];
+                    const xStr = x.toFixed(6).padStart(10);
+                    const yStr = y.toFixed(6).padStart(10);
+                    const zStr = z.toFixed(6).padStart(10);
+                    xyzText += `${atom.padEnd(2)}  ${xStr}  ${yStr}  ${zStr}\n`;
+                });
+                
+                // Show the viewer section
+                document.getElementById('viewer-section').style.display = 'block';
+                document.getElementById('generated-xyz').value = xyzText.trim();
+                document.getElementById('sketcher-mol-name').value = input.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+                
+                // Display in 3Dmol viewer
+                show3DViewer(sdfData);
+                
+            } catch (e) {
+                alert('Error: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔄 Generate 3D Coordinates';
+            }
+        }
+        
+        function show3DViewer(sdfData) {
+            const container = document.getElementById('mol-viewer');
+            
+            // Clear previous viewer
+            container.innerHTML = '';
+            
+            try {
+                // Create viewer with explicit dimensions
+                viewer = $3Dmol.createViewer(container, {
+                    backgroundColor: 'white',
+                    antialias: true
+                });
+                
+                viewer.addModel(sdfData, 'sdf');
+                viewer.setStyle({}, {
+                    stick: {radius: 0.12, colorscheme: 'Jmol'},
+                    sphere: {radius: 0.25, colorscheme: 'Jmol'}
+                });
+                viewer.zoomTo();
+                viewer.render();
+                
+                // Add rotation animation on hover
+                container.addEventListener('mouseenter', () => viewer.spin(true));
+                container.addEventListener('mouseleave', () => viewer.spin(false));
+            } catch (e) {
+                console.error('3Dmol error:', e);
+                container.innerHTML = '<p style="padding: 20px; color: #999; text-align: center;">3D preview unavailable</p>';
+            }
+        }
+        
+        function loadSmilesExample(smiles) {
+            document.getElementById('smiles-input').value = smiles;
+        }
+        
+        function addMoleculeFromConverter() {
+            if (!currentMolData || currentMolData.atoms.length === 0) {
+                alert('Please generate coordinates first');
+                return;
+            }
+            
+            const baseName = document.getElementById('sketcher-mol-name').value.trim() || 'molecule';
+            const count = parseInt(document.getElementById('sketcher-mol-count').value) || 1;
+            
+            for (let i = 0; i < count; i++) {
+                const molName = count > 1 ? `${baseName}${molecules.length + 1}` : baseName;
+                molecules.push({
+                    name: molName,
+                    atoms: [...currentMolData.atoms],
+                    coords: currentMolData.coords.map(c => [...c])
+                });
+            }
+            
+            updateMoleculeList();
+            updatePreview();
+            
+            // Reset
+            document.getElementById('sketcher-mol-count').value = '1';
+        }
+        
+        function sdfToXyz(sdfData) {
+            const lines = sdfData.split('\n');
+            const atoms = [];
+            const coords = [];
+            
+            if (lines.length < 5) return { atoms: [], coords: [] };
+            
+            // SDF counts line is line 4 (index 3)
+            const countsLine = lines[3].trim().split(/\s+/);
+            const numAtoms = parseInt(countsLine[0]) || 0;
+            
+            // Atom block starts at line 5 (index 4)
+            for (let i = 4; i < 4 + numAtoms && i < lines.length; i++) {
+                const parts = lines[i].trim().split(/\s+/);
+                if (parts.length >= 4) {
+                    const x = parseFloat(parts[0]);
+                    const y = parseFloat(parts[1]);
+                    const z = parseFloat(parts[2]);
+                    const element = parts[3];
+                    
+                    if (!isNaN(x) && !isNaN(y) && !isNaN(z) && element) {
+                        atoms.push(element);
+                        coords.push([x, y, z]);
+                    }
+                }
+            }
+            
+            return { atoms, coords };
+        }
+        
+        function updateQuenchVisibility() {
+            const route = document.getElementById('quench-route').value;
+            document.getElementById('linear-params').style.opacity = route === '1' ? '1' : '0.5';
+            document.getElementById('geometric-params').style.opacity = route === '2' ? '1' : '0.5';
+        }
+        
+        function setInputMode(mode) {
+            inputMode = mode;
+            
+            document.getElementById('sketcher-mode').classList.toggle('active', mode === 'sketcher');
+            document.getElementById('manual-mode').classList.toggle('active', mode === 'manual');
+            document.getElementById('btn-sketcher-mode').classList.toggle('active', mode === 'sketcher');
+            document.getElementById('btn-manual-mode').classList.toggle('active', mode === 'manual');
+            document.getElementById('btn-sketcher-mode').classList.toggle('btn-secondary', mode !== 'sketcher');
+            document.getElementById('btn-manual-mode').classList.toggle('btn-secondary', mode !== 'manual');
+            document.getElementById('btn-sketcher-mode').classList.toggle('btn-primary', mode === 'sketcher');
+            document.getElementById('btn-manual-mode').classList.toggle('btn-primary', mode === 'manual');
+        }
+        
+        function addMoleculeManual() {
+            const baseName = document.getElementById('manual-mol-name').value.trim() || 'molecule';
+            const xyzText = document.getElementById('manual-xyz').value.trim();
+            const count = parseInt(document.getElementById('mol-count').value) || 1;
+            
+            if (!xyzText) {
+                alert('Please enter XYZ coordinates');
+                return;
+            }
+            
+            const { atoms, coords } = parseXyzText(xyzText);
+            
+            if (atoms.length === 0) {
+                alert('Could not parse XYZ coordinates. Check format.');
+                return;
+            }
+            
+            for (let i = 0; i < count; i++) {
+                const molName = count > 1 ? `${baseName}${molecules.length + 1}` : baseName;
+                molecules.push({
+                    name: molName,
+                    atoms: [...atoms],
+                    coords: coords.map(c => [...c])
+                });
+            }
+            
+            document.getElementById('manual-mol-name').value = '';
+            document.getElementById('mol-count').value = '1';
+            
+            updateMoleculeList();
+            updatePreview();
+        }
+        
+        function parseXyzText(text) {
+            const lines = text.trim().split('\n');
+            const atoms = [];
+            const coords = [];
+            
+            for (const line of lines) {
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 4) {
+                    const element = parts[0];
+                    const x = parseFloat(parts[1]);
+                    const y = parseFloat(parts[2]);
+                    const z = parseFloat(parts[3]);
+                    
+                    if (!isNaN(x) && !isNaN(y) && !isNaN(z) && /^[A-Z][a-z]?$/.test(element)) {
+                        atoms.push(element);
+                        coords.push([x, y, z]);
+                    }
+                }
+            }
+            
+            return { atoms, coords };
+        }
+        
+        function loadExampleWater() {
+            document.getElementById('manual-mol-name').value = 'water';
+            document.getElementById('manual-xyz').value = `O   0.000000  0.000000  0.000000
+H   0.757000  0.586000  0.000000
+H  -0.757000  0.586000  0.000000`;
+        }
+        
+        function loadExampleMethanol() {
+            document.getElementById('manual-mol-name').value = 'methanol';
+            document.getElementById('manual-xyz').value = `C  -0.046282   0.664569   0.000000
+O  -0.046282  -0.758531   0.000000
+H   0.876618  -1.068931   0.000000
+H  -1.088782   1.007869   0.000000
+H   0.437918   1.068869   0.889981
+H   0.437918   1.068869  -0.889981`;
+        }
+        
+        function updateMoleculeList() {
+            const list = document.getElementById('molecule-list');
+            document.getElementById('mol-count-display').textContent = molecules.length;
+            
+            if (molecules.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; text-align: center; color: #7f8c8d;">No molecules added yet</div>';
+                return;
+            }
+            
+            list.innerHTML = molecules.map((mol, idx) => `
+                <div class="molecule-item">
+                    <div>
+                        <div class="name">${mol.name}</div>
+                        <div class="atoms">${mol.atoms.length} atoms: ${[...new Set(mol.atoms)].join(', ')}</div>
+                    </div>
+                    <button class="btn btn-danger btn-sm" onclick="removeMolecule(${idx})">✕</button>
+                </div>
+            `).join('');
+        }
+        
+        function removeMolecule(idx) {
+            molecules.splice(idx, 1);
+            updateMoleculeList();
+            updatePreview();
+        }
+        
+        function clearAllMolecules() {
+            if (molecules.length > 0 && confirm('Remove all molecules?')) {
+                molecules = [];
+                updateMoleculeList();
+                updatePreview();
+            }
+        }
+        
+        function addProtocolStage() {
+            const stagesDiv = document.getElementById('protocol-stages');
+            const idx = protocolStages.length;
+            
+            // Default values based on position in typical workflow
+            let defaultType = 'rN';
+            let defaultArgs = '--box10';
+            let defaultN = 1;
+            
+            if (idx === 0) {
+                defaultType = 'rN';
+                defaultArgs = '--box10';
+                defaultN = 1;
+            } else if (idx === 1) {
+                defaultType = 'calc';
+                defaultArgs = '--critical=0 --retry=3 ../input.inp ../launcher.sh';
+            } else if (idx === 2) {
+                defaultType = 'similarity';
+                defaultArgs = '--th=2 --cores=8';
+            } else if (idx === 3) {
+                defaultType = 'opt';
+                defaultArgs = '--skipped=0 --retry=3 ../input.inp ../launcher.sh';
+            } else {
+                // For additional stages, cycle through
+                defaultType = 'similarity';
+                defaultArgs = '--th=2 --cores=8';
+            }
+            
+            protocolStages.push({ type: defaultType, args: defaultArgs, n: defaultN });
+            
+            const stageHtml = `
+                <div class="protocol-stage" id="stage-${idx}">
+                    ${idx > 0 ? '<span class="stage-arrow">→</span>' : ''}
+                    <select onchange="updateStageType(${idx}, this.value)" style="min-width: 90px;">
+                        <option value="rN" ${defaultType === 'rN' ? 'selected' : ''}>rN</option>
+                        <option value="calc" ${defaultType === 'calc' ? 'selected' : ''}>calc</option>
+                        <option value="similarity" ${defaultType === 'similarity' ? 'selected' : ''}>similarity</option>
+                        <option value="opt" ${defaultType === 'opt' ? 'selected' : ''}>opt</option>
+                    </select>
+                    <input type="number" id="stage-n-${idx}" value="${defaultN}" min="1" max="99" 
+                           style="width: 55px; ${defaultType !== 'rN' ? 'display:none;' : ''}" 
+                           onchange="updateStageN(${idx}, this.value)" title="Number of replicas">
+                    <input type="text" value="${defaultArgs}" placeholder="arguments" onchange="updateStageArgs(${idx}, this.value)">
+                    <button class="btn btn-danger btn-sm" onclick="removeStage(${idx})">✕</button>
+                </div>
+            `;
+            
+            stagesDiv.insertAdjacentHTML('beforeend', stageHtml);
+            updateProtocolPreview();
+        }
+        
+        function updateStageType(idx, value) {
+            protocolStages[idx].type = value;
+            const nInput = document.getElementById(`stage-n-${idx}`);
+            if (nInput) {
+                nInput.style.display = value === 'rN' ? 'block' : 'none';
+            }
+            // Update default args based on type
+            const argsInput = document.querySelector(`#stage-${idx} input[type="text"]`);
+            if (argsInput) {
+                if (value === 'rN') {
+                    argsInput.value = '--box10';
+                } else if (value === 'calc') {
+                    argsInput.value = '--critical=0 --retry=3 ../input.inp ../launcher.sh';
+                } else if (value === 'similarity') {
+                    argsInput.value = '--th=2 --cores=8';
+                } else if (value === 'opt') {
+                    argsInput.value = '--skipped=0 --retry=3 ../input.inp ../launcher.sh';
+                }
+                protocolStages[idx].args = argsInput.value;
+            }
+            updateProtocolPreview();
+        }
+        
+        function updateStageN(idx, value) {
+            protocolStages[idx].n = parseInt(value) || 1;
+            updateProtocolPreview();
+        }
+        
+        function updateStageArgs(idx, value) {
+            protocolStages[idx].args = value;
+            updateProtocolPreview();
+        }
+        
+        function removeStage(idx) {
+            protocolStages.splice(idx, 1);
+            rebuildProtocolStages();
+            updateProtocolPreview();
+        }
+        
+        function rebuildProtocolStages() {
+            const stagesDiv = document.getElementById('protocol-stages');
+            stagesDiv.innerHTML = '';
+            
+            protocolStages.forEach((stage, idx) => {
+                const nValue = stage.n || 1;
+                const stageHtml = `
+                    <div class="protocol-stage" id="stage-${idx}">
+                        ${idx > 0 ? '<span class="stage-arrow">→</span>' : ''}
+                        <select onchange="updateStageType(${idx}, this.value)" style="min-width: 90px;">
+                            <option value="rN" ${stage.type === 'rN' ? 'selected' : ''}>rN</option>
+                            <option value="calc" ${stage.type === 'calc' ? 'selected' : ''}>calc</option>
+                            <option value="similarity" ${stage.type === 'similarity' ? 'selected' : ''}>similarity</option>
+                            <option value="opt" ${stage.type === 'opt' ? 'selected' : ''}>opt</option>
+                        </select>
+                        <input type="number" id="stage-n-${idx}" value="${nValue}" min="1" max="99" 
+                               style="width: 55px; ${stage.type !== 'rN' ? 'display:none;' : ''}" 
+                               onchange="updateStageN(${idx}, this.value)" title="Number of replicas">
+                        <input type="text" value="${stage.args}" placeholder="arguments" onchange="updateStageArgs(${idx}, this.value)">
+                        <button class="btn btn-danger btn-sm" onclick="removeStage(${idx})">✕</button>
+                    </div>
+                `;
+                stagesDiv.insertAdjacentHTML('beforeend', stageHtml);
+            });
+        }
+        
+        function updateProtocolPreview() {
+            const preview = document.getElementById('protocol-preview');
+            
+            if (protocolStages.length === 0) {
+                preview.value = 'No protocol defined';
+                preview.rows = 2;
+                updatePreview();
+                return;
+            }
+            
+            let text = '.in,\n';
+            protocolStages.forEach((s, idx) => {
+                let stageName = s.type;
+                if (s.type === 'rN') {
+                    stageName = `r${s.n || 1}`;
+                }
+                const line = s.args ? `${stageName} ${s.args}` : stageName;
+                text += line + (idx < protocolStages.length - 1 ? ',' : '') + '\n';
+            });
+            
+            preview.value = text;
+            // Auto-resize: count lines + 1 for padding
+            preview.rows = Math.max(2, text.split('\n').length);
+            updatePreview();
+        }
+        
+        function generateInFile() {
+            const simName = document.getElementById('sim-name').value || 'simulation';
+            const simMode = document.getElementById('sim-mode').value;
+            const numConfigs = document.getElementById('num-configs').value;
+            const boxSize = document.getElementById('box-size').value;
+            const quenchRoute = document.getElementById('quench-route').value;
+            
+            const linearTi = document.getElementById('linear-ti').value;
+            const linearDt = document.getElementById('linear-dt').value;
+            const linearSteps = document.getElementById('linear-steps').value;
+            
+            const geomTi = document.getElementById('geom-ti').value;
+            const geomFactor = document.getElementById('geom-factor').value;
+            const geomSteps = document.getElementById('geom-steps').value;
+            
+            const mcCycles = document.getElementById('mc-cycles').value;
+            const mcFloor = document.getElementById('mc-floor').value;
+            const maxDisp = document.getElementById('max-disp').value;
+            const maxRot = document.getElementById('max-rot').value;
+            const confSampling = document.getElementById('conf-sampling').value;
+            const maxDihedral = document.getElementById('max-dihedral').value;
+            
+            const qmProgram = document.getElementById('qm-program').value;
+            const qmAlias = document.getElementById('qm-alias').value;
+            const qmMethod = document.getElementById('qm-method').value;
+            const qmBasis = document.getElementById('qm-basis').value;
+            const qmNproc = document.getElementById('qm-nproc').value;
+            const ascecNproc = document.getElementById('ascec-nproc').value;
+            const charge = document.getElementById('charge').value;
+            const multiplicity = document.getElementById('multiplicity').value;
+            
+            let content = '';
+            
+            content += `# Input for ${simName} Simulation\n\n`;
+            content += `${simMode} ${numConfigs}          # Line 1: Simulation Mode & Number of Config\n`;
+            content += `              # 1: Annealing; 0: Random configurations\n`;
+            content += `${boxSize}           # Line 2: Simulation Cube Length (Angstroms)\n\n`;
+            content += `${quenchRoute}             # Line 3: Annealing Quenching route\n`;
+            content += `              # (1: Linear, 2: Geometrical).\n\n`;
+            content += `${linearTi}  ${linearDt}  ${linearSteps}   # Line 4: Linear Quenching Parameters (Ti, ΔT, steps)\n\n`;
+            content += `${geomTi}   ${geomFactor}  ${geomSteps}  # Line 5: Geometric Quenching Parameters\n\n`;
+            content += `${mcCycles}  ${mcFloor}      # Line 6: Maximum Monte Carlo Cycles per T and floor value\n\n`;
+            content += `${maxDisp} ${maxRot}       # Line 7: Maximum Displacement (A) & Rotation (radians)\n\n`;
+            content += `${confSampling} ${maxDihedral}         # Line 8: Conformational sampling (%)\n`;
+            content += `              # & Maximum dihedral rotation (degrees)\n\n`;
+            content += `${qmProgram} ${qmAlias}        # Line 9: QM Program Index & alias\n`;
+            content += `              # (1: Gaussian, 2: ORCA, 3: for other, etc.)\n\n`;
+            
+            const methodLine = qmBasis ? `${qmMethod} ${qmBasis}` : qmMethod;
+            content += `${methodLine}           # Line 10: Hamiltonian & Basis Set\n`;
+            content += `              # (e.g., pm3, hf)(e.g., 6-31G*, STO-3G)\n\n`;
+            content += `${qmNproc} ${ascecNproc}           # Line 11: nprocs (QM calculations and ASCEC evaluation)\n\n`;
+            content += `${charge} ${multiplicity}           # Line 12: Charge & Spin Multiplicity\n\n`;
+            content += `${molecules.length}             # Line 13: Number of Molecules (nmo)\n\n`;
+            content += `# Lines below: Molecule Definition\n`;
+            content += `# (Num Atoms, Label, followed by xyz coordinates, separated by *)\n\n`;
+            
+            molecules.forEach((mol) => {
+                content += `*\n`;
+                content += `${mol.atoms.length}\n`;
+                content += `${mol.name}\n`;
+                
+                mol.atoms.forEach((atom, atomIdx) => {
+                    const [x, y, z] = mol.coords[atomIdx];
+                    content += `${atom.padEnd(2)}  ${x.toFixed(6).padStart(10)}  ${y.toFixed(6).padStart(10)}  ${z.toFixed(6).padStart(10)}\n`;
+                });
+            });
+            
+            if (molecules.length > 0) {
+                content += `*\n`;
+            }
+            
+            if (protocolStages.length > 0) {
+                content += `\n# Protocol\n`;
+                content += `# (annealing, (pre)optimization, clustering, separated by "," or "then")\n\n`;
+                content += `.in,\n`;
+                protocolStages.forEach((stage, idx) => {
+                    const line = stage.args ? `${stage.type} ${stage.args}` : stage.type;
+                    content += line + (idx < protocolStages.length - 1 ? ',' : '') + '\n';
+                });
+            }
+            
+            return content;
+        }
+        
+        function updatePreview() {
+            document.getElementById('in-preview').textContent = generateInFile();
+        }
+        
+        function downloadInFile() {
+            const content = generateInFile();
+            const simName = document.getElementById('sim-name').value || 'simulation';
+            downloadFile(content, `${simName}.in`, 'text/plain');
+        }
+        
+        function downloadFile(content, filename, type) {
+            const blob = new Blob([content], { type });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        
+        function copyToClipboard() {
+            const content = generateInFile();
+            navigator.clipboard.writeText(content).then(() => {
+                alert('Input file copied to clipboard!');
+            }).catch(() => {
+                const textarea = document.createElement('textarea');
+                textarea.value = content;
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textarea);
+                alert('Input file copied to clipboard!');
+            });
+        }
+        
+        function toggleCollapsible(element) {
+            element.classList.toggle('open');
+            element.nextElementSibling.classList.toggle('open');
+        }
+        
+        document.querySelectorAll('input, select').forEach(el => {
+            el.addEventListener('change', updatePreview);
+            el.addEventListener('input', updatePreview);
+        });
+    </script>
+</body>
+</html>
