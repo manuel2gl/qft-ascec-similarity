@@ -2122,10 +2122,17 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             total_wall_time = 0
             if 'start_time' in cache:
                 total_wall_time = time.time() - cache['start_time']
-                hours = int(total_wall_time // 3600)
+                total_hours = int(total_wall_time // 3600)
                 minutes = int((total_wall_time % 3600) // 60)
                 seconds = int(total_wall_time % 60)
-                f.write(f"  Total time: {hours}h {minutes}m {seconds}s\n\n")
+                
+                # Format with days if more than 24 hours
+                if total_hours >= 24:
+                    days = total_hours // 24
+                    hours = total_hours % 24
+                    f.write(f"  Total time: {days}d {hours}h {minutes}m {seconds}s\n\n")
+                else:
+                    f.write(f"  Total time: {total_hours}h {minutes}m {seconds}s\n\n")
             
             # Timings for individual modules with percentages (skip Similarity stages)
             f.write("Timings for individual modules:\n")
@@ -5967,11 +5974,31 @@ def group_files_by_base(directory='.'):
 
 # Merge XYZ functionality - integrated from mergexyz_files.py
 def get_sort_key(filename):
-    """Extract the first configuration number after an underscore before .xyz for sorting."""
+    """Extract the configuration number from filename for sorting.
+    
+    Handles various patterns:
+    - motif_28_opt.xyz -> 28
+    - opt_conf_3.xyz -> 3
+    - result_123.xyz -> 123
+    - any_456.xyz -> 456
+    """
     import re
-    match = re.search(r'_(\d+)\.xyz', filename)
-    if match:
-        return int(match.group(1))
+    # Try multiple patterns in order of specificity
+    patterns = [
+        r'motif_(\d+)_opt\.xyz',    # motif_28_opt.xyz
+        r'motif_(\d+)\.xyz',         # motif_28.xyz
+        r'opt_conf_(\d+)\.xyz',      # opt_conf_3.xyz
+        r'result_(\d+)\.xyz',        # result_123.xyz
+        r'conf_(\d+)\.xyz',          # conf_20.xyz
+        r'_(\d+)\.xyz',              # any_123.xyz (general pattern)
+        r'(\d+)\.xyz'                # 123.xyz (number only)
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, filename)
+        if match:
+            return int(match.group(1))
+    
     return float('inf')
 
 
@@ -7157,6 +7184,7 @@ class WorkflowContext:
     similarity_args: List[str] = dataclasses.field(default_factory=list)  # Store all similarity args
     is_workflow: bool = False  # True when running in workflow mode (with , or then separators)
     max_attempts_per_calc: int = 5  # Maximum retry attempts per individual calculation/optimization (set by --attempt flag)
+    ascec_parallel_cores: int = 0  # Number of cores for parallel processing (0 = auto-detect, capped at 12)
     # Exclude patterns for calc and opt stages
     calc_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'calc1': [2, 5, 6, 7, 8, 9]}
     opt_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'opt1': [2, 5, 6, 7, 8, 9]}
@@ -8379,6 +8407,30 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
     
+    # Read ASCEC parallel cores from input file (line 11, second value)
+    # Default to 0 (auto-detect) if not specified or if input file doesn't exist
+    try:
+        if os.path.exists(input_file):
+            with open(input_file, 'r') as f:
+                lines = f.readlines()
+                config_line_count = 0
+                for line in lines:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    config_line_count += 1
+                    if config_line_count == 11:  # Line 11: nprocs
+                        parts = line.split('#')[0].strip().split()
+                        if len(parts) > 1:
+                            # User explicitly specified ASCEC cores
+                            context.ascec_parallel_cores = int(parts[1])
+                        else:
+                            # Only QM procs specified, use auto-detect (0)
+                            context.ascec_parallel_cores = 0
+                        break
+    except (ValueError, IndexError, IOError):
+        context.ascec_parallel_cores = 0  # Default to auto-detect if parsing fails
+    
     # Use protocol-specific cache filename with random seed to support parallel protocols
     # First, check if there's an existing protocol cache file for THIS input file
     import glob
@@ -9224,6 +9276,20 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             opt_result['critical_threshold'] = max_critical
                         if max_skipped is not None:
                             opt_result['skipped_threshold'] = max_skipped
+                        
+                        # Add motifs source info if available
+                        if hasattr(context, 'opt_motifs_source') and context.opt_motifs_source:
+                            opt_result['motifs_source'] = context.opt_motifs_source
+                        
+                        # Add completion counts if available
+                        if hasattr(context, 'opt_completed') and context.opt_completed is not None:
+                            opt_result['completed'] = context.opt_completed
+                        if hasattr(context, 'opt_total') and context.opt_total is not None:
+                            opt_result['total'] = context.opt_total
+                        
+                        # Add similarity folder info if available
+                        if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+                            opt_result['similarity_folder'] = context.opt_sim_folder
                         
                         update_protocol_cache(opt_key, 'completed', result=opt_result, cache_file=cache_file)
                         
@@ -10898,6 +10964,12 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     
     # Build command - pass '1' via stdin to auto-select the first folder
     cmd = ['python', similarity_script] + other_args
+    
+    # Add --cores if not already specified and user explicitly set ascec_parallel_cores in input file
+    # (ascec_parallel_cores > 0 means it was explicitly set)
+    has_cores_arg = any(arg.startswith('--cores') or arg.startswith('-j') for arg in other_args)
+    if not has_cores_arg and hasattr(context, 'ascec_parallel_cores') and context.ascec_parallel_cores > 0:
+        cmd.extend(['--cores', str(context.ascec_parallel_cores)])
     
     # If this is a redo and we have a list of recalculated files, pass them for incremental update
     if hasattr(context, 'recalculated_files') and context.recalculated_files:
@@ -12647,27 +12719,37 @@ def main_ascec_integrated():
     
     # STANDARD SINGLE-COMMAND MODE (backward compatibility)
     # Setup argument parser - use parse_known_args to handle shell expansion
-    parser = argparse.ArgumentParser(description="ASCEC: Annealing Simulation")
-    parser.add_argument("command", help="Command: input file path, 'box' to analyze box length requirements, 'launcher' to merge launcher scripts, 'diagram' to generate annealing diagrams, 'calc' to create calculation system, 'opt' to create optimization system, 'merge' to combine XYZ files, 'update' to update existing input files, 'sort' to organize calculation results, or 'sim' to run similarity analysis")
-    parser.add_argument("arg1", nargs='?', default=None, 
-                       help="Second argument: replication mode (e.g., 'r3'), template file for calc, etc.")
-    parser.add_argument("arg2", nargs='?', default=None,
-                       help="Third argument: launcher template for calc command")
-    parser.add_argument("--v", action="store_true", help="Verbose output: print detailed steps every 10 cycles.")
-    parser.add_argument("--va", action="store_true", help="Very verbose output: print detailed steps for every cycle.")
-    parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified.")
+    parser = argparse.ArgumentParser(
+        description="ASCEC: Annealing Simulation",
+        usage="ascec [-h] [-v] [--va] [--standard] [--nosum] [--justsum] [--nobox] command [arg1] [arg2]",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  ascec example.in box     Box size suggestion for input file
+  ascec example.in rN      Replicated runs (e.g., r3 does 3 annealings)
+  ascec example.in calc    Create calculation system from annealing results
+  ascec example.in sort    Organize files, create summary and combined files
+  ascec example.in opt     Create optimization system from similarity-calc results
+  ascec example.in sim     Call similarity script to perform clustering
+""")
+    parser.add_argument("command", metavar="command", 
+                       help="Input file path or special command")
+    parser.add_argument("arg1", nargs='?', default=None, metavar="arg1",
+                       help="Mode: 'box', 'rN' (e.g., r3), 'calc', 'sort', 'opt', 'sim'")
+    parser.add_argument("arg2", nargs='?', default=None, metavar="arg2",
+                       help="Additional argument (e.g., launcher template for calc)")
+    parser.add_argument("-v", "--v", action="store_true", help="Verbose output: print steps every 10 cycles")
+    parser.add_argument("--va", action="store_true", help="Very verbose output: print steps for every cycle")
+    parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified")
     
     # Sort command arguments (used when command='sort')
     parser.add_argument("--nosum", action="store_true", help="Skip summary creation (for sort command)")
     parser.add_argument("--justsum", action="store_true", help="Just create summary without sorting (for sort command)")
-    parser.add_argument("--target-sim-folder", type=str, default=None, help="Target similarity folder (internal use)")
-    parser.add_argument("--reuse-existing", action="store_true", help="Reuse existing similarity folder if it exists (for sort command)")
+    # Internal arguments (hidden from help)
+    parser.add_argument("--target-sim-folder", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--reuse-existing", action="store_true", help=argparse.SUPPRESS)
     
-    parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (files with dummy atoms for visualization).")
-    parser.add_argument("--conformational", type=float, default=None, 
-                       help="Override conformational move probability from input file (0.0-1.0)")
-    parser.add_argument("--maxdihedral", type=float, default=None,
-                       help="Override maximum dihedral rotation angle from input file (degrees)")
+    parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (visualization)")
     
     # Use parse_known_args to handle shell expansion gracefully
     args, unknown_args = parser.parse_known_args()
@@ -12946,14 +13028,6 @@ def main_ascec_integrated():
             sys.exit(1)
             
         read_input_file(state, input_file)
-        
-        # Apply command-line overrides for conformational parameters (if provided)
-        if args.conformational is not None:
-            state.conformational_move_prob = max(0.0, min(1.0, args.conformational))  # Clamp to [0,1]
-            _print_verbose(f"Command-line override: Conformational move probability set to {state.conformational_move_prob*100:.1f}%", 1, state)
-        if args.maxdihedral is not None:
-            state.max_dihedral_angle_rad = np.radians(args.maxdihedral)  # Convert degrees to radians
-            _print_verbose(f"Command-line override: Maximum dihedral angle set to {args.maxdihedral:.1f} degrees", 1, state)
 
         # Set output directory to the directory containing the input file
         state.output_dir = run_dir
@@ -13743,6 +13817,42 @@ if __name__ == "__main__":
             analyze_box_length_from_xyz(xyz_file, num_molecules)
         elif sys.argv[1] == "test_box":
             test_box_length_analysis()
+        elif sys.argv[1] == "input":
+            # Open the web-based input generator
+            import http.server
+            import socketserver
+            import webbrowser
+            from functools import partial
+            
+            port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            web_dir = os.path.join(script_dir, 'web')
+            
+            if not os.path.exists(web_dir) or not os.path.exists(os.path.join(web_dir, 'ascec_input_generator.html')):
+                print("Error: Web input generator not found.")
+                print(f"Expected at: {web_dir}/ascec_input_generator.html")
+                sys.exit(1)
+            
+            os.chdir(web_dir)
+            handler = partial(http.server.SimpleHTTPRequestHandler, directory=web_dir)
+            
+            try:
+                with socketserver.TCPServer(("", port), handler) as httpd:
+                    url = f"http://localhost:{port}/ascec_input_generator.html"
+                    print(f"\n  ASCEC Input Generator")
+                    print(f"  ─────────────────────")
+                    print(f"  Opening: {url}")
+                    print(f"  Press Ctrl+C to stop\n")
+                    webbrowser.open(url)
+                    httpd.serve_forever()
+            except OSError as e:
+                if "Address already in use" in str(e):
+                    print(f"Error: Port {port} is already in use.")
+                    print(f"Try: python ascec-v04.py input {port + 1}")
+                else:
+                    raise
+            except KeyboardInterrupt:
+                print("\n  Server stopped.")
         else:
             main_ascec_integrated()
     else:
