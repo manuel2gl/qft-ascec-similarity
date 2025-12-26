@@ -12919,29 +12919,36 @@ examples:
                 if num_replicas <= 0:
                     raise ValueError("Number of replicas must be positive")
                 
-                # Check if there's a --box flag in remaining arguments
+                # Check if there's a --box flag in remaining arguments (positional arg2, unknown_args, or raw argv)
                 box_size_override = None
+                candidates = []
                 if args.arg2 is not None:
-                    arg2_lower = args.arg2.lower()
-                    if arg2_lower.startswith('--box'):
-                        # Extract packing percentage from flag (e.g., --box10 -> 10%)
-                        try:
-                            packing_str = arg2_lower.replace('--box', '')
+                    candidates.append(args.arg2)
+                if unknown_args:
+                    candidates.extend(unknown_args)
+                # Also check raw argv as a last resort
+                candidates.extend(sys.argv[1:])
+
+                for candidate in candidates:
+                    try:
+                        if isinstance(candidate, str) and candidate.lower().startswith('--box'):
+                            packing_str = candidate.lower().replace('--box', '')
                             if packing_str:
                                 packing_percent = float(packing_str)
-                                
                                 # Get box size recommendation for this packing percentage
                                 recommended_box = get_box_size_recommendation(input_file, packing_percent)
-                                
                                 if recommended_box is not None:
                                     box_size_override = recommended_box
                                     print(f"Using recommended box size: {box_size_override:.1f} Å ({packing_percent}% effective packing)")
                                 else:
                                     print(f"Warning: Could not determine box size for {packing_percent}% packing. Using original box size.")
+                                break
                             else:
                                 print("Warning: Invalid --box flag format. Expected --box<number> (e.g., --box10)")
-                        except ValueError:
-                            print(f"Warning: Could not parse packing percentage from '{args.arg2}'. Using original box size.")
+                    except ValueError:
+                        print(f"Warning: Could not parse packing percentage from '{candidate}'. Using original box size.")
+                    except Exception:
+                        continue
                 
                 # Create replicated runs and exit
                 create_replicated_runs(input_file, num_replicas, box_size=box_size_override)
