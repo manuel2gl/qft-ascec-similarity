@@ -66,11 +66,11 @@ version = "* ASCEC-v04: Nov-2025 *"  # Version of the ASCEC script
 def print_version_banner(script_name="ASCEC"):
     """Print the ASCII art banner with UDEA logo and version information."""
     banner = """
-======================================================================
+===========================================================================
 
-                        *********************                         
-                        *     A S C E C     *                         
-                        *********************                         
+                           *********************                           
+                           *     A S C E C     *                           
+                           *********************                           
 
                              √≈≠==≈                                  
    √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       
@@ -85,17 +85,17 @@ def print_version_banner(script_name="ASCEC"):
           ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ 
 
 
-            Universidad de Antioquia - Medellín - Colombia            
+               Universidad de Antioquia - Medellín - Colombia              
 
 
-               Annealing Simulado Con Energía Cuántica                
+                  Annealing Simulado Con Energía Cuántica                  
 
-                       {version}                        
+                           {version}                           
 
-                     Química Física Teórica - QFT                     
+                        Química Física Teórica - QFT                       
 
 
-======================================================================
+===========================================================================
 """.format(version=version)
     print(banner)
 
@@ -825,12 +825,12 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
 
     # Print the new ASCII art header
     
-    # Helper function to center text within 70 characters
-    def center_text(text, width=70):
+    # Helper function to center text within 75 characters
+    def center_text(text, width=75):
         return text.center(width)
     
     # Write to the file handle
-    print("======================================================================", file=output_file_handle)
+    print("===========================================================================", file=output_file_handle)
     print("", file=output_file_handle)
     print(center_text("*********************"), file=output_file_handle)
     print(center_text("*     A S C E C     *"), file=output_file_handle)
@@ -859,7 +859,7 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
     print(center_text("Química Física Teórica - QFT"), file=output_file_handle)
     print("", file=output_file_handle)
     print("", file=output_file_handle)
-    print("======================================================================", file=output_file_handle)
+    print("===========================================================================", file=output_file_handle)
     print("", file=output_file_handle)
     print("Elemental composition of the system:", file=output_file_handle)
     for line in element_composition_lines:
@@ -2099,7 +2099,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
         secs = seconds % 60
         return f"{hours}:{minutes}:{secs:.3f}"
     
-    def center_text(text: str, width: int = 70) -> str:
+    def center_text(text: str, width: int = 75) -> str:
         """Center text within given width."""
         padding = (width - len(text)) // 2
         return " " * padding + text
@@ -2123,7 +2123,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
     try:
         with open(output_file, 'w') as f:
             # ASCII Logo Header
-            f.write("=" * 70 + "\n\n")
+            f.write("=" * 75 + "\n\n")
             f.write(center_text("*********************") + "\n")
             f.write(center_text("*     A S C E C     *") + "\n")
             f.write(center_text("*********************") + "\n")
@@ -2144,9 +2144,9 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             f.write(center_text("Annealing Simulado Con Energía Cuántica") + "\n\n")
             f.write(center_text("* ASCEC-v04: Nov-2025 *") + "\n\n")
             f.write(center_text("Química Física Teórica - QFT") + "\n\n")
-            f.write("=" * 70 + "\n")
+            f.write("=" * 75 + "\n")
             f.write(center_text("Protocol workflow summary") + "\n")
-            f.write("=" * 70 + "\n\n")
+            f.write("=" * 75 + "\n\n")
             
             # Timing Overview
             if 'start_time_str' in cache:
@@ -12347,10 +12347,10 @@ def main_ascec_integrated():
             sys.exit(1)
         
         # Print ASCII logo
-        print("\n======================================================================")
+        print("\n===========================================================================")
         
         # Helper function to center text
-        def center_text(text, width=70):
+        def center_text(text, width=75):
             return text.center(width)
         
         print(center_text("*********************"))
@@ -12380,7 +12380,7 @@ def main_ascec_integrated():
         print("")
         print(center_text("Química Física Teórica - QFT"))
         print("")
-        print("======================================================================")
+        print("===========================================================================")
         print("\nProtocol mode activated")
         
         # Store original protocol text for summary
