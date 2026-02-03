@@ -34,6 +34,43 @@ HARTREE_TO_EV = 27.211386245988  # eV per Hartree
 # Script version
 version = "* Similarity-v01: Jun-2025 *"
 
+def print_version_banner():
+    """Print the ASCII art banner with UDEA logo and version information."""
+    banner = """
+===========================================================================
+
+                        ***************************                        
+                          * S I M I L A R I T Y *                          
+                        ***************************                        
+
+                             √≈≠==≈                                  
+   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       
+     ÷++÷       ÷++÷           =++=                     ÷×××××=      
+     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      
+     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     
+     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    
+     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    
+     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   
+      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   
+       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- 
+          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ 
+
+
+               Universidad de Antioquia - Medellín - Colombia              
+
+
+           Clustering Analysis for Quantum Chemistry Calculations          
+
+                        {version}                       
+
+
+                        Química Física Teórica - QFT                       
+
+
+===========================================================================
+""".format(version=version)
+    print(banner)
+
 # Global variables
 VERBOSE = False  # Control verbosity of output
 _CPU_COUNT_CACHE = None  # Cache CPU count to avoid repeated calls
@@ -2657,7 +2694,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     summary_file_content_lines.append("     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      ")
     summary_file_content_lines.append("     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     ")
     summary_file_content_lines.append("     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    ")
-    summary_file_content_lines.append("     =++=       =++=   =+÷     =++=   =+---×××××÷×≠    =×+×÷=÷×+-÷    ")
+    summary_file_content_lines.append("     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    ")
     summary_file_content_lines.append("     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   ")
     summary_file_content_lines.append("      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   ")
     summary_file_content_lines.append("       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- ")
@@ -3473,40 +3510,63 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
 # Main execution block
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Process quantum chemistry log files for clustering and analysis.")
+    parser = argparse.ArgumentParser(
+        description="Similarity v01 - Quantum chemistry output clustering and analysis",
+        usage="similarity [options] [input_folder]",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+examples:
+  similarity --th=0.9              Cluster with 90%% similarity threshold
+  similarity --th=0.95 --rmsd      Add RMSD validation (default 1.0 Å)
+  similarity --th=0.9 -j8          Use 8 CPU cores
+  similarity calculation/          Process specific folder
+
+common workflows:
+  similarity --th=0.9              Basic clustering
+  similarity --th=0.95 --rmsd=0.5  High similarity + tight RMSD
+  similarity --motif=0.8           Separate motif clustering threshold
+""")
     parser.add_argument("--threshold", "--th", type=float, default=1.0,
-                        help="Similarity threshold for clustering (e.g., 0.999 for very similar).")
+                        help="Similarity threshold (0-1, e.g., 0.9 = 90%% similar)")
     parser.add_argument("--rmsd", type=float, nargs='?', const=1.0, default=None, 
-                        help="Enable RMSD post-processing and set the RMSD validation threshold in Angstroms (default: 1.0 Å if flag is present without a value). If not provided at all, RMSD validation is skipped.")
+                        help="RMSD threshold in Å (default: 1.0 if flag used)")
     parser.add_argument("--output-dir", type=str, default=None,
-                        help="Specify the base directory for all output folders (dendrograms, extracted data, clusters). Defaults to the current working directory.")
+                        help="Output directory (default: current)")
     parser.add_argument("--reprocess-files", action="store_true",
-                        help="Force re-extraction of data from log files, ignoring any existing cache.")
+                        help="Force re-extraction, ignore cache")
     parser.add_argument("--compare", nargs='+', 
-                        help="Compare multiple specific log/out files (e.g., --compare file1.log file2.log file3.log). Minimum 2 files required.")
+                        help="Compare specific files (min 2)")
     parser.add_argument("--weights", type=str, default="", 
-                        help="Specify feature weights as a string, e.g., '(electronic_energy=0.1)(homo_lumo_gap=0.2)'.")
+                        help="Feature weights: '(energy=0.1)(gap=0.2)'")
     parser.add_argument("--min-std-threshold", type=float, default=1e-6, 
-                        help="Minimum standard deviation for a feature to be scaled. Features with std dev below this are treated as constant (0.0). Default is 1e-6.")
+                        help=argparse.SUPPRESS)  # Advanced option, hide from help
     parser.add_argument("--abs-tolerance", type=str, default="",
-                        help="Specify absolute tolerances for features as a string, e.g., '(electronic_energy=1e-5)(dipole_moment=1e-3)'. Features with max difference below tolerance are zeroed out for scaling.")
+                        help=argparse.SUPPRESS)  # Advanced option, hide from help
     parser.add_argument("--motif", type=float, default=None,
-                        help="Threshold for final motif clustering (excluding H-bond count). If not specified, uses the same value as --threshold.")
+                        help="Motif clustering threshold (default: same as --th)")
     parser.add_argument("--cores", "-j", type=int, default=None,
-                        help="Number of CPU cores to use for parallel processing. Default: auto-detect")
+                        help="CPU cores (default: auto-detect)")
     parser.add_argument("-T", "--temperature", type=float, default=298.15,
-                        help="Temperature in Kelvin for Boltzmann population analysis. Default: 298.15 K")
+                        help="Temperature in K for Boltzmann analysis (default: 298.15)")
     parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Enable verbose output showing detailed information for each step.")
+                        help="Verbose output")
+    parser.add_argument("-V", "--version", action="store_true",
+                        help="Show version and exit")
     parser.add_argument("--update-cache", type=str, default=None,
-                        help="File containing list of basenames to update in cache (for incremental redo). One basename per line.")
+                        help=argparse.SUPPRESS)  # Advanced option, hide from help
     parser.add_argument('input_source', nargs='?', default=None, 
-                        help='Input folder to process (optional). If not provided, interactive mode is used.')
+                        help='Input folder (optional, interactive if omitted)')
 
 
     # Preprocess arguments to handle -j8 format
     processed_args = preprocess_j_argument(sys.argv[1:])
     args = parser.parse_args(processed_args)
+    
+    # Check if version is requested
+    if args.version:
+        print_version_banner()
+        sys.exit(0)
+    
     clustering_threshold = args.threshold
     rmsd_validation_threshold = args.rmsd 
     output_directory = args.output_dir

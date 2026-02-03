@@ -63,6 +63,42 @@ create_box_xyz_copy = True
 
 version = "* ASCEC-v04: Nov-2025 *"  # Version of the ASCEC script
 
+def print_version_banner(script_name="ASCEC"):
+    """Print the ASCII art banner with UDEA logo and version information."""
+    banner = """
+======================================================================
+
+                        *********************                         
+                        *     A S C E C     *                         
+                        *********************                         
+
+                             √≈≠==≈                                  
+   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       
+     ÷++÷       ÷++÷           =++=                     ÷×××××=      
+     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      
+     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     
+     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    
+     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    
+     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   
+      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   
+       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- 
+          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ 
+
+
+            Universidad de Antioquia - Medellín - Colombia            
+
+
+               Annealing Simulado Con Energía Cuántica                
+
+                       {version}                        
+
+                     Química Física Teórica - QFT                     
+
+
+======================================================================
+""".format(version=version)
+    print(banner)
+
 # Symbol for dummy atoms used to mark box corners.
 
 # WARNING: 'X' is not a standard element.
@@ -6089,16 +6125,23 @@ def parse_orca_output(filepath):
         print(f"Error reading file {filepath}: {e}")
         return None
 
-    # Check for ORCA signature
-    if "ORCA - Electronic Structure Program" not in content:
-        if "*******" not in content:
-            print(f"File {filepath} is not an ORCA output file.")
-            return None
+    # Check for ORCA signature (compatible with ORCA 5 and 6)
+    orca_signatures = [
+        "O   R   C   A",  # ASCII art header (ORCA 5 and 6)
+        "ORCA - Electronic Structure Program",  # Alternative text header
+        "Program Version 5.",  # ORCA 5 version
+        "Program Version 6."   # ORCA 6 version
+    ]
+    is_orca_file = any(sig in content for sig in orca_signatures)
+    if not is_orca_file:
+        print(f"File {filepath} is not an ORCA output file.")
+        return None
 
     results['input_file'] = os.path.splitext(os.path.basename(filepath))[0]
 
-    # Extract final single point energy
-    energy_matches = re.findall(r"FINAL SINGLE POINT ENERGY\s*(-?\d+\.\d+)", content)
+    # Extract final single point energy (handles both ORCA 5 and 6 formats)
+    # Pattern matches with or without colon after ENERGY
+    energy_matches = re.findall(r"FINAL SINGLE POINT ENERGY:?\s*([-+]?\d+\.\d+)", content)
     if energy_matches:
         optimization_done_index = content.find("*** OPTIMIZATION RUN DONE ***")
         if optimization_done_index != -1:
@@ -6991,173 +7034,51 @@ def execute_box_analysis(input_file: str):
 
 # 16. main ascec integrated function
 def print_all_commands():
-    """Print comprehensive command line usage information."""
-    print("=" * 80)
-    print("ASCEC v04 - All Available Commands")
-    print("=" * 80)
-    print()
-    
-    print("1. SIMULATION COMMANDS:")
-    print("-" * 40)
-    print("  Run single simulation:")
-    print("    python ascec-v04.py input_file.in > output.out  # Run simulation with output redirect")
-    print("    python ascec-v04.py input_file.in --v > output.out  # Verbose mode")
-    print("    python ascec-v04.py input_file.in --va > output.out # Very verbose mode")
-    print("    python ascec-v04.py input_file.in --standard > output.out # Standard Metropolis")
-    print("    python ascec-v04.py input_file.in --nobox > output.out    # Disable box XYZ files")
-    print()
-    print("  Analyze box length requirements:")
-    print("    python ascec-v04.py input_file.in box        # Show box analysis in terminal")
-    print("    python ascec-v04.py box input_file.in        # Alternative syntax")
-    print("    python ascec-v04.py input_file.in box > box.txt  # Save analysis to file")
-    print()
-    
-    print("  Run replicated simulations:")
-    print("    python ascec-v04.py input_file.in r3         # Create 3 replicas")
-    print("    python ascec-v04.py input_file.in r5         # Create 5 replicas")
-    print("    python ascec-v04.py input_file.in r3 --box10 # Create 3 replicas with 10% packing")
-    print("    python ascec-v04.py input_file.in r3 --box5  # Create 3 replicas with 5% packing")
-    print()
-    
-    print("2. CALCULATION SYSTEM COMMANDS:")
-    print("-" * 40)
-    print("  Create QM input files from simulation results:")
-    print("    python ascec-v04.py calc template.inp launcher.sh     # Uses result_*.xyz or combined_results.xyz")
-    print("    python ascec-v04.py calc template.com launcher.sh     # Gaussian version")
-    print("  ")
-    print("  Create optimization input files from combined/motif files:")
-    print("    python ascec-v04.py opt template.inp launcher.sh      # Uses *combined*.xyz and motif_*.xyz files")
-    print("    python ascec-v04.py opt template.com launcher.sh      # Gaussian version, creates optimization/ folder")
-    print("  ")
-    print("  Merge XYZ files:")
-    print("    python ascec-v04.py merge                             # Interactive selection (all .xyz files)")
-    print("    python ascec-v04.py merge result                      # Interactive selection (result_*.xyz files only)")
-    print("  ")
-    print("  Update existing QM input files with new template:")
-    print("    python ascec-v04.py update new_template.inp             # Interactive selection (same extension)")
-    print("    python ascec-v04.py update new_template.inp pattern     # Interactive selection (filtered by pattern)")
-    print()
-    
-    print("3. ORGANIZATION COMMANDS:")
-    print("-" * 40)
-    print("  Sort and organize calculation results:")
-    print("    python ascec-v04.py sort                     # Full sort with summary")
-    print("    python ascec-v04.py sort --nosum             # Sort without summary")
-    print("    python ascec-v04.py sort --justsum           # Create summaries only")
-    print()
-    
-    print("  Merge launcher scripts:")
-    print("    python ascec-v04.py launcher                 # Merge all launcher scripts")
-    print()
-    
-    print("  Generate annealing diagrams:")
-    print("    python ascec-v04.py diagram                  # Generate/regenerate all diagrams")
-    print("    python ascec-v04.py diagram --scaled         # Generate with intelligent scaling")
-    print()
-    
-    print("4. ANALYSIS COMMANDS:")
-    print("-" * 40)
-    print("  Similarity analysis:")
-    print("    python ascec-v04.py sim --threshold 0.9      # Run similarity analysis")
-    print("    python ascec-v04.py sim --help               # See similarity options")
-    print()
-    
-    print("5. INPUT FILE FORMAT:")
-    print("-" * 40)
-    print("  Line 1: Number of different Temperatures")
-    print("  Line 2: Initial Temperature")
-    print("  Line 3: Temperature schedule (linear/geometric)")
-    print("  Line 4: Cube length")
-    print("  Line 5: Temperature step parameters")
-    print("  Line 6: MaxCycle [floor_value]    # floor_value optional, default: 10")
-    print("  Line 7: Max displacement and rotation")
-    print("  Line 8: QM program and alias")
-    print("  Line 9: QM method and basis set")
-    print("  Line 10: nprocs (QM calculations and ASCEC evaluation)")
-    print("           Format: qm_nprocs [ascec_nprocs]")
-    print("           - qm_nprocs: number of cores for each QM calculation")
-    print("           - ascec_nprocs: optional number of cores for ASCEC parallel operations")
-    print("           Examples:")
-    print("             '1 4'  = 1 core for QM, 4 cores for ASCEC")
-    print("             '1'    = 1 core for QM, ASCEC auto-decides parallel cores")
-    print("  Line 11: Charge and multiplicity")
-    print("  Line 12+: Molecule definitions")
-    print()
-    
-    print("6. TEMPLATE FILE FORMAT (for update command):")
-    print("-" * 40)
-    print("  Template should contain:")
-    print("    # name                         # This will be replaced with config info")
-    print("    ! Opt B3LYP 6-311++g**         # QM method line")
-    print("    %pal")
-    print("      nprocs 8")
-    print("    end")
-    print("    %maxcore 1000")
-    print("    %geom")
-    print("      maxiter 5000")
-    print("    end")
-    print("    * xyz 0 1                      # Coordinates will be inserted here")
-    print("    *")
-    print()
-    
-    print("7. PROTOCOL MODE (AUTOMATED WORKFLOWS):")
-    print("-" * 40)
-    print("  Embed workflow in input file and run automatically:")
-    print("    In your .in file, add protocol section:")
-    print("      .in,")
-    print("      r3 --retry=5,")
-    print("      calc -c --redo=3 --retry=10 ../preopt.inp ../launcher.sh,")
-    print("      similarity --th=2")
-    print()
-    print("  Run protocol:")
-    print("    python ascec-v04.py input.in protocol")
-    print()
-    print("  Restart from specific stage:")
-    print("    python ascec-v04.py input.in protocol 2      # Restart from stage 2")
-    print("    python ascec-v04.py input.in protocol calc   # Restart 1st calc stage")
-    print("    python ascec-v04.py input.in protocol calc2  # Restart 2nd calc stage")
-    print("    python ascec-v04.py input.in protocol opt    # Restart 1st opt stage")
-    print()
-    
-    print("8. EXCLUSION MANAGEMENT:")
-    print("-" * 40)
-    print("  Exclude specific calculations or optimizations:")
-    print("    python ascec-v04.py input.in exclude          # Show current exclusions")
-    print("    python ascec-v04.py input.in exclude calc 2,5-9    # Exclude conf_2, conf_5 to conf_9")
-    print("    python ascec-v04.py input.in exclude calc2 3-10    # Exclude 2nd calc stage files")
-    print("    python ascec-v04.py input.in exclude opt 2,5-9     # Exclude motif_02, motif_05 to motif_09")
-    print()
-    print("  Clear exclusions:")
-    print("    python ascec-v04.py input.in exclude clear         # Clear all exclusions")
-    print("    python ascec-v04.py input.in exclude calc clear   # Clear calc exclusions only")
-    print("    python ascec-v04.py input.in exclude opt clear    # Clear opt exclusions only")
-    print()
-    
-    print("9. EXAMPLES:")
-    print("-" * 40)
-    print("  Complete manual workflow:")
-    print("    1. python ascec-v04.py input.in box          # Check box requirements first")
-    print("    2. python ascec-v04.py input.in r3           # Create 3 replicated runs")
-    print("    3. python ascec-v04.py merge                 # Combine XYZ files")
-    print("    4. python ascec-v04.py calc template.inp launcher.sh")
-    print("    5. cd calculation && ./launcher_orca.sh")
-    print("    6. cd .. && python ascec-v04.py sort")
-    print("    7. python ascec-v04.py sim --threshold 0.9")
-    print()
-    
-    print("  Protocol workflow with exclusions:")
-    print("    1. python ascec-v04.py input.in protocol     # Run automated protocol")
-    print("    2. # Protocol pauses if issues found")
-    print("    3. python ascec-v04.py input.in exclude calc 5-10  # Exclude problematic files")
-    print("    4. python ascec-v04.py input.in protocol     # Resume (skips excluded files)")
-    print()
-    
-    print("  Update existing calculations:")
-    print("    python ascec-v04.py update new_template.inp            # Interactive selection (same extension)")
-    print("    python ascec-v04.py update new_template.inp conf_1     # Interactive selection (filtered)")
-    print()
-    
-    print("=" * 80)
+    """Print concise command line usage information."""
+    print("""
+ASCEC v04 - Annealing Simulado con Energía Cuántica
+====================================================
+
+COMMANDS
+--------
+  input.in [options]      Run single annealing simulation
+  input.in box            Analyze box size requirements  
+  input.in rN             Replicated runs (e.g., r3 = 3 replicas)
+  input.in rN --boxP      Replicated runs with P% packing (e.g., r3 --box10)
+  
+  calc template launcher  Create QM inputs from annealing results
+  opt template launcher   Create optimization inputs from motifs
+  sort [--nosum|--justsum] Organize results and create summaries
+  
+  merge [result]          Combine XYZ files interactively
+  update template [pattern] Update existing QM inputs with new template
+  launcher                Merge all launcher scripts
+  diagram [--scaled]      Generate annealing energy diagrams
+  
+  sim [options]           Run similarity/clustering analysis (see: sim --help)
+  input.in protocol [N]   Run automated workflow from input file
+
+OPTIONS
+-------
+  -v, --v        Verbose output (every 10 cycles)
+  --va           Very verbose output (every cycle)
+  --standard     Use standard Metropolis criterion
+  --nobox        Skip box XYZ file generation
+
+WORKFLOW
+--------
+  Manual:   input.in box → input.in r3 → calc → [run QM] → sort → sim
+  Protocol: input.in protocol   (automated workflow defined in .in file)
+
+EXAMPLES
+--------
+  ascec input.in r3                    # 3 replicated annealing runs
+  ascec calc opt.inp launcher.sh       # Create QM inputs + launcher
+  ascec sort                           # Organize outputs, create summary
+  ascec sim --th=0.9                   # Cluster by 90% similarity
+
+For detailed documentation, see README_ASCEC.md
+""")
 
 
 # ============================================================================
@@ -10637,9 +10558,11 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
                                 f.write(f"mkdir -p \"$TMPDIR\"\n")
                                 f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                                f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
+                                # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
+                                f.write(f"$ORCA_ROOT/orca {input_file} > {output_file}\n")
                             elif qm_program == 'gaussian':
-                                f.write(f"$G16_ROOT/g16 {input_file}\n")
+                                # Use GAUSS_ROOT (generic, works with G09 or G16)
+                                f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
                         
                         os.chmod(temp_script, 0o755)
                         
@@ -11491,8 +11414,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             for i, inp_file in enumerate(sorted(launcher_input_files, key=natural_sort_key)):
                 basename = os.path.splitext(inp_file)[0]
                 if qm_program == "orca":
-                    # Use full path from ORCA_ROOT
-                    f.write(f"$ORCA5_ROOT/orca {basename}.inp > {basename}.out")
+                    # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
+                    f.write(f"$ORCA_ROOT/orca {basename}.inp > {basename}.out")
                 else:
                     # For Gaussian, use g16 or g09
                     f.write(f"g16 {basename}.com")
@@ -11939,9 +11862,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename_only}_$$\"\n")
                         f.write(f"mkdir -p \"$TMPDIR\"\n")
                         f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                        f.write(f"$ORCA5_ROOT/orca {input_file} > {output_file}\n")
+                        # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
+                        f.write(f"$ORCA_ROOT/orca {input_file} > {output_file}\n")
                     elif qm_program == 'gaussian':
-                        f.write(f"$G16_ROOT/g16 {input_file}\n")
+                        # Use GAUSS_ROOT (generic, works with G09 or G16)
+                        f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
                 
                 os.chmod(temp_script, 0o755)
                 
@@ -12205,6 +12130,11 @@ def main_ascec_integrated():
     # Ensure glob is accessible throughout this function (imported at module level)
     import glob as _glob_module
     glob = _glob_module  # type: ignore[assignment]
+    
+    # CHECK FOR VERSION COMMAND (early check before other processing)
+    if len(sys.argv) >= 2 and sys.argv[1] in ["--version", "-V", "version"]:
+        print_version_banner("ASCEC")
+        return
     
     # CHECK FOR EXCLUDE COMMAND (pause protocol and add exclusions)
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "exclude":
@@ -12720,39 +12650,51 @@ def main_ascec_integrated():
     # STANDARD SINGLE-COMMAND MODE (backward compatibility)
     # Setup argument parser - use parse_known_args to handle shell expansion
     parser = argparse.ArgumentParser(
-        description="ASCEC: Annealing Simulation",
-        usage="ascec [-h] [-v] [--va] [--standard] [--nosum] [--justsum] [--nobox] command [arg1] [arg2]",
+        description="ASCEC v04 - Annealing Simulado con Energía Cuántica",
+        usage="ascec [options] command [arguments]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+commands:
+  input.in [rN]     Run annealing (rN = N replicas, e.g., r3)
+  input.in box      Analyze box size requirements
+  calc T L          Create QM inputs (T=template, L=launcher)
+  opt T L           Create optimization inputs
+  sort              Organize results, create summaries
+  sim [--th=N]      Similarity clustering analysis
+  help              Show detailed command reference
+
 examples:
-  ascec example.in box     Box size suggestion for input file
-  ascec example.in rN      Replicated runs (e.g., r3 does 3 annealings)
-  ascec example.in calc    Create calculation system from annealing results
-  ascec example.in sort    Organize files, create summary and combined files
-  ascec example.in opt     Create optimization system from similarity-calc results
-  ascec example.in sim     Call similarity script to perform clustering
+  ascec input.in r3                  Run 3 replicated annealings
+  ascec calc opt.inp launcher.sh     Create calculation system
+  ascec sim --th=0.9                 Cluster with 90%% similarity
 """)
     parser.add_argument("command", metavar="command", 
-                       help="Input file path or special command")
+                       help="Input file or command (calc, sort, sim, help, etc.)")
     parser.add_argument("arg1", nargs='?', default=None, metavar="arg1",
-                       help="Mode: 'box', 'rN' (e.g., r3), 'calc', 'sort', 'opt', 'sim'")
+                       help="Mode or template file")
     parser.add_argument("arg2", nargs='?', default=None, metavar="arg2",
-                       help="Additional argument (e.g., launcher template for calc)")
-    parser.add_argument("-v", "--v", action="store_true", help="Verbose output: print steps every 10 cycles")
-    parser.add_argument("--va", action="store_true", help="Very verbose output: print steps for every cycle")
-    parser.add_argument("--standard", action="store_true", help="Use standard Metropolis criterion instead of modified")
+                       help="Additional argument")
+    parser.add_argument("-v", "--v", action="store_true", help="Verbose (print every 10 cycles)")
+    parser.add_argument("--va", action="store_true", help="Very verbose (print every cycle)")
+    parser.add_argument("--standard", action="store_true", help="Standard Metropolis criterion")
     
     # Sort command arguments (used when command='sort')
-    parser.add_argument("--nosum", action="store_true", help="Skip summary creation (for sort command)")
-    parser.add_argument("--justsum", action="store_true", help="Just create summary without sorting (for sort command)")
+    parser.add_argument("--nosum", action="store_true", help="Skip summary creation")
+    parser.add_argument("--justsum", action="store_true", help="Create summary only, no sorting")
     # Internal arguments (hidden from help)
     parser.add_argument("--target-sim-folder", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--reuse-existing", action="store_true", help=argparse.SUPPRESS)
     
-    parser.add_argument("--nobox", action="store_true", help="Disable creation of box XYZ files (visualization)")
+    parser.add_argument("--nobox", action="store_true", help="Disable box XYZ files")
+    parser.add_argument("-V", "--version", action="store_true", help="Show version and exit")
     
     # Use parse_known_args to handle shell expansion gracefully
     args, unknown_args = parser.parse_known_args()
+    
+    # Check if version is requested
+    if getattr(args, 'version', False):
+        print_version_banner("ASCEC")
+        return
     
     # Check if help is requested
     if args.command.lower() in ["help", "--help", "-h", "commands"]:
