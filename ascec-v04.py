@@ -2378,7 +2378,7 @@ qm_program_details = {
         "default_exe": "orca", # Common executable name.
         "input_ext": ".inp",
         "output_ext": ".out",
-        "energy_regex": r"FINAL SINGLE POINT ENERGY:\s*([-+]?\d+\.\d+)\s*(?:Eh|E_h)?", # More robust for ORCA
+        "energy_regex": r"FINAL SINGLE POINT ENERGY\s*:?\s*([-+]?\d+\.\d+)",  # Works for ORCA 5 and 6 (with or without colon)
         "termination_string": "ORCA TERMINATED NORMALLY",
         "alternative_termination": ["****ORCA TERMINATED NORMALLY****", "OPTIMIZATION RUN DONE"],  # Additional termination patterns
     },
@@ -2591,64 +2591,72 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
             process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
         
         # Check for non-zero exit code first
-        if process.returncode != 0:
-            _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 0, state)
+        # NOTE: ORCA 6 (and some ORCA 5 configurations) may return non-zero exit codes
+        # even on successful completion. We need to check the output file content regardless.
+        non_zero_exit = process.returncode != 0
+        
+        if non_zero_exit:
+            _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 2, state)
             if state.qm_program == "orca":
-                _print_verbose(f"  Command executed: {' '.join(qm_command)}", 0, state)
-                _print_verbose(f"  Working directory: {run_dir}", 0, state)
-                _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 0, state)
-                # Also check if output file was created despite non-zero exit
-                if os.path.exists(qm_output_path):
-                    _print_verbose(f"  Output file was created, checking content...", 0, state)
+                _print_verbose(f"  Command executed: {' '.join(qm_command)}", 2, state)
+                _print_verbose(f"  Working directory: {run_dir}", 2, state)
+                if process.stderr:
+                    _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 2, state)
+                # ORCA can return non-zero even on success, continue to check output file
             else:
+                # For non-ORCA programs, non-zero exit is a failure
                 _print_verbose(f"  Command executed: {qm_command}", 0, state)
                 _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 0, state)
                 _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 0, state)
-            status = 0 
-        elif not os.path.exists(qm_output_path):
-            _print_verbose(f"QM output file '{qm_output_path}' was not generated.", 1, state)
-            status = 0 
-        else:
-            with open(qm_output_path, 'r') as f:
-                output_content = f.read()
-            
-            # Check for normal termination string
-            termination_found = qm_program_details[state.ia]["termination_string"] in output_content
-            
-            # For programs with alternative termination patterns, check those too
-            if not termination_found and "alternative_termination" in qm_program_details[state.ia]:
-                for alt_term in qm_program_details[state.ia]["alternative_termination"]:
-                    if alt_term in output_content:
-                        termination_found = True
-                        break
-            
-            if not termination_found:
-                _print_verbose(f"QM program '{state.qm_program}' did not terminate normally for config {call_id}.", 1, state)
                 status = 0
+        
+        # For ORCA (regardless of exit code) or successful exit, check output file
+        if state.qm_program == "orca" or (not non_zero_exit and status != 0):
+            if not os.path.exists(qm_output_path):
+                _print_verbose(f"QM output file '{qm_output_path}' was not generated.", 1, state)
+                status = 0 
             else:
-                match = re.search(qm_program_details[state.ia]["energy_regex"], output_content)
-                if match:
-                    energy = float(match.group(1))
-                    status = 1
+                with open(qm_output_path, 'r') as f:
+                    output_content = f.read()
+                
+                # Check for normal termination string
+                termination_found = qm_program_details[state.ia]["termination_string"] in output_content
+                
+                # For programs with alternative termination patterns, check those too
+                if not termination_found and "alternative_termination" in qm_program_details[state.ia]:
+                    for alt_term in qm_program_details[state.ia]["alternative_termination"]:
+                        if alt_term in output_content:
+                            termination_found = True
+                            break
+                
+                if not termination_found:
+                    _print_verbose(f"QM program '{state.qm_program}' did not terminate normally for config {call_id}.", 1, state)
+                    status = 0
                 else:
-                    # For ORCA, try alternative energy patterns as fallback
-                    if state.qm_program == "orca":
-                        # Try alternative patterns commonly found in ORCA output
-                        fallback_patterns = [
-                            r"Total Energy\s*:\s*([-+]?\d+\.\d+)\s*Eh",
-                            r"E\(SCF\)\s*=\s*([-+]?\d+\.\d+)\s*Eh",
-                            r"TOTAL SCF ENERGY\s*=\s*([-+]?\d+\.\d+)\s*Eh?"
-                        ]
-                        for pattern in fallback_patterns:
-                            match = re.search(pattern, output_content)
-                            if match:
-                                energy = float(match.group(1))
-                                status = 1
-                                _print_verbose(f"Found energy using fallback pattern: {pattern}", 2, state)
-                                break
-                    
-                    if status == 0:
-                        _print_verbose(f"Could not find energy in {state.qm_program} output file: {qm_output_path}", 1, state)
+                    match = re.search(qm_program_details[state.ia]["energy_regex"], output_content)
+                    if match:
+                        energy = float(match.group(1))
+                        status = 1
+                    else:
+                        # For ORCA, try alternative energy patterns as fallback
+                        if state.qm_program == "orca":
+                            # Try alternative patterns commonly found in ORCA output (5.x and 6.x)
+                            fallback_patterns = [
+                                r"FINAL SINGLE POINT ENERGY\s+([-+]?\d+\.\d+)",  # ORCA 5/6 format (no colon)
+                                r"Total Energy\s*:\s*([-+]?\d+\.\d+)\s*Eh",
+                                r"E\(SCF\)\s*=\s*([-+]?\d+\.\d+)\s*Eh",
+                                r"TOTAL SCF ENERGY\s*=\s*([-+]?\d+\.\d+)\s*Eh?"
+                            ]
+                            for pattern in fallback_patterns:
+                                match = re.search(pattern, output_content)
+                                if match:
+                                    energy = float(match.group(1))
+                                    status = 1
+                                    _print_verbose(f"Found energy using fallback pattern: {pattern}", 2, state)
+                                    break
+                        
+                        if status == 0:
+                            _print_verbose(f"Could not find energy in {state.qm_program} output file: {qm_output_path}", 1, state)
     
     except Exception as e:
         _print_verbose(f"An error occurred during QM calculation or parsing: {e}", 0, state)
