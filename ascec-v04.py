@@ -2594,6 +2594,7 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
         # NOTE: ORCA 6 (and some ORCA 5 configurations) may return non-zero exit codes
         # even on successful completion. We need to check the output file content regardless.
         non_zero_exit = process.returncode != 0
+        should_check_output = False  # Flag to determine if we should parse the output file
         
         if non_zero_exit:
             _print_verbose(f"'{state.qm_program}' exited with non-zero status: {process.returncode}.", 2, state)
@@ -2603,15 +2604,19 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                 if process.stderr:
                     _print_verbose(f"  STDERR:\n{_format_stream_output(process.stderr)}", 2, state)
                 # ORCA can return non-zero even on success, continue to check output file
+                should_check_output = True
             else:
                 # For non-ORCA programs, non-zero exit is a failure
                 _print_verbose(f"  Command executed: {qm_command}", 0, state)
                 _print_verbose(f"  STDOUT (first 10 lines):\n{_format_stream_output(process.stdout)}", 0, state)
                 _print_verbose(f"  STDERR (first 10 lines):\n{_format_stream_output(process.stderr)}", 0, state)
                 status = 0
+        else:
+            # Exit code was 0, we should check the output file
+            should_check_output = True
         
-        # For ORCA (regardless of exit code) or successful exit, check output file
-        if state.qm_program == "orca" or (not non_zero_exit and status != 0):
+        # Parse output file if appropriate
+        if should_check_output:
             if not os.path.exists(qm_output_path):
                 _print_verbose(f"QM output file '{qm_output_path}' was not generated.", 1, state)
                 status = 0 
