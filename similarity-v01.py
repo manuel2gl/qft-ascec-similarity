@@ -3,6 +3,7 @@
 import argparse
 import os
 import numpy as np
+import warnings
 # matplotlib import moved to functions that use it for faster startup
 # cclib imported at top level for multiprocessing compatibility
 try:
@@ -11,6 +12,16 @@ try:
 except ImportError:
     CCLIB_AVAILABLE = False
     ccread = None
+
+# OPI (ORCA Python Interface) for ORCA 6.1+ support
+from pathlib import Path as PathLib  # stdlib, always available
+try:
+    from opi.output.core import Output as OPIOutput # type: ignore
+    OPI_AVAILABLE = True
+except ImportError:
+    OPI_AVAILABLE = False
+    OPIOutput = None
+
 # sklearn and scipy imports moved to functions that use them for faster startup
 import glob
 import re
@@ -30,9 +41,10 @@ DEFAULT_TEMPERATURE_K = 298.15  # K (room temperature)
 # Energy conversion constants
 HARTREE_TO_KCAL_MOL = 627.509474  # kcal/mol per Hartree
 HARTREE_TO_EV = 27.211386245988  # eV per Hartree
+BOHR_TO_ANGSTROM = 0.529177210903  # Angstrom per Bohr
 
 # Script version
-version = "* Similarity-v01: Jun-2025 *"
+version = "* Similarity-v01: Feb-2026 *"
 
 def print_version_banner():
     """Print the ASCII art banner with UDEA logo and version information."""
@@ -518,6 +530,85 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
             'max_hbond_angle': None, 'std_hbond_angle': None
         }
 
+def detect_orca_version(logfile_path):
+    """
+    Detect ORCA version from output file.
+    
+    Args:
+        logfile_path: Path to ORCA output file (.out or .log)
+        
+    Returns:
+        Tuple of (major, minor) version numbers, or None if not detected
+    """
+    try:
+        with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f:
+            # Read first 50 lines where version info typically appears
+            for i, line in enumerate(f):
+                if i > 50:
+                    break
+                # Look for version pattern like "Program Version 6.1.0"
+                match = re.search(r'Program Version\s+(\d+)\.(\d+)', line, re.IGNORECASE)
+                if match:
+                    major = int(match.group(1))
+                    minor = int(match.group(2))
+                    return (major, minor)
+    except Exception:
+        pass
+    return None
+
+def choose_parser(logfile_path):
+    """
+    Automatically choose the appropriate parser based on file and available libraries.
+    
+    Args:
+        logfile_path: Path to ORCA output file
+        
+    Returns:
+        'opi' or 'cclib', or raises error if no suitable parser
+    """
+    version = detect_orca_version(logfile_path)
+    
+    # If version detected
+    if version:
+        major, minor = version
+        
+        # ORCA 6.1+ requires OPI (use tuple comparison for correct 7.0, 8.0 etc.)
+        if (major, minor) >= (6, 1):
+            if OPI_AVAILABLE:
+                return 'opi'
+            else:
+                raise RuntimeError(
+                    f"ORCA version {major}.{minor} detected, which requires OPI. "
+                    "Please install OPI: pip install orca-pi"
+                )
+        
+        # ORCA 6.0 not supported by either
+        elif major == 6 and minor == 0:
+            raise RuntimeError(
+                f"ORCA version 6.0 is not supported. Please use ORCA 5.0.x or ORCA 6.1+. "
+                "cclib supports up to ORCA 5.0.x, OPI supports ORCA 6.1+"
+            )
+        
+        # ORCA <=5.0 can use cclib
+        else:
+            if CCLIB_AVAILABLE:
+                return 'cclib'
+            elif OPI_AVAILABLE:
+                warnings.warn(
+                    f"ORCA version {major}.{minor} detected. OPI will be used, but cclib is recommended for ORCA <=5.0"
+                )
+                return 'opi'
+            else:
+                raise RuntimeError("Neither cclib nor OPI available. Please install one of them.")
+    
+    # If version not detected, use available parser (prefer OPI for newer files)
+    if OPI_AVAILABLE:
+        return 'opi'
+    elif CCLIB_AVAILABLE:
+        return 'cclib'
+    else:
+        raise RuntimeError("Neither cclib nor OPI available. Please install one of them.")
+
 def process_file_parallel_wrapper(file_path):
     """
     Wrapper function for parallel processing of files.
@@ -537,12 +628,34 @@ def process_file_parallel_wrapper(file_path):
 def extract_properties_from_logfile(logfile_path):
     """
     Extract molecular properties from quantum chemistry log file.
+    Supports both cclib (ORCA <=5.0) and OPI (ORCA >=6.1).
     
     Args:
         logfile_path (str): Path to .log or .out file
         
     Returns:
         dict: Extracted properties, or None if parsing fails
+    """
+    if not CCLIB_AVAILABLE and not OPI_AVAILABLE:
+        print(f"  ERROR: Neither cclib nor OPI is installed. Please install one: pip install cclib OR pip install orca-pi")
+        return None
+    
+    # Determine which parser to use
+    try:
+        parser_type = choose_parser(logfile_path)
+    except RuntimeError as e:
+        print(f"  ERROR: {e}")
+        return None
+    
+    # Use the appropriate parser
+    if parser_type == 'opi':
+        return extract_properties_with_opi(logfile_path)
+    else:
+        return extract_properties_with_cclib(logfile_path)
+
+def extract_properties_with_cclib(logfile_path):
+    """
+    Extract properties using cclib (original implementation).
     """
     if not CCLIB_AVAILABLE:
         print(f"  ERROR: cclib is not installed. Please install it with: pip install cclib")
@@ -926,6 +1039,308 @@ def extract_properties_from_logfile(logfile_path):
     except Exception as e:
         print(f"  GENERIC_ERROR: Failed to extract properties from {os.path.basename(logfile_path)} (after cclib parse): {e}")
         return None
+
+def extract_properties_with_opi(logfile_path):
+    """
+    Extract properties using OPI (ORCA Python Interface) for ORCA 6.1+.
+    """
+    if not OPI_AVAILABLE:
+        print(f"  ERROR: OPI is not installed. Please install it with: pip install orca-pi")
+        return None
+    
+    assert OPIOutput is not None  # guaranteed by OPI_AVAILABLE check above
+    
+    # Initialize extracted properties dictionary with default values
+    extracted_props = {
+        'filename': os.path.basename(logfile_path),
+        'method': "Unknown",
+        'functional': "Unknown",
+        'basis_set': "Unknown",
+        'charge': None,
+        'multiplicity': None,
+        'num_atoms': 0,
+        'final_geometry_atomnos': None,
+        'final_geometry_coords': None,
+        'final_electronic_energy': None,
+        'gibbs_free_energy': None,
+        'entropy': None, 
+        'homo_energy': None,
+        'lumo_energy': None,
+        'homo_lumo_gap': None,
+        'dipole_moment': None,
+        'rotational_constants': None,
+        'radius_of_gyration': None,
+        'num_imaginary_freqs': None,
+        'first_vib_freq': None,
+        'last_vib_freq': None,
+        'num_hydrogen_bonds': 0,
+        'hbond_details': [],
+        'average_hbond_distance': None,
+        'min_hbond_distance': None,
+        'max_hbond_distance': None,
+        'std_hbond_distance': None,
+        'average_hbond_angle': None,
+        'min_hbond_angle': None,
+        'max_hbond_angle': None,
+        'std_hbond_angle': None,
+        '_has_freq_calc': False,
+        '_initial_cluster_label': None,
+        '_parent_global_cluster_id': None,
+        '_first_rmsd_context_listing': None,
+        '_second_rmsd_sub_cluster_id': None,
+        '_second_rmsd_context_listing': None,
+        '_second_rmsd_rep_filename': None,
+        '_rmsd_pass_origin': None
+    }
+    
+    try:
+        # Read file content for custom parsing
+        with open(logfile_path, 'r') as f_log:
+            lines = f_log.readlines()
+        
+        file_extension = os.path.splitext(logfile_path)[1].lower()
+        
+        # Extract basename from file path
+        file_path = PathLib(logfile_path)
+        basename = file_path.stem
+        working_dir = file_path.parent
+        
+        # Create OPI Output object
+        opi_output = OPIOutput(
+            basename=basename,
+            working_dir=working_dir,
+            version_check=False  # Don't enforce strict version check
+        )
+        
+        # Check if output terminated normally
+        if not opi_output.terminated_normally():
+            vprint(f"  WARNING: ORCA did not terminate normally for {os.path.basename(logfile_path)}")
+            return None
+        
+        # Parse the output - try with GBW for HOMO/LUMO, fall back without
+        gbw_parsed = False
+        try:
+            opi_output.parse(read_gbw_json=True)
+            gbw_parsed = True
+        except Exception:
+            try:
+                opi_output.parse(read_gbw_json=False)
+            except Exception as e:
+                vprint(f"  WARNING: OPI parse failed for {os.path.basename(logfile_path)}: {e}")
+                return None
+        
+        # Check if results are available
+        if not opi_output.results_properties or not opi_output.results_properties.geometries:
+            vprint(f"  WARNING: No geometry data available in OPI results for {os.path.basename(logfile_path)}")
+            return None
+        
+        geom = opi_output.results_properties.geometries[-1]  # Last geometry
+        
+        # Method info (extract from output file)
+        extracted_props['method'] = _extract_method_from_file_opi(lines)
+        extracted_props['functional'] = extracted_props['method']
+        extracted_props['basis_set'] = _extract_basis_from_file_opi(lines)
+        
+        # Basic properties (charge/mult from CalcInfo, not Geometry)
+        extracted_props['charge'] = opi_output.get_charge()
+        extracted_props['multiplicity'] = opi_output.get_mult()
+        
+        # Geometry - OPI cartesians are in BOHR, must convert to Angstrom
+        if hasattr(geom.geometry, 'coordinates') and geom.geometry.coordinates:
+            coords_data = geom.geometry.coordinates.cartesians
+            atomnos = []
+            coordinates = []
+            
+            # Parse element symbols and coordinates
+            atomic_numbers = {
+                'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+                'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+                'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
+                'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
+                'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
+                'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Mo': 42, 'Ru': 44, 'Rh': 45,
+                'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50, 'Sb': 51, 'Te': 52,
+                'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Pt': 78, 'Au': 79,
+                'Hg': 80, 'Pb': 82, 'Bi': 83
+            }
+            
+            # Detect coordinate units (default: Bohr from OPI JSON)
+            coord_units = getattr(geom.geometry.coordinates, 'units', None)
+            need_conversion = True
+            if coord_units and 'angst' in str(coord_units).lower():
+                need_conversion = False
+            
+            for atom_data in coords_data:
+                # atom_data = (element_symbol, x, y, z)
+                element = atom_data[0]
+                atomnos.append(atomic_numbers.get(element, 0))
+                if need_conversion:
+                    # Convert Bohr to Angstrom
+                    coordinates.append([
+                        atom_data[1] * BOHR_TO_ANGSTROM,
+                        atom_data[2] * BOHR_TO_ANGSTROM,
+                        atom_data[3] * BOHR_TO_ANGSTROM
+                    ])
+                else:
+                    coordinates.append([atom_data[1], atom_data[2], atom_data[3]])
+            
+            extracted_props['final_geometry_atomnos'] = np.array(atomnos)
+            extracted_props['final_geometry_coords'] = np.array(coordinates)
+            extracted_props['num_atoms'] = len(atomnos)
+        
+        # Final electronic energy (use OPI helper for robustness)
+        final_energy = opi_output.get_final_energy()
+        if final_energy is not None:
+            extracted_props['final_electronic_energy'] = final_energy
+        elif hasattr(geom, 'dft_energy') and geom.dft_energy:
+            if hasattr(geom.dft_energy, 'finalen') and geom.dft_energy.finalen is not None:
+                extracted_props['final_electronic_energy'] = geom.dft_energy.finalen
+        
+        # Thermochemistry (use OPI helper methods for robustness)
+        free_energy = opi_output.get_free_energy()
+        if free_energy is not None:
+            extracted_props['gibbs_free_energy'] = free_energy
+        
+        entropy = opi_output.get_entropy()
+        if entropy is not None:
+            extracted_props['entropy'] = entropy
+        
+        # Vibrational frequencies
+        if hasattr(geom, 'thermochemistry_energies') and geom.thermochemistry_energies:
+            thermo = geom.thermochemistry_energies[0]
+            
+            if hasattr(thermo, 'freq') and thermo.freq:
+                freqs = []
+                for freq_group in thermo.freq:
+                    if isinstance(freq_group, list):
+                        freqs.extend(freq_group)
+                    else:
+                        freqs.append(freq_group)
+                
+                if freqs:
+                    extracted_props['_has_freq_calc'] = True
+                    imag_freqs = [f for f in freqs if f < 0]
+                    real_freqs = [f for f in freqs if f > 0]
+                    
+                    extracted_props['num_imaginary_freqs'] = len(imag_freqs)
+                    extracted_props['_has_imaginary_freqs'] = len(imag_freqs) > 0
+                    
+                    if len(imag_freqs) > 0:
+                        print(f"  INFO: {os.path.basename(logfile_path)} contains {len(imag_freqs)} imaginary freq(s) - will be filtered after clustering")
+                    
+                    if real_freqs:
+                        extracted_props['first_vib_freq'] = min(real_freqs)
+                        extracted_props['last_vib_freq'] = max(real_freqs)
+        
+        # HOMO/LUMO via OPI helper methods (requires GBW parsing)
+        if gbw_parsed:
+            try:
+                homo_data = opi_output.get_homo()
+                lumo_data = opi_output.get_lumo()
+                
+                if homo_data:
+                    # OPI returns orbital energy in Hartree, convert to eV for cclib compatibility
+                    extracted_props['homo_energy'] = homo_data.orbitalenergy * HARTREE_TO_EV
+                if lumo_data:
+                    extracted_props['lumo_energy'] = lumo_data.orbitalenergy * HARTREE_TO_EV
+                if homo_data and lumo_data:
+                    extracted_props['homo_lumo_gap'] = (lumo_data.orbitalenergy - homo_data.orbitalenergy) * HARTREE_TO_EV
+            except Exception:
+                pass
+        
+        # Fallback: HOMO-LUMO gap from output file if GBW not available
+        if extracted_props['homo_lumo_gap'] is None:
+            homo_lumo_gap_re = re.compile(r":: HOMO-LUMO gap\s*(-?\d+\.\d+)\s*(-?\d+\.\d+)\s*eV\s*::")
+            for line in lines:
+                match = homo_lumo_gap_re.search(line)
+                if match:
+                    try:
+                        extracted_props['homo_lumo_gap'] = float(match.group(1))
+                        break
+                    except ValueError:
+                        pass
+        
+        # Dipole moment (use dipolemagnitude if available, else compute from dipoletotal)
+        dipole_list = opi_output.get_dipole()
+        if dipole_list:
+            dipole_data = dipole_list[0]
+            if hasattr(dipole_data, 'dipolemagnitude') and dipole_data.dipolemagnitude is not None:
+                extracted_props['dipole_moment'] = dipole_data.dipolemagnitude
+            elif hasattr(dipole_data, 'dipoletotal') and dipole_data.dipoletotal is not None:
+                extracted_props['dipole_moment'] = np.linalg.norm(dipole_data.dipoletotal)
+        
+        # Rotational constants (extract from file since not directly in JSON)
+        extracted_props['rotational_constants'] = _extract_rotconsts_from_file_opi(lines)
+        
+        # Calculate radius of gyration
+        if extracted_props['final_geometry_atomnos'] is not None and extracted_props['final_geometry_coords'] is not None:
+            if len(extracted_props['final_geometry_atomnos']) > 0 and extracted_props['final_geometry_coords'].shape[0] > 0:
+                try:
+                    radius_gyr = calculate_radius_of_gyration(extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords'])
+                    extracted_props['radius_of_gyration'] = radius_gyr
+                except Exception:
+                    pass
+        
+        # Detect Hydrogen Bonds
+        if extracted_props['final_geometry_atomnos'] is not None and extracted_props['final_geometry_coords'] is not None:
+            if len(extracted_props['final_geometry_atomnos']) > 0 and extracted_props['final_geometry_coords'].shape[0] > 0:
+                try:
+                    hbond_results = detect_hydrogen_bonds(extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords'])
+                    extracted_props.update(hbond_results)
+                except Exception:
+                    pass
+        
+        return extracted_props
+        
+    except Exception as e:
+        print(f"  GENERIC_ERROR: Failed to extract properties from {os.path.basename(logfile_path)} with OPI: {e}")
+        return None
+
+def _extract_method_from_file_opi(lines):
+    """Extract method/functional from ORCA output file lines."""
+    try:
+        for line in lines:
+            if '|  1> !' in line:
+                parts = line.split('!')
+                if len(parts) > 1:
+                    keywords = parts[1].strip().split()
+                    for kw in keywords:
+                        kw_upper = kw.upper()
+                        if any(x in kw_upper for x in ['B3LYP', 'PBE', 'TPSS', 'M06', 'B97', 'R2SCAN', 'HF', 'MP2', 'CCSD']):
+                            return kw
+    except:
+        pass
+    return "Unknown"
+
+def _extract_basis_from_file_opi(lines):
+    """Extract basis set from ORCA output file lines."""
+    try:
+        for line in lines:
+            if '|  1> !' in line:
+                parts = line.split('!')
+                if len(parts) > 1:
+                    keywords = parts[1].strip().split()
+                    for kw in keywords:
+                        kw_upper = kw.upper()
+                        if any(x in kw_upper for x in ['DEF2', 'CC-PV', 'AUG-CC', 'STO', 'SVP', 'TZVP', 'QZVP']):
+                            return kw
+    except:
+        pass
+    return "Unknown"
+
+def _extract_rotconsts_from_file_opi(lines):
+    """Extract rotational constants from ORCA output file lines."""
+    try:
+        for line in lines:
+            if 'Rotational constants in cm-1:' in line or 'Rotational constants in MHz:' in line:
+                parts = line.split(':')
+                if len(parts) > 1:
+                    values = parts[1].strip().split()
+                    if len(values) >= 3:
+                        return np.array([float(values[0]), float(values[1]), float(values[2])])
+    except:
+        pass
+    return None
 
 # --- START: RMSD functions provided by user ---
 def calculate_rmsd(atomnos1, coords1, atomnos2, coords2):
