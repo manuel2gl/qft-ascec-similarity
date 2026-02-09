@@ -12151,7 +12151,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
 def main_ascec_integrated():
     # Ensure glob is accessible throughout this function (imported at module level)
     import glob as _glob_module
-    glob = _glob_module  # type: ignore[assignment]
+    import re as _re_module
+    glob = _glob_module
+    re = _re_module
     
     # CHECK FOR VERSION COMMAND (early check before other processing)
     if len(sys.argv) >= 2 and sys.argv[1] in ["--version", "-V", "version"]:
@@ -13600,37 +13602,34 @@ examples:
                             replica_tvse_files = []
                             
                             # Extract base name (everything before the last underscore and number)
-                            match = re.match(r'(.+)_(\d+)$', current_dir_name)
-                            if match:
-                                base_name = match.group(1)
+                            dir_match = re.match(r'(.+)_(\d+)$', current_dir_name)
+                            if dir_match:
+                                base_name = dir_match.group(1)
                                 
                                 # Find all directories matching the pattern
-                                for entry in os.listdir(parent_dir):
+                                for entry in sorted(os.listdir(parent_dir)):
                                     entry_path = os.path.join(parent_dir, entry)
                                     if os.path.isdir(entry_path):
                                         # Check if directory matches pattern: basename_N
                                         if re.match(rf'{re.escape(base_name)}_\d+$', entry):
                                             replica_dirs.append(entry_path)
                                             # Look for tvse file in this directory
-                                            tvse_files = glob.glob(os.path.join(entry_path, 'tvse_*.dat'))
-                                            if tvse_files:
-                                                replica_tvse_files.append(tvse_files[0])
+                                            tvse_found = glob.glob(os.path.join(entry_path, 'tvse_*.dat'))
+                                            if tvse_found:
+                                                replica_tvse_files.append(tvse_found[0])
                                 
                                 # If we found multiple replicas and all have tvse files, generate combined diagram
                                 if len(replica_dirs) > 1 and len(replica_tvse_files) == len(replica_dirs):
                                     num_replicas = len(replica_dirs)
                                     combined_diagram = os.path.join(parent_dir, f"tvse_r{num_replicas}.png")
                                     
-                                    # Only generate if it doesn't exist yet (avoid regenerating for each replica)
-                                    if not os.path.exists(combined_diagram):
-                                        _print_verbose(f"\nAll {num_replicas} replica(s) complete. Generating combined diagram...", 0, state)
-                                        if plot_combined_replicas_diagram(replica_tvse_files, combined_diagram, num_replicas):
-                                            _print_verbose(f"  ✓ Created: {os.path.basename(combined_diagram)}", 0, state)
-                                        else:
-                                            _print_verbose(f"  ✗ Failed to create combined diagram", 1, state)
+                                    _print_verbose(f"\nAll {num_replicas} replica(s) complete. Generating combined diagram...", 0, state)
+                                    if plot_combined_replicas_diagram(replica_tvse_files, combined_diagram, num_replicas):
+                                        _print_verbose(f"  ✓ Created: {os.path.basename(combined_diagram)}", 0, state)
+                                    else:
+                                        _print_verbose(f"  ✗ Failed to create combined diagram", 0, state)
                         except Exception as e:
-                            # Silent fail - combined diagram is optional
-                            pass
+                            _print_verbose(f"  Warning: Combined diagram check failed: {type(e).__name__}: {e}", 0, state)
             else:
                 if not in_workflow:
                     _print_verbose(f"\nSkipping diagram generation (matplotlib not available)", 1, state)
