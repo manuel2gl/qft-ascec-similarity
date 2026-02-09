@@ -1964,6 +1964,10 @@ def plot_annealing_diagrams(tvse_file: str, output_dir: str, scaled: bool = Fals
         return True
         
     except Exception as e:
+        # Log error for debugging
+        if os.environ.get('ASCEC_DEBUG'):
+            import sys
+            print(f"Warning: Failed to generate diagram for {os.path.basename(tvse_file)}: {e}", file=sys.stderr)
         return False
 
 
@@ -2080,6 +2084,10 @@ def plot_combined_replicas_diagram(tvse_files: List[str], output_file: str, num_
         return True
         
     except Exception as e:
+        # Log error for debugging
+        if os.environ.get('ASCEC_DEBUG'):
+            import sys
+            print(f"Warning: Failed to generate combined diagram: {e}", file=sys.stderr)
         return False
 
 
@@ -9496,9 +9504,10 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             tvse_files = glob.glob(os.path.join(annealing_dir, 'tvse_*.dat'))
             if tvse_files:
                 for tvse_file in tvse_files:
+                    # Always add to list for combined diagram, regardless of individual diagram success
+                    all_tvse_files.append(tvse_file)
                     if plot_annealing_diagrams(tvse_file, annealing_dir):
                         diagrams_generated += 1
-                        all_tvse_files.append(tvse_file)
         
         if diagrams_generated > 0 and not is_workflow:
             print(f"  Generated {diagrams_generated} diagram(s)")
@@ -13575,6 +13584,53 @@ examples:
                 else:
                     if not in_workflow:
                         _print_verbose(f"  ✗ Failed to generate diagrams", 1, state)
+                
+                # Check if this is part of a replicated run and generate combined diagram if all replicas are complete
+                if not in_workflow:
+                    parent_dir = os.path.dirname(run_dir)
+                    parent_name = os.path.basename(parent_dir)
+                    current_dir_name = os.path.basename(run_dir)
+                    
+                    # Check if we're in an "annealing" directory structure with replicated runs
+                    # Pattern: annealing/basename_N/ where N is the replica number
+                    if parent_name == "annealing" and '_' in current_dir_name:
+                        # Find all sibling replica directories
+                        try:
+                            replica_dirs = []
+                            replica_tvse_files = []
+                            
+                            # Extract base name (everything before the last underscore and number)
+                            match = re.match(r'(.+)_(\d+)$', current_dir_name)
+                            if match:
+                                base_name = match.group(1)
+                                
+                                # Find all directories matching the pattern
+                                for entry in os.listdir(parent_dir):
+                                    entry_path = os.path.join(parent_dir, entry)
+                                    if os.path.isdir(entry_path):
+                                        # Check if directory matches pattern: basename_N
+                                        if re.match(rf'{re.escape(base_name)}_\d+$', entry):
+                                            replica_dirs.append(entry_path)
+                                            # Look for tvse file in this directory
+                                            tvse_files = glob.glob(os.path.join(entry_path, 'tvse_*.dat'))
+                                            if tvse_files:
+                                                replica_tvse_files.append(tvse_files[0])
+                                
+                                # If we found multiple replicas and all have tvse files, generate combined diagram
+                                if len(replica_dirs) > 1 and len(replica_tvse_files) == len(replica_dirs):
+                                    num_replicas = len(replica_dirs)
+                                    combined_diagram = os.path.join(parent_dir, f"tvse_r{num_replicas}.png")
+                                    
+                                    # Only generate if it doesn't exist yet (avoid regenerating for each replica)
+                                    if not os.path.exists(combined_diagram):
+                                        _print_verbose(f"\nAll {num_replicas} replica(s) complete. Generating combined diagram...", 0, state)
+                                        if plot_combined_replicas_diagram(replica_tvse_files, combined_diagram, num_replicas):
+                                            _print_verbose(f"  ✓ Created: {os.path.basename(combined_diagram)}", 0, state)
+                                        else:
+                                            _print_verbose(f"  ✗ Failed to create combined diagram", 1, state)
+                        except Exception as e:
+                            # Silent fail - combined diagram is optional
+                            pass
             else:
                 if not in_workflow:
                     _print_verbose(f"\nSkipping diagram generation (matplotlib not available)", 1, state)
