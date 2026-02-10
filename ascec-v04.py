@@ -6093,7 +6093,7 @@ def combine_xyz_files(output_filename="combined_results.xyz", exclude_pattern="_
                 lines = infile.readlines()
                 outfile.writelines(lines)
 
-    print(f"\nSuccessfully combined {len(sorted_xyz_files)} .xyz files into: {output_filename}")
+    print(f"\nSuccessfully combined {len(sorted_xyz_files)}.xyz files into: {output_filename}")
     
     # Create .mol file if obabel is available
     if shutil.which("obabel"):
