@@ -4245,7 +4245,7 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
         elif qm_program == 'gaussian':
             # Gaussian uses ! for placeholders
             if "!name" in content:
-                content = content.replace("!name", config_data['comment'])
+                content = content.replace("!name", f"! {config_data['comment']}")
         
         if qm_program == 'orca':
             # For ORCA, replace the coordinate section between * xyz and *
