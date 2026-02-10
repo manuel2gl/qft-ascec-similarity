@@ -61,7 +61,7 @@ max_overlap_placement_attempts = 100000 # Max attempts to place a single molecul
 # This can be overridden by the --nobox command line flag.
 create_box_xyz_copy = True 
 
-version = "* ASCEC-v04: Nov-2025 *"  # Version of the ASCEC script
+version = "* ASCEC-v04: Feb-2026 *"  # Version of the ASCEC script
 
 def print_version_banner(script_name="ASCEC"):
     """Print the ASCII art banner with UDEA logo and version information."""
@@ -2150,7 +2150,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             f.write("\n\n")
             f.write(center_text("Universidad de Antioquia - Medellín - Colombia") + "\n\n\n")
             f.write(center_text("Annealing Simulado Con Energía Cuántica") + "\n\n")
-            f.write(center_text("* ASCEC-v04: Nov-2025 *") + "\n\n")
+            f.write(center_text("* ASCEC-v04: Feb-2026 *") + "\n\n")
             f.write(center_text("Química Física Teórica - QFT") + "\n\n")
             f.write("=" * 75 + "\n")
             f.write(center_text("Protocol workflow summary") + "\n")
