@@ -12752,7 +12752,6 @@ For detailed documentation, see README_ASCEC.md
             sys.exit(1)
         
         result = create_simple_calculation_system(args.arg1, args.arg2)
-        print(result)
         return
 
     # Check if optimization mode is requested
@@ -12765,7 +12764,6 @@ For detailed documentation, see README_ASCEC.md
             sys.exit(1)
         
         result = create_optimization_system(args.arg1, args.arg2)
-        print(result)
         return
     
     # Check if merge mode is requested
