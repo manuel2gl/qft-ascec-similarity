@@ -2564,7 +2564,7 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     # Determine QM command - use alias from input file if provided, otherwise use default
     qm_exe = state.alias if state.alias else qm_program_details[state.ia]["default_exe"]
     if state.qm_program == "gaussian":
-        qm_command = f"{qm_exe} {qm_input_filename} {qm_output_filename}"
+        qm_command = f"{qm_exe} < {qm_input_filename} > {qm_output_filename}"
     elif state.qm_program == "orca":
         # For ORCA, we'll use subprocess to capture output properly
         qm_command = [qm_exe, qm_input_filename]
@@ -5329,8 +5329,11 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                 
                 for i, input_file in enumerate(all_input_files):
                     output_file = input_file.replace(input_ext, output_ext)
-                    # Use consistent > redirection format for both ORCA and Gaussian
-                    cmd = f"{qm_executable} {input_file} > {output_file}"
+                    # Gaussian needs input redirection, ORCA does not
+                    if qm_program == 'gaussian':
+                        cmd = f"{qm_executable} < {input_file} > {output_file}"
+                    else:  # orca
+                        cmd = f"{qm_executable} {input_file} > {output_file}"
                         
                     if i < len(all_input_files) - 1:
                         f.write(f"{cmd} && \\\n")
