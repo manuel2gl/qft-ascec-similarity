@@ -7055,62 +7055,10 @@ def execute_box_analysis(input_file: str):
 
 # 16. main ascec integrated function
 def print_all_commands():
-    """Print concise command line usage information."""
-    print("""
-ASCEC v04 - Annealing Simulado con Energía Cuántica
-====================================================
-
-COMMANDS
---------
-  input.in [options]      Run single annealing simulation
-  input.in box            Analyze box size requirements  
-  input.in rN             Replicated runs (e.g., r3 = 3 replicas)
-  input.in rN --boxP      Replicated runs with P% packing (e.g., r3 --box10)
-  
-  calc template launcher  Create QM inputs from annealing results
-  opt template launcher   Create optimization inputs from motifs
-  sort [--nosum|--justsum] Organize results and create summaries
-  
-  merge [result]          Combine XYZ files interactively
-  update template [pattern] Update existing QM inputs with new template
-  launcher                Merge all launcher scripts
-  
-  diagram                 Generate/regenerate energy vs step diagrams
-  diagram --scaled        Generate diagrams with auto-scaled y-axis
-  
-  sim [options]           Run similarity/clustering analysis (see: sim --help)
-  input.in protocol [N]   Run automated workflow from input file
-
-OPTIONS
--------
-  -v, --v        Verbose output (every 10 cycles)
-  --va           Very verbose output (every cycle)
-  --standard     Use standard Metropolis criterion
-  --nobox        Skip box XYZ file generation
-
-WORKFLOW
---------
-  Manual:   input.in box → input.in r3 → calc → [run QM] → sort → sim
-  Protocol: input.in protocol   (automated workflow defined in .in file)
-
-DIAGRAMS
---------
-  Searches for all tvse_*.dat files and generates:
-    - Individual replica diagrams (tvse_SEED.png)
-    - Combined replica diagram (tvse_rN.png) when N replicas found
-  Use --scaled to apply intelligent y-axis scaling
-
-EXAMPLES
---------
-  ascec input.in r3                    # 3 replicated annealing runs
-  ascec diagram                        # Generate all energy diagrams
-  ascec diagram --scaled               # Generate with auto-scaled y-axis
-  ascec calc opt.inp launcher.sh       # Create QM inputs + launcher
-  ascec sort                           # Organize outputs, create summary
-  ascec sim --th=0.9                   # Cluster by 90% similarity
-
-For detailed documentation, see README_ASCEC.md
-""")
+    """Print command line usage information (now uses argparse help)."""
+    # This function is kept for backward compatibility but now just points to argparse help
+    # The actual help text is defined in the ArgumentParser epilog
+    print("Use 'ascec -h' or 'ascec --help' for detailed command reference.")
 
 
 # ============================================================================
@@ -12689,19 +12637,45 @@ def main_ascec_integrated():
         usage="ascec [options] command [arguments]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-commands:
-  input.in [rN]     Run annealing (rN = N replicas, e.g., r3)
-  input.in box      Analyze box size requirements
-  calc T L          Create QM inputs (T=template, L=launcher)
-  opt T L           Create optimization inputs
-  sort              Organize results, create summaries
-  sim [--th=N]      Similarity clustering analysis
-  help              Show detailed command reference
+COMMANDS:
+  input.in [options]      Run single annealing simulation
+  input.in box            Analyze box size requirements  
+  input.in rN             Replicated runs (e.g., r3 = 3 replicas)
+  input.in rN --boxP      Replicated runs with P%% packing (e.g., r3 --box10)
+  
+  calc template launcher  Create QM inputs from annealing results
+  opt template launcher   Create optimization inputs from motifs
+  sort [--nosum|--justsum] Organize results and create summaries
+  
+  merge [result]          Combine XYZ files interactively
+  update template [pattern] Update existing QM inputs with new template
+  launcher                Merge all launcher scripts
+  
+  diagram                 Generate/regenerate energy vs step diagrams
+  diagram --scaled        Generate diagrams with auto-scaled y-axis
+  
+  sim [options]           Run similarity/clustering analysis (see: sim --help)
+  input.in protocol [N]   Run automated workflow from input file
 
-examples:
-  ascec input.in r3                  Run 3 replicated annealings
-  ascec calc opt.inp launcher.sh     Create calculation system
-  ascec sim --th=0.9                 Cluster with 90%% similarity
+WORKFLOW:
+  Manual:   input.in box → input.in r3 → calc → [run QM] → sort → sim
+  Protocol: input.in protocol   (automated workflow defined in .in file)
+
+DIAGRAMS:
+  Searches for all tvse_*.dat files and generates:
+    - Individual replica diagrams (tvse_SEED.png)
+    - Combined replica diagram (tvse_rN.png) when N replicas found
+  Use --scaled to apply intelligent y-axis scaling
+
+EXAMPLES:
+  ascec input.in r3                    # 3 replicated annealing runs
+  ascec diagram                        # Generate all energy diagrams
+  ascec diagram --scaled               # Generate with auto-scaled y-axis
+  ascec calc opt.inp launcher.sh       # Create QM inputs + launcher
+  ascec sort                           # Organize outputs, create summary
+  ascec sim --th=0.9                   # Cluster by 90%% similarity
+
+For detailed documentation, see README_ASCEC.md
 """)
     parser.add_argument("command", metavar="command", 
                        help="Input file or command (calc, sort, sim, help, etc.)")
@@ -12732,8 +12706,8 @@ examples:
         return
     
     # Check if help is requested
-    if args.command.lower() in ["help", "--help", "-h", "commands"]:
-        print_all_commands()
+    if args.command.lower() in ["help", "commands"]:
+        parser.print_help()
         return
     
     # Check if similarity analysis mode is requested
