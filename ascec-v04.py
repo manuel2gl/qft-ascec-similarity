@@ -7074,7 +7074,9 @@ COMMANDS
   merge [result]          Combine XYZ files interactively
   update template [pattern] Update existing QM inputs with new template
   launcher                Merge all launcher scripts
-  diagram [--scaled]      Generate annealing energy diagrams
+  
+  diagram                 Generate/regenerate energy vs step diagrams
+  diagram --scaled        Generate diagrams with auto-scaled y-axis
   
   sim [options]           Run similarity/clustering analysis (see: sim --help)
   input.in protocol [N]   Run automated workflow from input file
@@ -7091,9 +7093,18 @@ WORKFLOW
   Manual:   input.in box → input.in r3 → calc → [run QM] → sort → sim
   Protocol: input.in protocol   (automated workflow defined in .in file)
 
+DIAGRAMS
+--------
+  Searches for all tvse_*.dat files and generates:
+    - Individual replica diagrams (tvse_SEED.png)
+    - Combined replica diagram (tvse_rN.png) when N replicas found
+  Use --scaled to apply intelligent y-axis scaling
+
 EXAMPLES
 --------
   ascec input.in r3                    # 3 replicated annealing runs
+  ascec diagram                        # Generate all energy diagrams
+  ascec diagram --scaled               # Generate with auto-scaled y-axis
   ascec calc opt.inp launcher.sh       # Create QM inputs + launcher
   ascec sort                           # Organize outputs, create summary
   ascec sim --th=0.9                   # Cluster by 90% similarity
