@@ -5343,10 +5343,9 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             msg += f"  Input files: {len(all_input_files)}\n"
             msg += f"  Launcher script: launcher_{qm_program}.sh"
             if not workflow_mode:
-                print(msg)
-                print(f"\nTo run all calculations, use:")
-                print(f"  cd {output_dir}")
-                print(f"  ./launcher_{qm_program}.sh")
+                msg += f"\n\nTo run all calculations, use:\n"
+                msg += f"  cd {output_dir}\n"
+                msg += f"  ./launcher_{qm_program}.sh"
             return msg
             
         except IOError as e:
@@ -12758,6 +12757,8 @@ For detailed documentation, see README_ASCEC.md
             sys.exit(1)
         
         result = create_simple_calculation_system(args.arg1, args.arg2)
+        if result:
+            print(result)
         return
 
     # Check if optimization mode is requested
@@ -12770,6 +12771,8 @@ For detailed documentation, see README_ASCEC.md
             sys.exit(1)
         
         result = create_optimization_system(args.arg1, args.arg2)
+        if result:
+            print(result)
         return
     
     # Check if merge mode is requested
