@@ -4240,6 +4240,8 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
         content = template_content
         if "#name" in content:
             content = content.replace("#name", f"# {config_data['comment']}")
+        if "!name" in content:
+            content = content.replace("!name", config_data['comment'])
         
         if qm_program == 'orca':
             # For ORCA, replace the coordinate section between * xyz and *
@@ -4258,11 +4260,11 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
                 elif in_coords and line.strip() == "*":
                     new_lines.append(line)
                     in_coords = False
-                elif in_coords and line.strip() == "#":
-                    # Replace the # placeholder with coordinates
+                elif in_coords and (line.strip() == "#" or line.strip() == "!"):
+                    # Replace the # or ! placeholder with coordinates
                     new_lines.append(coords_section.rstrip())
                 elif in_coords:
-                    # Skip other coordinate lines (they will be replaced by coords_section when we hit #)
+                    # Skip other coordinate lines (they will be replaced by coords_section when we hit # or !)
                     continue
                 elif not in_coords:
                     new_lines.append(line)
@@ -4270,13 +4272,13 @@ def create_qm_input_file(config_data: Dict, template_content: str, output_path: 
             content = '\n'.join(new_lines)
         
         elif qm_program == 'gaussian':
-            # For Gaussian, replace # placeholder with coordinates
+            # For Gaussian, replace # or ! placeholder with coordinates
             lines = content.split('\n')
             new_lines = []
             
             for line in lines:
-                if line.strip() == "#":
-                    # Replace the # placeholder with coordinates
+                if line.strip() == "#" or line.strip() == "!":
+                    # Replace the # or ! placeholder with coordinates
                     new_lines.append(coords_section.rstrip())
                 else:
                     new_lines.append(line)
