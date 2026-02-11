@@ -1094,8 +1094,8 @@ def extract_properties_with_opi(logfile_path):
     }
     
     try:
-        # Read file content for custom parsing
-        with open(logfile_path, 'r') as f_log:
+        # Read file content for text-based parsing
+        with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f_log:
             lines = f_log.readlines()
         
         file_extension = os.path.splitext(logfile_path)[1].lower()
@@ -1105,174 +1105,217 @@ def extract_properties_with_opi(logfile_path):
         basename = file_path.stem
         working_dir = file_path.parent
         
-        # Create OPI Output object
-        opi_output = OPIOutput(
-            basename=basename,
-            working_dir=working_dir,
-            version_check=False  # Don't enforce strict version check
-        )
-        
-        # Check if output terminated normally
-        if not opi_output.terminated_normally():
-            vprint(f"  WARNING: ORCA did not terminate normally for {os.path.basename(logfile_path)}")
-            return None
-        
-        # Parse the output - try with GBW for HOMO/LUMO, fall back without
-        gbw_parsed = False
+        # --- Attempt OPI JSON-based parsing first ---
+        opi_parsed = False
+        opi_output = None
         try:
-            opi_output.parse(read_gbw_json=True)
-            gbw_parsed = True
-        except Exception:
-            try:
-                opi_output.parse(read_gbw_json=False)
-            except Exception as e:
-                vprint(f"  WARNING: OPI parse failed for {os.path.basename(logfile_path)}: {e}")
+            opi_output = OPIOutput(
+                basename=basename,
+                working_dir=working_dir,
+                version_check=False
+            )
+            
+            # Check if output terminated normally
+            if not opi_output.terminated_normally():
+                vprint(f"  WARNING: ORCA did not terminate normally for {os.path.basename(logfile_path)}")
+                return None
+            
+            # Try to create JSON files if they don't exist (requires orca_2json and .property.txt)
+            prop_json = working_dir / f"{basename}.property.json"
+            prop_txt = working_dir / f"{basename}.property.txt"
+            
+            if not prop_json.exists() and prop_txt.exists():
+                try:
+                    opi_output.create_property_json()
+                except Exception:
+                    pass  # orca_2json might not be available
+            
+            # Try parsing (no arguments in installed OPI version)
+            if prop_json.exists():
+                opi_output.parse()
+                if opi_output.results_properties and opi_output.results_properties.geometries:
+                    opi_parsed = True
+                    vprint(f"  OPI JSON parsing succeeded for {os.path.basename(logfile_path)}")
+        except Exception as e:
+            vprint(f"  OPI JSON parsing not available for {os.path.basename(logfile_path)}: {e}")
+        
+        # --- Text-based fallback (always works with just .out files) ---
+        # This is the primary path when only .out files exist (no JSON)
+        
+        # Check terminated normally via text if OPI wasn't used
+        if opi_output is None:
+            terminated = False
+            for line in reversed(lines):
+                if 'ORCA TERMINATED NORMALLY' in line:
+                    terminated = True
+                    break
+            if not terminated:
+                vprint(f"  WARNING: ORCA did not terminate normally for {os.path.basename(logfile_path)}")
                 return None
         
-        # Check if results are available
-        if not opi_output.results_properties or not opi_output.results_properties.geometries:
-            vprint(f"  WARNING: No geometry data available in OPI results for {os.path.basename(logfile_path)}")
-            return None
-        
-        geom = opi_output.results_properties.geometries[-1]  # Last geometry
-        
-        # Method info (extract from output file)
+        # Method info (extract from input section in output file)
         extracted_props['method'] = _extract_method_from_file_opi(lines)
         extracted_props['functional'] = extracted_props['method']
         extracted_props['basis_set'] = _extract_basis_from_file_opi(lines)
         
-        # Basic properties (charge/mult from CalcInfo, not Geometry)
-        extracted_props['charge'] = opi_output.get_charge()
-        extracted_props['multiplicity'] = opi_output.get_mult()
+        # Charge and multiplicity from input section: "* xyz CHARGE MULT"
+        _extract_charge_mult_from_file_opi(lines, extracted_props)
         
-        # Geometry - OPI cartesians are in BOHR, must convert to Angstrom
-        if hasattr(geom.geometry, 'coordinates') and geom.geometry.coordinates:
-            coords_data = geom.geometry.coordinates.cartesians
-            atomnos = []
-            coordinates = []
-            
-            # Parse element symbols and coordinates
-            atomic_numbers = {
-                'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
-                'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
-                'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
-                'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
-                'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
-                'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Mo': 42, 'Ru': 44, 'Rh': 45,
-                'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50, 'Sb': 51, 'Te': 52,
-                'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Pt': 78, 'Au': 79,
-                'Hg': 80, 'Pb': 82, 'Bi': 83
-            }
-            
-            # Detect coordinate units (default: Bohr from OPI JSON)
-            coord_units = getattr(geom.geometry.coordinates, 'units', None)
-            need_conversion = True
-            if coord_units and 'angst' in str(coord_units).lower():
-                need_conversion = False
-            
-            for atom_data in coords_data:
-                # atom_data = (element_symbol, x, y, z)
-                element = atom_data[0]
-                atomnos.append(atomic_numbers.get(element, 0))
-                if need_conversion:
-                    # Convert Bohr to Angstrom
-                    coordinates.append([
-                        atom_data[1] * BOHR_TO_ANGSTROM,
-                        atom_data[2] * BOHR_TO_ANGSTROM,
-                        atom_data[3] * BOHR_TO_ANGSTROM
-                    ])
-                else:
-                    coordinates.append([atom_data[1], atom_data[2], atom_data[3]])
-            
-            extracted_props['final_geometry_atomnos'] = np.array(atomnos)
-            extracted_props['final_geometry_coords'] = np.array(coordinates)
-            extracted_props['num_atoms'] = len(atomnos)
-        
-        # Final electronic energy (use OPI helper for robustness)
-        final_energy = opi_output.get_final_energy()
-        if final_energy is not None:
-            extracted_props['final_electronic_energy'] = final_energy
-        elif hasattr(geom, 'dft_energy') and geom.dft_energy:
-            if hasattr(geom.dft_energy, 'finalen') and geom.dft_energy.finalen is not None:
-                extracted_props['final_electronic_energy'] = geom.dft_energy.finalen
-        
-        # Thermochemistry (use OPI helper methods for robustness)
-        free_energy = opi_output.get_free_energy()
-        if free_energy is not None:
-            extracted_props['gibbs_free_energy'] = free_energy
-        
-        entropy = opi_output.get_entropy()
-        if entropy is not None:
-            extracted_props['entropy'] = entropy
-        
-        # Vibrational frequencies
-        if hasattr(geom, 'thermochemistry_energies') and geom.thermochemistry_energies:
-            thermo = geom.thermochemistry_energies[0]
-            
-            if hasattr(thermo, 'freq') and thermo.freq:
-                freqs = []
-                for freq_group in thermo.freq:
-                    if isinstance(freq_group, list):
-                        freqs.extend(freq_group)
-                    else:
-                        freqs.append(freq_group)
-                
-                if freqs:
-                    extracted_props['_has_freq_calc'] = True
-                    imag_freqs = [f for f in freqs if f < 0]
-                    real_freqs = [f for f in freqs if f > 0]
-                    
-                    extracted_props['num_imaginary_freqs'] = len(imag_freqs)
-                    extracted_props['_has_imaginary_freqs'] = len(imag_freqs) > 0
-                    
-                    if len(imag_freqs) > 0:
-                        print(f"  INFO: {os.path.basename(logfile_path)} contains {len(imag_freqs)} imaginary freq(s) - will be filtered after clustering")
-                    
-                    if real_freqs:
-                        extracted_props['first_vib_freq'] = min(real_freqs)
-                        extracted_props['last_vib_freq'] = max(real_freqs)
-        
-        # HOMO/LUMO via OPI helper methods (requires GBW parsing)
-        if gbw_parsed:
+        # --- Geometry extraction ---
+        if opi_parsed and opi_output is not None:
+            # Try OPI geometry (JSON-based, coordinates in Bohr)
             try:
-                homo_data = opi_output.get_homo()
-                lumo_data = opi_output.get_lumo()
-                
-                if homo_data:
-                    # OPI returns orbital energy in Hartree, convert to eV for cclib compatibility
-                    extracted_props['homo_energy'] = homo_data.orbitalenergy * HARTREE_TO_EV
-                if lumo_data:
-                    extracted_props['lumo_energy'] = lumo_data.orbitalenergy * HARTREE_TO_EV
-                if homo_data and lumo_data:
-                    extracted_props['homo_lumo_gap'] = (lumo_data.orbitalenergy - homo_data.orbitalenergy) * HARTREE_TO_EV
+                geom = opi_output.results_properties.geometries[-1]
+                if hasattr(geom.geometry, 'coordinates') and geom.geometry.coordinates:
+                    coords_data = geom.geometry.coordinates.cartesians
+                    atomnos = []
+                    coordinates = []
+                    
+                    atomic_numbers = {
+                        'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+                        'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+                        'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
+                        'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
+                        'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
+                        'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Mo': 42, 'Ru': 44, 'Rh': 45,
+                        'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50, 'Sb': 51, 'Te': 52,
+                        'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Pt': 78, 'Au': 79,
+                        'Hg': 80, 'Pb': 82, 'Bi': 83
+                    }
+                    
+                    coord_units = getattr(geom.geometry.coordinates, 'units', None)
+                    need_conversion = True
+                    if coord_units and 'angst' in str(coord_units).lower():
+                        need_conversion = False
+                    
+                    for atom_data in coords_data:
+                        element = atom_data[0]
+                        atomnos.append(atomic_numbers.get(element, 0))
+                        if need_conversion:
+                            coordinates.append([
+                                atom_data[1] * BOHR_TO_ANGSTROM,
+                                atom_data[2] * BOHR_TO_ANGSTROM,
+                                atom_data[3] * BOHR_TO_ANGSTROM
+                            ])
+                        else:
+                            coordinates.append([atom_data[1], atom_data[2], atom_data[3]])
+                    
+                    extracted_props['final_geometry_atomnos'] = np.array(atomnos)
+                    extracted_props['final_geometry_coords'] = np.array(coordinates)
+                    extracted_props['num_atoms'] = len(atomnos)
             except Exception:
                 pass
         
-        # Fallback: HOMO-LUMO gap from output file if GBW not available
-        if extracted_props['homo_lumo_gap'] is None:
-            homo_lumo_gap_re = re.compile(r":: HOMO-LUMO gap\s*(-?\d+\.\d+)\s*(-?\d+\.\d+)\s*eV\s*::")
+        # Text-based geometry fallback: "CARTESIAN COORDINATES (ANGSTROEM)"
+        if extracted_props['final_geometry_coords'] is None:
+            natoms, coords, symbols = extract_xyz_from_output(logfile_path)
+            if natoms and coords is not None and symbols:
+                # Convert symbols to atomic numbers
+                sym_to_num = {
+                    'H': 1, 'He': 2, 'Li': 3, 'Be': 4, 'B': 5, 'C': 6, 'N': 7, 'O': 8,
+                    'F': 9, 'Ne': 10, 'Na': 11, 'Mg': 12, 'Al': 13, 'Si': 14, 'P': 15,
+                    'S': 16, 'Cl': 17, 'Ar': 18, 'K': 19, 'Ca': 20, 'Sc': 21, 'Ti': 22,
+                    'V': 23, 'Cr': 24, 'Mn': 25, 'Fe': 26, 'Co': 27, 'Ni': 28, 'Cu': 29,
+                    'Zn': 30, 'Ga': 31, 'Ge': 32, 'As': 33, 'Se': 34, 'Br': 35, 'Kr': 36,
+                    'Rb': 37, 'Sr': 38, 'Y': 39, 'Zr': 40, 'Mo': 42, 'Ru': 44, 'Rh': 45,
+                    'Pd': 46, 'Ag': 47, 'Cd': 48, 'In': 49, 'Sn': 50, 'Sb': 51, 'Te': 52,
+                    'I': 53, 'Xe': 54, 'Cs': 55, 'Ba': 56, 'La': 57, 'Pt': 78, 'Au': 79,
+                    'Hg': 80, 'Pb': 82, 'Bi': 83
+                }
+                atomnos = np.array([sym_to_num.get(s, 0) for s in symbols])
+                extracted_props['final_geometry_atomnos'] = atomnos
+                extracted_props['final_geometry_coords'] = coords
+                extracted_props['num_atoms'] = natoms
+        
+        # --- Energy extraction from text ---
+        # FINAL SINGLE POINT ENERGY (last before "OPTIMIZATION RUN DONE" or last overall)
+        temp_final_energy = None
+        opt_done_found = False
+        for line in reversed(lines):
+            if "*** OPTIMIZATION RUN DONE ***" in line:
+                opt_done_found = True
+            if "FINAL SINGLE POINT ENERGY" in line and not opt_done_found:
+                try:
+                    parts = line.strip().split()
+                    temp_final_energy = float(parts[-1])
+                    break
+                except (ValueError, IndexError):
+                    pass
+            elif "Electronic energy" in line and "..." in line and not opt_done_found:
+                try:
+                    temp_final_energy = float(line.split()[-1])
+                    break
+                except (ValueError, IndexError):
+                    pass
+        extracted_props['final_electronic_energy'] = temp_final_energy
+        
+        # --- Gibbs Free Energy from text ---
+        for line in lines:
+            if "Final Gibbs free energy" in line:
+                try:
+                    parts = line.strip().split()
+                    extracted_props['gibbs_free_energy'] = float(parts[-2])
+                except (ValueError, IndexError):
+                    pass
+        
+        # --- Entropy from text ---
+        for line in lines:
+            if "Total Entropy" in line:
+                try:
+                    parts = line.strip().split()
+                    for i, p in enumerate(parts):
+                        if p == '...':
+                            extracted_props['entropy'] = float(parts[i+1])
+                            break
+                except (ValueError, IndexError):
+                    pass
+        
+        # --- HOMO-LUMO gap from text ---
+        # Format: ":: HOMO-LUMO gap             12.261913785019 eV    ::"
+        homo_lumo_gap_re = re.compile(r'::\s*HOMO-LUMO gap\s+(-?\d+\.?\d*)\s+eV\s*::')
+        last_gap = None
+        for line in lines:
+            match = homo_lumo_gap_re.search(line)
+            if match:
+                try:
+                    last_gap = float(match.group(1))
+                except ValueError:
+                    pass
+        if last_gap is not None:
+            extracted_props['homo_lumo_gap'] = last_gap
+        
+        # --- Dipole moment from text ---
+        # Format: "Magnitude (Debye)      :      2.38138"
+        last_dipole = None
+        for line in lines:
+            if "Magnitude (Debye)" in line:
+                try:
+                    parts = line.split(':')
+                    if len(parts) > 1:
+                        last_dipole = float(parts[-1].strip())
+                except (ValueError, IndexError):
+                    pass
+        # Also try "Total Dipole Moment" for norm calculation
+        if last_dipole is None:
+            dipole_re = re.compile(r"Total Dipole Moment\s*:\s*(-?\d+\.\d+)\s*(-?\d+\.\d+)\s*(-?\d+\.\d+)")
             for line in lines:
-                match = homo_lumo_gap_re.search(line)
+                match = dipole_re.search(line)
                 if match:
                     try:
-                        extracted_props['homo_lumo_gap'] = float(match.group(1))
-                        break
+                        dx, dy, dz = float(match.group(1)), float(match.group(2)), float(match.group(3))
+                        last_dipole = np.sqrt(dx*dx + dy*dy + dz*dz)
                     except ValueError:
                         pass
+        if last_dipole is not None:
+            extracted_props['dipole_moment'] = last_dipole
         
-        # Dipole moment (use dipolemagnitude if available, else compute from dipoletotal)
-        dipole_list = opi_output.get_dipole()
-        if dipole_list:
-            dipole_data = dipole_list[0]
-            if hasattr(dipole_data, 'dipolemagnitude') and dipole_data.dipolemagnitude is not None:
-                extracted_props['dipole_moment'] = dipole_data.dipolemagnitude
-            elif hasattr(dipole_data, 'dipoletotal') and dipole_data.dipoletotal is not None:
-                extracted_props['dipole_moment'] = np.linalg.norm(dipole_data.dipoletotal)
+        # --- Vibrational frequencies from text ---
+        _extract_vibfreqs_from_file_opi(lines, extracted_props, logfile_path)
         
-        # Rotational constants (extract from file since not directly in JSON)
+        # --- Rotational constants from text ---
         extracted_props['rotational_constants'] = _extract_rotconsts_from_file_opi(lines)
         
-        # Calculate radius of gyration
+        # --- Calculate radius of gyration ---
         if extracted_props['final_geometry_atomnos'] is not None and extracted_props['final_geometry_coords'] is not None:
             if len(extracted_props['final_geometry_atomnos']) > 0 and extracted_props['final_geometry_coords'].shape[0] > 0:
                 try:
@@ -1281,7 +1324,7 @@ def extract_properties_with_opi(logfile_path):
                 except Exception:
                     pass
         
-        # Detect Hydrogen Bonds
+        # --- Detect Hydrogen Bonds ---
         if extracted_props['final_geometry_atomnos'] is not None and extracted_props['final_geometry_coords'] is not None:
             if len(extracted_props['final_geometry_atomnos']) > 0 and extracted_props['final_geometry_coords'].shape[0] > 0:
                 try:
@@ -1300,14 +1343,26 @@ def _extract_method_from_file_opi(lines):
     """Extract method/functional from ORCA output file lines."""
     try:
         for line in lines:
-            if '|  1> !' in line:
-                parts = line.split('!')
+            # Match any input line: |  1> !, |  2> !, |  3> !, etc.
+            if re.search(r'\|\s*\d+>\s*!', line) or re.search(r'\|\s*\d+>\s*#', line):
+                parts = line.split('!') if '!' in line else line.split('#')
                 if len(parts) > 1:
                     keywords = parts[1].strip().split()
                     for kw in keywords:
                         kw_upper = kw.upper()
-                        if any(x in kw_upper for x in ['B3LYP', 'PBE', 'TPSS', 'M06', 'B97', 'R2SCAN', 'HF', 'MP2', 'CCSD']):
+                        # DFT functionals and methods
+                        if any(x in kw_upper for x in ['B3LYP', 'PBE', 'TPSS', 'M06', 'B97', 'R2SCAN', 'HF', 'MP2', 'CCSD', 'DLPNO']):
                             return kw
+                        # Semiempirical methods (GFN-xTB, PM3, AM1, etc.)
+                        if any(x in kw_upper for x in ['GFN', 'XTB', 'PM3', 'PM6', 'PM7', 'AM1', 'MNDO', 'ZINDO']):
+                            return kw
+        # Also check for "Your calculation utilizes the semiempirical" line
+        for line in lines:
+            if 'Your calculation utilizes the semiempirical' in line:
+                parts = line.split('semiempirical')
+                if len(parts) > 1:
+                    method = parts[1].strip().split()[0]
+                    return method
     except:
         pass
     return "Unknown"
@@ -1316,28 +1371,88 @@ def _extract_basis_from_file_opi(lines):
     """Extract basis set from ORCA output file lines."""
     try:
         for line in lines:
-            if '|  1> !' in line:
-                parts = line.split('!')
+            # Match any input line: |  1> !, |  2> !, |  3> !, etc.
+            if re.search(r'\|\s*\d+>\s*!', line) or re.search(r'\|\s*\d+>\s*#', line):
+                parts = line.split('!') if '!' in line else line.split('#')
                 if len(parts) > 1:
                     keywords = parts[1].strip().split()
                     for kw in keywords:
                         kw_upper = kw.upper()
-                        if any(x in kw_upper for x in ['DEF2', 'CC-PV', 'AUG-CC', 'STO', 'SVP', 'TZVP', 'QZVP']):
+                        if any(x in kw_upper for x in ['DEF2', 'CC-PV', 'AUG-CC', 'STO', 'SVP', 'TZVP', 'QZVP', '6-31', '6-311']):
                             return kw
     except:
         pass
     return "Unknown"
 
+def _extract_charge_mult_from_file_opi(lines, extracted_props):
+    """Extract charge and multiplicity from ORCA input section in output file."""
+    try:
+        for line in lines:
+            # Match "* xyz CHARGE MULT" or "* xyzfile CHARGE MULT ..."
+            match = re.search(r'\*\s*(?:xyz|xyzfile|int|gzmt)\s+(-?\d+)\s+(\d+)', line, re.IGNORECASE)
+            if match:
+                extracted_props['charge'] = int(match.group(1))
+                extracted_props['multiplicity'] = int(match.group(2))
+                return
+    except:
+        pass
+
+def _extract_vibfreqs_from_file_opi(lines, extracted_props, logfile_path):
+    """Extract vibrational frequencies from ORCA output file lines."""
+    try:
+        # Look for "VIBRATIONAL FREQUENCIES" section
+        freq_section_start = None
+        for i, line in enumerate(lines):
+            if 'VIBRATIONAL FREQUENCIES' in line and '---' not in line:
+                freq_section_start = i
+        
+        if freq_section_start is None:
+            return
+        
+        freqs = []
+        for i in range(freq_section_start + 3, len(lines)):
+            line = lines[i].strip()
+            if not line or '---' in line or '=' in line or 'NORMAL MODES' in line:
+                break
+            parts = line.split()
+            # Format: "   0:         0.00 cm**-1" or "   6:       123.45 cm**-1"
+            if len(parts) >= 2:
+                try:
+                    freq_val = float(parts[1])
+                    if freq_val != 0.0:
+                        freqs.append(freq_val)
+                except ValueError:
+                    continue
+        
+        if freqs:
+            extracted_props['_has_freq_calc'] = True
+            imag_freqs = [f for f in freqs if f < 0]
+            real_freqs = [f for f in freqs if f > 0]
+            
+            extracted_props['num_imaginary_freqs'] = len(imag_freqs)
+            extracted_props['_has_imaginary_freqs'] = len(imag_freqs) > 0
+            
+            if len(imag_freqs) > 0:
+                print(f"  INFO: {os.path.basename(logfile_path)} contains {len(imag_freqs)} imaginary freq(s) - will be filtered after clustering")
+            
+            if real_freqs:
+                extracted_props['first_vib_freq'] = min(real_freqs)
+                extracted_props['last_vib_freq'] = max(real_freqs)
+    except:
+        pass
+
 def _extract_rotconsts_from_file_opi(lines):
     """Extract rotational constants from ORCA output file lines."""
     try:
+        last_match = None
         for line in lines:
             if 'Rotational constants in cm-1:' in line or 'Rotational constants in MHz:' in line:
                 parts = line.split(':')
                 if len(parts) > 1:
                     values = parts[1].strip().split()
                     if len(values) >= 3:
-                        return np.array([float(values[0]), float(values[1]), float(values[2])])
+                        last_match = np.array([float(values[0]), float(values[1]), float(values[2])])
+        return last_match
     except:
         pass
     return None

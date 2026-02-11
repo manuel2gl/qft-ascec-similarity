@@ -3968,8 +3968,8 @@ def create_launcher_script(replicated_files: List[str], input_dir: str, script_n
                 
                 commands.append(f"python {ascec_script_path} {rel_path} > {output_name}")
             
-            # Join commands with " && \\\n" for sequential execution
-            f.write(" && \\\n".join(commands))
+            # Join commands with " ; \\\n" for sequential execution
+            f.write(" ; \\\n".join(commands))
             f.write("\n")
         
         # Make the script executable
@@ -4026,8 +4026,8 @@ def merge_launcher_scripts(working_dir: str = ".") -> str:
             for line in lines:
                 line = line.strip()
                 if line and not line.startswith('#') and 'python ascec-v04.py' in line:
-                    # Remove trailing " && \\" if present
-                    line = line.rstrip(' \\&')
+                    # Remove trailing " ; \\" if present
+                    line = line.rstrip(' \\;')
                     commands.append(line)
             
             if commands:
@@ -4065,12 +4065,12 @@ def merge_launcher_scripts(working_dir: str = ".") -> str:
             for i, cmd in enumerate(all_commands):
                 if cmd == "###":
                     # Write separator on its own line
-                    f.write(" && \\\n###\n")
+                    f.write(" ; \\\n###\n")
                 else:
                     f.write(cmd)
-                    # Add " && \" only if this is not the last command and the next command is not "###"
+                    # Add " ; \" only if this is not the last command and the next command is not "###"
                     if i < len(all_commands) - 1 and all_commands[i + 1] != "###":
-                        f.write(" && \\\n")
+                        f.write(" ; \\\n")
                     elif i == len(all_commands) - 1:
                         f.write("\n")  # Last command, just add newline
         
@@ -5307,11 +5307,11 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                         break
                     else:
                         # Skip lines that look like run commands (generic pattern)
-                        # Pattern: <command> <file>.<ext> [> <output>] [&&]
-                        if re.search(r'\S+\s+\S+\.(inp|gjf|com)\s*(?:>|&&|\s*$)', line):
+                        # Pattern: <command> <file>.<ext> [> <output>] [; or &&]
+                        if re.search(r'\S+\s+\S+\.(inp|gjf|com)\s*(?:>|;|&&|\s*$)', line):
                             continue
-                        # Skip standalone && or && \ lines
-                        if line.strip() in ('&&', '&& \\', '\\'):
+                        # Skip standalone && or ; or \ lines
+                        if line.strip() in ('&&', '&& \\', ';', '; \\', '\\'):
                             continue
                         f.write(line + "\n")
                 
@@ -5336,7 +5336,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                         cmd = f"{qm_executable} {input_file} > {output_file}"
                         
                     if i < len(all_input_files) - 1:
-                        f.write(f"{cmd} && \\\n")
+                        f.write(f"{cmd} ; \\\n")
                     else:
                         f.write(f"{cmd}\n")
                         
@@ -11411,7 +11411,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # Add continuation for all but last command
                 if i < len(launcher_input_files) - 1:
-                    f.write(" && \\\n")
+                    f.write(" ; \\\n")
                 else:
                     f.write("\n")
         
