@@ -6390,7 +6390,7 @@ def summarize_calculations(directory=".", file_types=None):
     return sum(results_by_type.values())
 
 def find_out_files(root_dir):
-    """Find all .out files in the directory tree using parallel processing."""
+    """Find all .out (ORCA) and .log (Gaussian) files in the directory tree using parallel processing."""
     import multiprocessing as mp
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import os
@@ -6407,7 +6407,7 @@ def find_out_files(root_dir):
         root, files = dir_data
         local_out_files = []
         for file in files:
-            if file.endswith('.out'):
+            if file.endswith('.out') or file.endswith('.log'):
                 local_out_files.append(os.path.join(root, file))
         return local_out_files
     
@@ -6447,18 +6447,31 @@ def get_unique_folder_name(base_name, current_dir):
 
 
 def collect_out_files():
-    """Collect all .out files into a single folder inside a similarity directory."""
+    """Collect all .out (ORCA) and .log (Gaussian) files into a single folder inside a similarity directory."""
     current_directory = os.getcwd()
-    print(f"Searching for .out files in: {current_directory} and its subfolders...")
+    print(f"Searching for output files in: {current_directory} and its subfolders...")
 
     all_out_files = find_out_files(current_directory)
 
     if not all_out_files:
-        print("No .out files found in the current directory or its subfolders.")
+        print("No output files found in the current directory or its subfolders.")
         return False
 
     num_files = len(all_out_files)
-    base_destination_folder_name = f"orca_out_{num_files}"
+    
+    # Detect file types to name folder appropriately
+    has_orca = any(f.endswith('.out') for f in all_out_files)
+    has_gaussian = any(f.endswith('.log') for f in all_out_files)
+    
+    if has_orca and has_gaussian:
+        base_destination_folder_name = f"calc_out_{num_files}"
+        file_type_desc = "output files (ORCA and Gaussian)"
+    elif has_gaussian:
+        base_destination_folder_name = f"gaussian_out_{num_files}"
+        file_type_desc = "Gaussian files"
+    else:
+        base_destination_folder_name = f"orca_out_{num_files}"
+        file_type_desc = "ORCA files"
     
     # Create similarity directory at parent level
     parent_directory = os.path.dirname(current_directory)
@@ -6480,7 +6493,7 @@ def collect_out_files():
         except Exception as e:
             return f"Error copying {os.path.basename(file_path)}: {e}"
 
-    print(f"Copying {num_files} .out files to 'similarity/{destination_folder_name}' in parallel...")
+    print(f"Copying {num_files} {file_type_desc} to 'similarity/{destination_folder_name}' in parallel...")
     
     # Use parallel processing for file copying
     import multiprocessing as mp
@@ -6507,7 +6520,7 @@ def collect_out_files():
             except Exception as e:
                 print(f"  Unexpected error: {e}")
 
-    print(f"\nCopied {successful_copies}/{num_files} .out files to similarity/{destination_folder_name}")
+    print(f"\nCopied {successful_copies}/{num_files} {file_type_desc} to similarity/{destination_folder_name}")
     print("Process complete. Original files remain untouched.")
     return True
 
@@ -6655,7 +6668,7 @@ def create_summary_with_tracking(directory):
 
 
 def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None):
-    """Collect .out files and return the created similarity folder path."""
+    """Collect .out (ORCA) and .log (Gaussian) files and return the created similarity folder path."""
     try:
         current_directory = os.getcwd()
         all_out_files = find_out_files(current_directory)
@@ -6664,7 +6677,9 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
         all_out_files = [f for f in all_out_files if not (
             '.backup' in f or 
             f.endswith('.out.backup') or
+            f.endswith('.log.backup') or
             'orca_summary' in os.path.basename(f).lower() or
+            'gaussian_summary' in os.path.basename(f).lower() or
             '.scfhess.' in os.path.basename(f) or
             '.scfgrad.' in os.path.basename(f) or
             '.scfp.' in os.path.basename(f)
@@ -6674,7 +6689,17 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
             return None
         
         num_files = len(all_out_files)
-        base_destination_folder_name = f"orca_out_{num_files}"
+        
+        # Detect file types to name folder appropriately
+        has_orca = any(f.endswith('.out') for f in all_out_files)
+        has_gaussian = any(f.endswith('.log') for f in all_out_files)
+        
+        if has_orca and has_gaussian:
+            base_destination_folder_name = f"calc_out_{num_files}"
+        elif has_gaussian:
+            base_destination_folder_name = f"gaussian_out_{num_files}"
+        else:
+            base_destination_folder_name = f"orca_out_{num_files}"
         
         # Create similarity folder with incremental numbering at parent level
         parent_directory = os.path.dirname(current_directory)
@@ -6710,13 +6735,18 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
         similarity_dir = get_next_similarity_dir()
         os.makedirs(similarity_dir, exist_ok=True)
         
-        # Create the orca_out_### subfolder inside similarity folder
+        # Create the calc_out/orca_out/gaussian_out subfolder inside similarity folder
         if reuse_existing:
-            # In redo mode: always reuse the same orca_out folder (cleanup if exists)
+            # In redo mode: always reuse the same output folder (cleanup if exists)
+            # Look for any of the possible folder patterns
             existing_orca_dirs = glob.glob(os.path.join(similarity_dir, f"orca_out_{num_files}*"))
+            existing_gaussian_dirs = glob.glob(os.path.join(similarity_dir, f"gaussian_out_{num_files}*"))
+            existing_calc_dirs = glob.glob(os.path.join(similarity_dir, f"calc_out_{num_files}*"))
+            existing_orca_dirs.extend(existing_gaussian_dirs)
+            existing_orca_dirs.extend(existing_calc_dirs)
             
             if existing_orca_dirs:
-                # Use the first existing folder (should be orca_out_N, not orca_out_N_1)
+                # Use the first existing folder (should be *_out_N, not *_out_N_1)
                 destination_path = existing_orca_dirs[0]
                 destination_folder_name = os.path.basename(destination_path)
                 
@@ -6753,13 +6783,20 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
             destination_path = os.path.join(similarity_dir, destination_folder_name)
             os.makedirs(destination_path, exist_ok=True)
         
-        # Copy files to the orca_out_### subfolder
+        # Copy files to the output subfolder
         for file_path in all_out_files:
             shutil.copy2(file_path, destination_path)
         
         # Get just the folder name for display (without full path)
         similarity_folder_name = os.path.basename(similarity_dir)
-        print(f"Copied {num_files} .out files to {similarity_folder_name}/{destination_folder_name}")
+        file_type_desc = "output files"
+        if has_orca and has_gaussian:
+            file_type_desc = "ORCA and Gaussian files"
+        elif has_gaussian:
+            file_type_desc = "Gaussian files"
+        else:
+            file_type_desc = "ORCA files"
+        print(f"Copied {num_files} {file_type_desc} to {similarity_folder_name}/{destination_folder_name}")
         return destination_path
     except Exception:
         return None
@@ -7515,15 +7552,15 @@ def get_critical_count(calc_dir: str) -> int:
     """
     critical_count = 0
     
-    # Look for ORCA output files
+    # Look for ORCA (.out) and Gaussian (.log) output files
     for root, dirs, files in os.walk(calc_dir):
         for file in files:
-            if file.endswith('.out'):
+            if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
                 try:
                     with open(filepath, 'r') as f:
                         content = f.read()
-                        # Check for imaginary frequencies
+                        # Check for imaginary frequencies (ORCA and Gaussian)
                         if 'imaginary mode' in content.lower() or '***imaginary' in content.lower():
                             critical_count += 1
                 except:
@@ -7542,7 +7579,7 @@ def get_critical_files_list(calc_dir: str) -> List[str]:
     
     for root, dirs, files in os.walk(calc_dir):
         for file in files:
-            if file.endswith('.out'):
+            if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
                 try:
                     with open(filepath, 'r') as f:
@@ -9644,9 +9681,9 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
             
             # If still not found, check similarity directory (where files are moved after stage completion)
             if not out_file and sim_dir and os.path.exists(sim_dir):
-                # Check for orca_out_* directories in similarity folder
+                # Check for orca_out_*/gaussian_out_*/calc_out_* directories in similarity folder
                 for item in os.listdir(sim_dir):
-                    if item.startswith('orca_out_') or item.startswith('gaussian_out_'):
+                    if item.startswith('orca_out_') or item.startswith('gaussian_out_') or item.startswith('calc_out_'):
                         out_dir = os.path.join(sim_dir, item)
                         if os.path.isdir(out_dir):
                             if os.path.exists(os.path.join(out_dir, f"{basename}.out")):
@@ -9948,7 +9985,7 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
         # Priority 3: Check similarity output folders (if not found in optimization yet)
         if not out_file and os.path.exists(sim_dir):
             for item in os.listdir(sim_dir):
-                if item.startswith('orca_out_') or item.startswith('gaussian_out_'):
+                if item.startswith('orca_out_') or item.startswith('gaussian_out_') or item.startswith('calc_out_'):
                     check_path = os.path.join(sim_dir, item, f"{basename}.out")
                     if os.path.exists(check_path):
                         out_file = check_path
@@ -10193,7 +10230,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         sim_dir = getattr(context, 'similarity_dir', 'similarity')
         if os.path.exists(sim_dir):
             for item in os.listdir(sim_dir):
-                if item.startswith('orca_out_') or item.startswith('gaussian_out_'):
+                if item.startswith('orca_out_') or item.startswith('gaussian_out_') or item.startswith('calc_out_'):
                     out_dir = os.path.join(sim_dir, item)
                     if os.path.isdir(out_dir):
                         files_in_subdir = os.listdir(out_dir)
@@ -10218,7 +10255,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             if item.startswith('similarity_') and os.path.isdir(item):
                 sim_dir_n = item
                 for subitem in os.listdir(sim_dir_n):
-                    if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_'):
+                    if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_') or subitem.startswith('calc_out_'):
                         out_dir = os.path.join(sim_dir_n, subitem)
                         if os.path.isdir(out_dir):
                             for f in os.listdir(out_dir):
@@ -11557,7 +11594,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Only check the optimization's designated similarity folder
         if opt_sim_folder and os.path.isdir(opt_sim_folder):
             for subitem in os.listdir(opt_sim_folder):
-                if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_'):
+                if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_') or subitem.startswith('calc_out_'):
                     out_dir = os.path.join(opt_sim_folder, subitem)
                     if os.path.isdir(out_dir):
                         for f in os.listdir(out_dir):
