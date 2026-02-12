@@ -530,6 +530,30 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
             'max_hbond_angle': None, 'std_hbond_angle': None
         }
 
+def detect_file_type(logfile_path):
+    """
+    Detect whether the output file is from ORCA or Gaussian.
+    
+    Args:
+        logfile_path: Path to output file (.out or .log)
+        
+    Returns:
+        'orca', 'gaussian', or None if not detected
+    """
+    try:
+        with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f:
+            # Read first 100 lines to detect file type
+            for i, line in enumerate(f):
+                if i > 100:
+                    break
+                if 'O   R   C   A' in line:
+                    return 'orca'
+                if 'Gaussian' in line:
+                    return 'gaussian'
+    except Exception:
+        pass
+    return None
+
 def detect_orca_version(logfile_path):
     """
     Detect ORCA version from output file.
@@ -558,54 +582,69 @@ def detect_orca_version(logfile_path):
 
 def choose_parser(logfile_path):
     """
-    Automatically choose the appropriate parser based on file and available libraries.
+    Automatically choose the appropriate parser based on file type and available libraries.
     
     Args:
-        logfile_path: Path to ORCA output file
+        logfile_path: Path to ORCA or Gaussian output file
         
     Returns:
         'opi' or 'cclib', or raises error if no suitable parser
     """
-    version = detect_orca_version(logfile_path)
+    # First, detect the file type (ORCA or Gaussian)
+    file_type = detect_file_type(logfile_path)
     
-    # If version detected
-    if version:
-        major, minor = version
-        
-        # ORCA 6.1+ requires OPI (use tuple comparison for correct 7.0, 8.0 etc.)
-        if (major, minor) >= (6, 1):
-            if OPI_AVAILABLE:
-                return 'opi'
-            else:
-                raise RuntimeError(
-                    f"ORCA version {major}.{minor} detected, which requires OPI. "
-                    "Please install OPI: pip install orca-pi"
-                )
-        
-        # ORCA 6.0 not supported by either
-        elif major == 6 and minor == 0:
-            raise RuntimeError(
-                f"ORCA version 6.0 is not supported. Please use ORCA 5.0.x or ORCA 6.1+. "
-                "cclib supports up to ORCA 5.0.x, OPI supports ORCA 6.1+"
-            )
-        
-        # ORCA <=5.0 can use cclib
+    # For Gaussian files, always use cclib (OPI only supports ORCA)
+    if file_type == 'gaussian':
+        if CCLIB_AVAILABLE:
+            return 'cclib'
         else:
-            if CCLIB_AVAILABLE:
-                return 'cclib'
-            elif OPI_AVAILABLE:
-                warnings.warn(
-                    f"ORCA version {major}.{minor} detected. OPI will be used, but cclib is recommended for ORCA <=5.0"
-                )
-                return 'opi'
-            else:
-                raise RuntimeError("Neither cclib nor OPI available. Please install one of them.")
+            raise RuntimeError(
+                "Gaussian output file detected, but cclib is not installed. "
+                "Please install cclib: pip install cclib"
+            )
     
-    # If version not detected, use available parser (prefer OPI for newer files)
-    if OPI_AVAILABLE:
-        return 'opi'
-    elif CCLIB_AVAILABLE:
+    # For ORCA files, check version and choose appropriate parser
+    if file_type == 'orca':
+        version = detect_orca_version(logfile_path)
+        
+        # If version detected
+        if version:
+            major, minor = version
+            
+            # ORCA 6.1+ requires OPI (use tuple comparison for correct 7.0, 8.0 etc.)
+            if (major, minor) >= (6, 1):
+                if OPI_AVAILABLE:
+                    return 'opi'
+                else:
+                    raise RuntimeError(
+                        f"ORCA version {major}.{minor} detected, which requires OPI. "
+                        "Please install OPI: pip install orca-pi"
+                    )
+            
+            # ORCA 6.0 not supported by either
+            elif major == 6 and minor == 0:
+                raise RuntimeError(
+                    f"ORCA version 6.0 is not supported. Please use ORCA 5.0.x or ORCA 6.1+. "
+                    "cclib supports up to ORCA 5.0.x, OPI supports ORCA 6.1+"
+                )
+            
+            # ORCA <=5.0 can use cclib
+            else:
+                if CCLIB_AVAILABLE:
+                    return 'cclib'
+                elif OPI_AVAILABLE:
+                    warnings.warn(
+                        f"ORCA version {major}.{minor} detected. OPI will be used, but cclib is recommended for ORCA <=5.0"
+                    )
+                    return 'opi'
+                else:
+                    raise RuntimeError("Neither cclib nor OPI available. Please install one of them.")
+    
+    # If file type not detected, use available parser (prefer cclib for compatibility)
+    if CCLIB_AVAILABLE:
         return 'cclib'
+    elif OPI_AVAILABLE:
+        return 'opi'
     else:
         raise RuntimeError("Neither cclib nor OPI available. Please install one of them.")
 
