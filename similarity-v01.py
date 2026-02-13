@@ -4252,6 +4252,7 @@ INPUT:
 
 OUTPUT FILES:
   clustering_summary.txt          Comprehensive clustering report with statistics
+  data_cache.pkl                  Cache file for output data
   dendrogram_images/              Hierarchical clustering dendrograms
     └── dendrogram.png            (or dendrogram_H{N}.png for H-bond groups)
   extracted_data/                 Raw data files (.dat) for each cluster
