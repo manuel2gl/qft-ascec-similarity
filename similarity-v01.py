@@ -95,6 +95,54 @@ def hartree_to_ev(energy_hartree):
     """Convert energy from Hartree to eV"""
     return energy_hartree * HARTREE_TO_EV
 
+def detect_motif_input_level(filenames):
+    """
+    Detect the input naming level to determine the appropriate output prefix.
+    
+    Naming convention:
+    - conf_### or opt_conf_### → First step (preoptimization) → outputs motif_##
+    - motif_## or motif_##_opt → Second step (optimization) → outputs umotif_##
+    - umotif_## → Third step (if applicable) → outputs umotif_## (no further prefix)
+    
+    Args:
+        filenames: List of input file names to analyze
+        
+    Returns:
+        tuple: (output_prefix, folder_prefix, is_second_step)
+            - output_prefix: 'motif' or 'umotif'
+            - folder_prefix: 'motifs' or 'umotifs'
+            - is_second_step: True if input files are already motifs
+    """
+    if not filenames:
+        return 'motif', 'motifs', False
+    
+    # Count files matching each pattern
+    motif_pattern = re.compile(r'^motif_\d+', re.IGNORECASE)
+    umotif_pattern = re.compile(r'^umotif_\d+', re.IGNORECASE)
+    
+    motif_count = 0
+    umotif_count = 0
+    
+    for filename in filenames:
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        if umotif_pattern.match(base_name):
+            umotif_count += 1
+        elif motif_pattern.match(base_name):
+            motif_count += 1
+    
+    total_files = len(filenames)
+    
+    # If majority of files are umotif, keep using umotif
+    if umotif_count > total_files * 0.5:
+        return 'umotif', 'umotifs', True
+    
+    # If majority of files are motif, use umotif for output
+    if motif_count > total_files * 0.5:
+        return 'umotif', 'umotifs', True
+    
+    # Default: first step, use motif
+    return 'motif', 'motifs', False
+
 def vprint(message, **kwargs):
     """Print message only if verbose mode is enabled"""
     if VERBOSE:
@@ -2416,9 +2464,9 @@ def write_xyz_file(mol_data, filename):
         for i in range(len(atomnos)):
             f.write(f"{symbols[i]:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
 
-def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel", cluster_id_mapping=None):
+def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel", cluster_id_mapping=None, output_prefix='motif', folder_prefix='motifs'):
     """
-    Creates a motifs folder containing the lowest energy representative structure from each cluster.
+    Creates a motifs/umotifs folder containing the lowest energy representative structure from each cluster.
     Also creates a combined XYZ file with all representatives and attempts to convert to MOL format.
     
     Args:
@@ -2426,19 +2474,27 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         output_base_dir (str): Base output directory where motifs folder will be created
         openbabel_alias (str): Alias for OpenBabel command (default: "obabel")
         cluster_id_mapping (dict): Optional mapping from cluster index to original cluster ID
+        output_prefix (str): Prefix for output files - 'motif' for first step, 'umotif' for second step
+        folder_prefix (str): Prefix for output folder - 'motifs' or 'umotifs'
+        
+    Returns:
+        dict: Mapping from motif number to cluster ID
     """
     if not all_clusters_data:
         print("  No clusters found. Skipping motifs creation.")
-        return
+        return {}
     
 
     num_motifs = len(all_clusters_data)
-    motifs_dir = os.path.join(output_base_dir, f"motifs_{num_motifs:02d}")
+    motifs_dir = os.path.join(output_base_dir, f"{folder_prefix}_{num_motifs:02d}")
     os.makedirs(motifs_dir, exist_ok=True)
+    
+    # Determine display name based on prefix
+    display_name = "unique motifs" if output_prefix == 'umotif' else "motifs"
     
     print()
     print()
-    print_step(f"Creating {num_motifs} motifs from cluster representatives...")
+    print_step(f"Creating {num_motifs} {display_name} from cluster representatives...")
     vprint(f"  Output directory: {motifs_dir}")
     
     representatives = []
@@ -2478,11 +2534,14 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
     for motif_idx, (representative, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
         base_name = os.path.splitext(representative['filename'])[0]
         
-        # Check if base_name already has a motif number
-        if base_name.startswith("motif_"):
+        # For umotif output, always use clean umotif_## naming regardless of input name
+        if output_prefix == 'umotif':
+            # Clean naming: umotif_01.xyz (the source is recorded in the combined XYZ comment)
+            motif_filename = f"{output_prefix}_{motif_idx:02d}.xyz"
+        # Check if base_name already has a motif number (for motif output from non-motif input)
+        elif base_name.lower().startswith("motif_"):
             # Extract the motif number from base_name (e.g., "motif_01_opt" -> 1)
-            import re
-            match = re.match(r"motif_(\d+)", base_name)
+            match = re.match(r"motif_(\d+)", base_name, re.IGNORECASE)
             if match:
                 original_motif_num = int(match.group(1))
                 if original_motif_num == motif_idx:
@@ -2490,23 +2549,26 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
                     motif_filename = f"{base_name}.xyz"
                 else:
                     # Energy rank differs, show both to indicate reordering
-                    motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+                    motif_filename = f"{output_prefix}_{motif_idx:02d}_{base_name}.xyz"
             else:
                 # Couldn't parse motif number, use full format
-                motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+                motif_filename = f"{output_prefix}_{motif_idx:02d}_{base_name}.xyz"
         else:
             # Doesn't start with motif_, use full format
-            motif_filename = f"motif_{motif_idx:02d}_{base_name}.xyz"
+            motif_filename = f"{output_prefix}_{motif_idx:02d}_{base_name}.xyz"
         
         motif_path = os.path.join(motifs_dir, motif_filename)
         
         write_xyz_file(representative, motif_path)
         
         gibbs_str = f"{representative['gibbs_free_energy']:.6f}" if representative['gibbs_free_energy'] is not None else "N/A"
-        vprint(f"  Motif {motif_idx:02d}: {base_name} (Gibbs Energy: {gibbs_str} Hartree, Cluster ID: {cluster_id})")
+        display_prefix = output_prefix.upper() if output_prefix == 'umotif' else 'Motif'
+        vprint(f"  {display_prefix} {motif_idx:02d}: {base_name} (Gibbs Energy: {gibbs_str} Hartree, Cluster ID: {cluster_id})")
     
 
-    combined_xyz_path = os.path.join(motifs_dir, "all_motifs_combined.xyz")
+    # Use appropriate filename based on prefix
+    combined_xyz_filename = f"all_{folder_prefix}_combined.xyz"
+    combined_xyz_path = os.path.join(motifs_dir, combined_xyz_filename)
     
     with open(combined_xyz_path, "w", newline='\n') as outfile:
         for motif_idx, (rep_data, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
@@ -2520,9 +2582,14 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
             
             base_name = os.path.splitext(rep_data['filename'])[0]
             gibbs_str = f"{gibbs_free_energy:.6f} Hartree ({hartree_to_kcal_mol(gibbs_free_energy):.2f} kcal/mol, {hartree_to_ev(gibbs_free_energy):.2f} eV)" if gibbs_free_energy is not None else "N/A"
-            # Use the actual motif filename that was created, ensuring lowercase 'm' and correct configuration
-            motif_name = f"motif_{motif_idx:02d}_{base_name}"
-            comment_line = f"{motif_name} (G = {gibbs_str})"
+            # Use the output_prefix for naming, include source info for umotif
+            if output_prefix == 'umotif':
+                # For umotifs, include the source motif name in the comment for traceability
+                motif_name = f"{output_prefix}_{motif_idx:02d}"
+                comment_line = f"{motif_name} (from {base_name}, G = {gibbs_str})"
+            else:
+                motif_name = f"{output_prefix}_{motif_idx:02d}_{base_name}"
+                comment_line = f"{motif_name} (G = {gibbs_str})"
             
             outfile.write(f"{len(atomnos)}\n")
             outfile.write(f"{comment_line}\n")
@@ -2537,8 +2604,9 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
     
     vprint(f"  Created combined XYZ file: {os.path.basename(combined_xyz_path)}")
     
-    # Attempt to create MOL file using OpenBabel
-    mol_output_path = os.path.join(motifs_dir, "all_motifs_combined.mol")
+    # Attempt to create MOL file using OpenBabel  
+    mol_filename = f"all_{folder_prefix}_combined.mol"
+    mol_output_path = os.path.join(motifs_dir, mol_filename)
     openbabel_full_path = shutil.which(openbabel_alias)
     
     if openbabel_full_path:
@@ -2631,25 +2699,29 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
                 plt.figure(figsize=(12, 8))
                 dendrogram(linkage_matrix, labels=motif_labels, orientation='top', 
                           distance_sort=True, show_leaf_counts=True)
-                plt.title(f'Motifs Dendrogram (Complete Feature Clustering)')
-                plt.xlabel('Motif')
+                # Use appropriate title based on prefix
+                dendrogram_title = 'Unique Motifs (umotifs)' if output_prefix == 'umotif' else 'Motifs'
+                plt.title(f'{dendrogram_title} Dendrogram')
+                plt.xlabel(dendrogram_title)
                 plt.ylabel('Distance')
                 plt.xticks(rotation=0)  # Keep horizontal since labels are short
                 plt.tight_layout()
                 
                 # Save dendrogram in the motifs directory
-                dendrogram_path = os.path.join(motifs_dir, "motifs_dendrogram.png")
+                dendrogram_filename = f"{folder_prefix}_dendrogram.png"
+                dendrogram_path = os.path.join(motifs_dir, dendrogram_filename)
                 plt.savefig(dendrogram_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 
-                print(f"  Created motifs dendrogram: {os.path.basename(dendrogram_path)}")
+                print(f"  Created {folder_prefix} dendrogram: {os.path.basename(dendrogram_path)}")
         
     except ImportError:
-        print("  WARNING: matplotlib not available. Skipping motifs dendrogram creation.")
+        print(f"  WARNING: matplotlib not available. Skipping {folder_prefix} dendrogram creation.")
     except Exception as e:
-        print(f"  WARNING: Error creating motifs dendrogram: {e}")
+        print(f"  WARNING: Error creating {folder_prefix} dendrogram: {e}")
     
-    print_step(f"Motifs created: {len(sorted_representatives_with_ids)} representatives saved to {os.path.basename(motifs_dir)}\n")
+    display_name = "Unique motifs" if output_prefix == 'umotif' else "Motifs"
+    print_step(f"{display_name} created: {len(sorted_representatives_with_ids)} representatives saved to {os.path.basename(motifs_dir)}\n")
     
     return motif_to_cluster_mapping
 
@@ -3982,9 +4054,19 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             cluster_id = cluster_members[0].get('_cluster_global_id', cluster_idx + 1)
             cluster_id_mapping[cluster_idx] = cluster_id
 
+    # Detect if inputs are from a previous motif step to determine output naming
+    # This enables the workflow: conf_### → motif_## → umotif_##
+    all_input_filenames = [m.get('filename', '') for m in clean_data_for_clustering]
+    output_prefix, folder_prefix, is_second_step = detect_motif_input_level(all_input_filenames)
+    
+    if is_second_step:
+        print_step(f"Detected motif inputs - using '{output_prefix}_##' naming for unique motifs")
+
     # Create motifs folder with representative structures from each cluster
     motif_to_cluster_mapping = create_unique_motifs_folder(all_final_clusters, output_base_dir, 
-                                                          cluster_id_mapping=cluster_id_mapping)
+                                                          cluster_id_mapping=cluster_id_mapping,
+                                                          output_prefix=output_prefix,
+                                                          folder_prefix=folder_prefix)
 
     # --- Create separate Boltzmann Distribution Analysis file ---
     boltzmann_file_content_lines = []
@@ -4053,7 +4135,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             
             cluster_line = f"cluster_{cluster_id}"
             if motif_num is not None:
-                cluster_line += f" (motif_{motif_num:02d})"
+                # Use the detected output prefix (motif_ or umotif_)
+                cluster_line += f" ({output_prefix}_{motif_num:02d})"
                 
             boltzmann_file_content_lines.append(cluster_line)
             boltzmann_file_content_lines.append(f"  Structure: {os.path.splitext(data['filename'])[0]}")
@@ -4062,6 +4145,40 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             boltzmann_file_content_lines.append("")
 
         boltzmann_file_content_lines.append("=" * 75)
+    
+    # --- Create enhanced summary with motif/umotif assignments ---
+    # Add a section at the end of the summary showing the mapping from clusters to motifs
+    if motif_to_cluster_mapping and boltzmann_g1_data:
+        summary_file_content_lines.append("\n" + "=" * 75)
+        display_name = "Unique Motif (umotif)" if output_prefix == 'umotif' else "Motif"
+        summary_file_content_lines.append(f"\n{display_name} Assignment Summary")
+        summary_file_content_lines.append("(sorted by Boltzmann population)\n")
+        
+        # Create reverse mapping from cluster_id to motif_num
+        cluster_to_motif = {v: k for k, v in motif_to_cluster_mapping.items()}
+        
+        # Sort by population for display
+        sorted_boltzmann = sorted(boltzmann_g1_data.items(), key=lambda x: x[1]['population'], reverse=True)
+        
+        for cluster_id, data in sorted_boltzmann:
+            motif_num = cluster_to_motif.get(cluster_id)
+            if motif_num is not None:
+                source_name = os.path.splitext(data['filename'])[0]
+                summary_file_content_lines.append(
+                    f"cluster_{cluster_id} ({output_prefix}_{motif_num:02d})"
+                )
+                summary_file_content_lines.append(
+                    f"  From structure: {source_name}"
+                )
+                summary_file_content_lines.append(
+                    f"  Energy: {data['energy']:.6f} Hartree ({hartree_to_kcal_mol(data['energy']):.2f} kcal/mol, {hartree_to_ev(data['energy']):.2f} eV)"
+                )
+                summary_file_content_lines.append(
+                    f"  Population: {data['population']:.2f} %"
+                )
+                summary_file_content_lines.append("")
+        
+        summary_file_content_lines.append("=" * 75)
     
     # Write separate files
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
