@@ -7623,8 +7623,8 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
             stage_dict['pause_after'] = True
         return stage_dict
     
-    # Similarity stage: similarity ... or sim ...
-    elif first_arg in ['similarity', 'sim']:
+    # Similarity stage: similarity ... or simil ...
+    elif first_arg in ['similarity', 'simil']:
         stage_dict = {
             'type': 'similarity',
             'args': stage_args[1:]
@@ -12955,69 +12955,100 @@ def main_ascec_integrated():
     # STANDARD SINGLE-COMMAND MODE (backward compatibility)
     # Setup argument parser - use parse_known_args to handle shell expansion
     parser = argparse.ArgumentParser(
-        description="ASCEC v04 - Annealing Simulado con Energía Cuántica",
-        usage="ascec [options] command [arguments]",
+        description="ASCEC - Simulated Annealing with Quantum Energy\nConformational sampling via Monte Carlo with quantum mechanical evaluation",
+        usage="ascec [OPTIONS] COMMAND [ARGUMENTS]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog="""DESCRIPTION:
+  ASCEC (Annealing Simulado con Energía Cuántica) performs automated 
+  configurational sampling of molecular clusters using simulated annealing
+  with quantum mechanical energy evaluation via ORCA or Gaussian.
+
 COMMANDS:
-  input.in [options]      Run single annealing simulation
-  input.in box            Analyze box size requirements  
-  input.in rN             Replicated runs (e.g., r3 = 3 replicas)
-  input.in rN --boxP      Replicated runs with P%% packing (e.g., r3 --box10)
+  Sampling:
+    input.in [options]          Single annealing simulation
+    input.in rN                 N replicated runs (e.g., r3 = 3 replicas)
+    input.in rN --boxP          N replicas with P%% box packing density
+    input.in box                Analyze simulation box requirements
   
-  calc template launcher  Create QM inputs from annealing results
-  opt template launcher   Create optimization inputs from motifs
-  sort [--nosum|--justsum] Organize results and create summaries
+  Analysis:
+    calc TEMPLATE LAUNCHER      Generate quantum chemistry inputs from results
+    opt TEMPLATE LAUNCHER       Generate optimization inputs from motifs
+    sort [--nosum|--justsum]    Organize outputs and generate summary reports
+    simil [OPTIONS]             Clustering analysis (see: ascec simil --help)
   
-  merge [result]          Combine XYZ files interactively
-  update template [pattern] Update existing QM inputs with new template
-  launcher                Merge all launcher scripts
-  
-  diagram                 Generate/regenerate energy vs step diagrams
-  diagram --scaled        Generate diagrams with auto-scaled y-axis
-  
-  sim [options]           Run similarity/clustering analysis (see: sim --help)
-  input.in protocol [N]   Run automated workflow from input file
+  Utilities:
+    diagram [--scaled]          Generate energy evolution plots
+    merge [result]              Interactively combine XYZ structure files
+    update TEMPLATE [PATTERN]   Update existing inputs with new template
+    launcher                    Consolidate launcher scripts
+    input.in protocol [N]       Execute automated multi-stage workflow
 
 WORKFLOW:
-  Manual:   input.in box → input.in r3 → calc → [run QM] → sort → sim
-  Protocol: input.in protocol   (automated workflow defined in .in file)
+  Typical manual workflow:
+    1. ascec input.in box       → validate simulation parameters
+    2. ascec input.in r3        → perform 3 replicated samplings
+    3. ascec calc T.inp L.sh    → generate QM input files
+    4. [Execute quantum calculations externally]
+    5. ascec sort               → organize results and generate summaries
+    6. ascec simil --th=0.9     → cluster structures by similarity
 
-DIAGRAMS:
-  Searches for all tvse_*.dat files and generates:
-    - Individual replica diagrams (tvse_SEED.png)
-    - Combined replica diagram (tvse_rN.png) when N replicas found
-  Use --scaled to apply intelligent y-axis scaling
+  Automated workflow:
+    ascec input.in protocol     → executes all stages automatically
+
+OPTIONS:
+  -v, --v          Verbose output (print every 10 Monte Carlo cycles)
+  --va             Very verbose (print every cycle)
+  --standard       Use standard Metropolis acceptance criterion
+  --nobox          Disable generation of box-visualization XYZ files
+  --nosum          Skip summary file generation in sort command
+  --justsum        Generate summary only without sorting structures
+  -V, --version    Display version information and exit
 
 EXAMPLES:
-  ascec input.in r3                    # 3 replicated annealing runs
-  ascec diagram                        # Generate all energy diagrams
-  ascec diagram --scaled               # Generate with auto-scaled y-axis
-  ascec calc opt.inp launcher.sh       # Create QM inputs + launcher
-  ascec sort                           # Organize outputs, create summary
-  ascec sim --th=0.9                   # Cluster by 90%% similarity
+  ascec w6.in r5                      Perform 5 replicated water hexamer runs
+  ascec diagram --scaled              Generate auto-scaled energy diagrams
+  ascec calc opt.inp launcher.sh      Create inputs with launcher script
+  ascec sort                          Organize results with summary
+  ascec simil --th=0.95 --rmsd=0.5    Cluster with 0.95 th similarity + RMSD
 
-For detailed documentation, see README_ASCEC.md
+REFERENCE:
+  For comprehensive documentation including theoretical background,
+  installation instructions, and advanced usage, consult the user manual.
+
+CITATION:
+  If you use ASCEC in your research, please cite:
+  Manuel, G.; Sara, G.; Albeiro, R. Universidad de Antioquia (2026)
+
+MORE INFORMATION:
+  Repository: https://github.com/manuel2gl/qft-ascec-similarity
+  Support:    Química Física Teórica - Universidad de Antioquia
 """)
-    parser.add_argument("command", metavar="command", 
-                       help="Input file or command (calc, sort, sim, help, etc.)")
-    parser.add_argument("arg1", nargs='?', default=None, metavar="arg1",
-                       help="Mode or template file")
-    parser.add_argument("arg2", nargs='?', default=None, metavar="arg2",
-                       help="Additional argument")
-    parser.add_argument("-v", "--v", action="store_true", help="Verbose (print every 10 cycles)")
-    parser.add_argument("--va", action="store_true", help="Very verbose (print every cycle)")
-    parser.add_argument("--standard", action="store_true", help="Standard Metropolis criterion")
+    parser.add_argument("command", metavar="COMMAND", 
+                       help="Input file or command (calc, sort, simil, diagram, etc.)")
+    parser.add_argument("arg1", nargs='?', default=None, metavar="ARG1",
+                       help="Command-specific argument (e.g., template file, mode)")
+    parser.add_argument("arg2", nargs='?', default=None, metavar="ARG2",
+                       help="Additional command-specific argument")
+    parser.add_argument("-v", "--v", action="store_true", 
+                       help="Enable verbose output (every 10 Monte Carlo cycles)")
+    parser.add_argument("--va", action="store_true", 
+                       help="Enable very verbose output (every cycle)")
+    parser.add_argument("--standard", action="store_true", 
+                       help="Use standard Metropolis criterion instead of modified")
     
     # Sort command arguments (used when command='sort')
-    parser.add_argument("--nosum", action="store_true", help="Skip summary creation")
-    parser.add_argument("--justsum", action="store_true", help="Create summary only, no sorting")
+    parser.add_argument("--nosum", action="store_true", 
+                       help="Skip summary file generation during sort")
+    parser.add_argument("--justsum", action="store_true", 
+                       help="Generate summary file only without sorting structures")
     # Internal arguments (hidden from help)
     parser.add_argument("--target-sim-folder", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--reuse-existing", action="store_true", help=argparse.SUPPRESS)
     
-    parser.add_argument("--nobox", action="store_true", help="Disable box XYZ files")
-    parser.add_argument("-V", "--version", action="store_true", help="Show version and exit")
+    parser.add_argument("--nobox", action="store_true", 
+                       help="Disable generation of box-visualization XYZ files")
+    parser.add_argument("-V", "--version", action="store_true", 
+                       help="Display version information and exit")
     
     # Use parse_known_args to handle shell expansion gracefully
     args, unknown_args = parser.parse_known_args()
@@ -13033,9 +13064,9 @@ For detailed documentation, see README_ASCEC.md
         return
     
     # Check if similarity analysis mode is requested
-    if args.command.lower() == "sim":
+    if args.command.lower() == "simil":
         # Pass all remaining arguments to similarity script
-        similarity_args = sys.argv[2:]  # Skip 'ascec-v04.py' and 'sim'
+        similarity_args = sys.argv[2:]  # Skip 'ascec-v04.py' and 'simil'
         execute_similarity_analysis(*similarity_args)
         return
     

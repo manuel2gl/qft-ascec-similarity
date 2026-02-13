@@ -4199,51 +4199,171 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 # Main execution block
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Similarity v01 - Quantum chemistry output clustering and analysis",
-        usage="similarity [options] [input_folder]",
+        description="Similarity - Hierarchical clustering for quantum chemistry structures\nPhysicochemical feature-based discrimination of conformational families",
+        usage="similarity [OPTIONS] [FOLDER]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-examples:
-  similarity --th=0.9              Cluster with 90%% similarity threshold
-  similarity --th=0.95 --rmsd      Add RMSD validation (default 1.0 Å)
-  similarity --th=0.9 -j8          Use 8 CPU cores
-  similarity calculation/          Process specific folder
+        epilog="""DESCRIPTION:
+  Similarity performs topological clustering of quantum chemistry outputs
+  using a multi-dimensional physicochemical feature vector (energy, HOMO-LUMO
+  gap, dipole moment, rotational constants, vibrational frequencies, H-bonds).
+  Hierarchical clustering with optional RMSD refinement identifies unique
+  conformational families and filters redundant structures.
 
-common workflows:
-  similarity --th=0.9              Basic clustering
-  similarity --th=0.95 --rmsd=0.5  High similarity + tight RMSD
-  similarity --motif=0.8           Separate motif clustering threshold
+METHODOLOGY:
+  1. Feature Extraction: Parse QM outputs (.log/.out) for scalar descriptors
+  2. Z-score Standardization: Normalize features across different units
+  3. Weighted Euclidean Distance: Calculate similarity matrix
+  4. Hierarchical Clustering: Ward linkage with user-defined threshold
+  5. RMSD Refinement (optional): Distinguish geometric stereoisomers
+  6. Quality Control: Flag imaginary frequencies and convergence failures
+
+OPTIONS:
+  Required:
+    --threshold=FLOAT, --th=FLOAT Similarity threshold (default: 1.0)
+                                  Lower values = more strict clustering
+  
+  Geometric Validation:
+    --rmsd=FLOAT                  Enable RMSD validation in Ångström
+                                  If no value given, defaults to 1.0 Å
+                                  Recommended: 0.5-1.0 for tight geometric control
+  
+  Processing Control:
+    --cores=INT, -j=INT           Number of CPU cores (default: auto-detect)
+    --reprocess-files             Ignore cache and force feature re-extraction
+    --output-dir=PATH             Output directory (default: current directory)
+  
+  Advanced Features:
+    --motif=FLOAT                 Separate threshold for motif clustering
+                                  (default: same as --threshold)
+    --weights=STRING              Custom feature weights in format:
+                                  '(energy=0.1)(gap=0.2)(dipole=0.15)'
+    --compare FILE [FILE ...]     Direct comparison mode (minimum 2 files)
+    -T=FLOAT, --temperature=FLOAT Temperature for Boltzmann analysis in K
+                                  (default: 298.15)
+  
+  Output:
+    -v, --verbose                 Enable detailed progress output
+    -V, --version                 Display version information and exit
+
+INPUT:
+  FOLDER                          Directory containing QM output files
+                                  (.log for Gaussian, .out for ORCA)
+                                  If omitted, interactive folder selection
+
+OUTPUT FILES:
+  clustering_summary.txt          Comprehensive clustering report with statistics
+  dendrogram_images/              Hierarchical clustering dendrograms
+    └── dendrogram.png            (or dendrogram_H{N}.png for H-bond groups)
+  extracted_data/                 Raw data files (.dat) for each cluster
+    └── cluster_*.dat
+  extracted_clusters/             Individual cluster directories
+    ├── cluster_1/                Single-member cluster (no combined file)
+    │   ├── structure.xyz         Individual structure file
+    │   └── structure.mol         MOL format (if OpenBabel available)
+    └── cluster_2_5/              Multi-member cluster (5 members)
+        ├── structure1.xyz        Individual XYZ files for each member
+        ├── structure2.xyz
+        ├── cluster_2_5.xyz       Combined multi-frame XYZ file
+        └── cluster_2_5.mol       Combined MOL file
+  skipped_structures/             Structures with imaginary frequencies (if any)
+    ├── skipped_summary.txt       Details of skipped structures
+    ├── clustered_with_normal/    Imaginary freq. clustered with valid structures
+    └── need_recalculation/       Isolated imaginary freq. structures
+
+EXAMPLES:
+  Basic clustering:
+    similarity --th=2                   Standard clustering
+    similarity --th=2 --rmsd=1          Add RMSD validation at 1.0 Å
+    similarity calculation/             Process specific folder
+  
+  High-precision clustering:
+    similarity --th=1 --rmsd=0.5        Tight similarity with RMSD control
+    similarity --th=2 --motif=0.85      Different thresholds for motif/structure
+  
+  Performance optimization:
+    similarity --th=2 -j=8              Use 8 CPU cores for parallel processing
+    similarity --reprocess-files        Force cache refresh after updates
+  
+  Direct comparison:
+    similarity --compare s1.log s2.log s3.log  Compare specific structures
+  
+  Custom analysis:
+    similarity --th=2 --weights='(energy=0.3)(gap=0.2)'  Weighted features
+    similarity --th=2 -T=350.0          Boltzmann analysis at 350 K
+
+WORKFLOW INTEGRATION:
+  Similarity is typically used after ASCEC sampling and QM optimization:
+    1. ascec input.in r5        → 5 replicated annealing runs
+    2. ascec calc template.inp  → generate QM inputs
+    3. [Run ORCA/Gaussian calculations]
+    4. ascec sort               → organize results
+    5. similarity --th=2        → identify unique conformers
+
+RECOMMENDATIONS:
+  - Start with --th=2 for initial exploration
+  - Use --rmsd=1 for systems with subtle geometric differences
+  - Adjust --th value based on desired clustering granularity
+  - Use --reprocess-files after modifying QM outputs or settings
+  - Check dendrogram.png to validate threshold selection
+
+SUPPORTED FORMATS:
+  - Gaussian: .log files (via cclib parser)
+  - ORCA 5.0.x: .out files (via cclib parser)
+  - ORCA 6.1+: .out files (via OPI parser)
+  Note: ORCA 6.0 is not supported; use 5.0.x or upgrade to 6.1+
+
+CITATION:
+  If you use Similarity in your research, please cite:
+  Manuel, G.; Sara, G.; Albeiro, R. Universidad de Antioquia (2026)
+
+MORE INFORMATION:
+  Repository:     https://github.com/manuel2gl/qft-ascec-similarity
+  Documentation:  See user manual for theoretical background
+  Support:        Química Física Teórica - Universidad de Antioquia
 """)
-    parser.add_argument("--threshold", "--th", type=float, default=1.0,
-                        help="Similarity threshold (0-1, e.g., 0.9 = 90%% similar)")
-    parser.add_argument("--rmsd", type=float, nargs='?', const=1.0, default=None, 
-                        help="RMSD threshold in Å (default: 1.0 if flag used)")
-    parser.add_argument("--output-dir", type=str, default=None,
-                        help="Output directory (default: current)")
+    # Required arguments
+    parser.add_argument("--threshold", "--th", type=float, default=1.0, metavar="FLOAT",
+                        help="similarity threshold (default: 1.0)")
+    
+    # Geometric validation
+    parser.add_argument("--rmsd", type=float, nargs='?', const=1.0, default=None, metavar="FLOAT",
+                        help="RMSD geometric validation in Ångström (default: 1.0)")
+    
+    # Processing control
+    parser.add_argument("--cores", "-j", type=int, default=None, metavar="INT",
+                        help="number of CPU cores (default: auto-detect)")
     parser.add_argument("--reprocess-files", action="store_true",
-                        help="Force re-extraction, ignore cache")
-    parser.add_argument("--compare", nargs='+', 
-                        help="Compare specific files (min 2)")
-    parser.add_argument("--weights", type=str, default="", 
-                        help="Feature weights: '(energy=0.1)(gap=0.2)'")
-    parser.add_argument("--min-std-threshold", type=float, default=1e-6, 
-                        help=argparse.SUPPRESS)  # Advanced option, hide from help
-    parser.add_argument("--abs-tolerance", type=str, default="",
-                        help=argparse.SUPPRESS)  # Advanced option, hide from help
-    parser.add_argument("--motif", type=float, default=None,
-                        help="Motif clustering threshold (default: same as --th)")
-    parser.add_argument("--cores", "-j", type=int, default=None,
-                        help="CPU cores (default: auto-detect)")
-    parser.add_argument("-T", "--temperature", type=float, default=298.15,
-                        help="Temperature in K for Boltzmann analysis (default: 298.15)")
+                        help="ignore cache and force re-extraction")
+    parser.add_argument("--output-dir", type=str, default=None, metavar="PATH",
+                        help="output directory (default: current directory)")
+    
+    # Advanced features
+    parser.add_argument("--motif", type=float, default=None, metavar="FLOAT",
+                        help="motif clustering threshold (default: same as --threshold)")
+    parser.add_argument("--weights", type=str, default="", metavar="STRING",
+                        help="custom feature weights: '(energy=0.1)(gap=0.2)'")
+    parser.add_argument("--compare", nargs='+', metavar="FILE",
+                        help="direct comparison mode (minimum 2 files)")
+    parser.add_argument("-T", "--temperature", type=float, default=298.15, metavar="FLOAT",
+                        help="temperature for Boltzmann analysis in K (default: 298.15)")
+    
+    # Output control
     parser.add_argument("-v", "--verbose", action="store_true",
-                        help="Verbose output")
+                        help="enable detailed progress output")
     parser.add_argument("-V", "--version", action="store_true",
-                        help="Show version and exit")
+                        help="display version and exit")
+    
+    # Hidden/advanced options
+    parser.add_argument("--min-std-threshold", type=float, default=1e-6, 
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--abs-tolerance", type=str, default="",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--update-cache", type=str, default=None,
-                        help=argparse.SUPPRESS)  # Advanced option, hide from help
-    parser.add_argument('input_source', nargs='?', default=None, 
-                        help='Input folder (optional, interactive if omitted)')
+                        help=argparse.SUPPRESS)
+    
+    # Positional argument
+    parser.add_argument('input_source', nargs='?', default=None, metavar="FOLDER",
+                        help='directory containing QM output files')
 
 
     # Preprocess arguments to handle -j8 format
