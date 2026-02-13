@@ -6370,6 +6370,39 @@ def extract_orca_geometry_opi(output_path: str) -> Optional[List[str]]:
     return None
 
 
+def extract_orca_root_from_launcher(launcher_content: str) -> Optional[str]:
+    """
+    Extract the ORCA root environment variable name from launcher content.
+    
+    ORCA 6.1+ requires full pathname for parallel runs. This function finds
+    the ORCA root variable (e.g., ORCA611_ROOT, ORCA_ROOT) defined in the launcher.
+    
+    Args:
+        launcher_content: Content of the launcher script
+        
+    Returns:
+        The variable name (e.g., "ORCA611_ROOT") if found, None otherwise
+    """
+    # Look for patterns like: ORCA611_ROOT=, ORCA_ROOT=, ORCA6_ROOT=, etc.
+    # Must be an actual variable assignment, not just PATH modification
+    pattern = r'^(ORCA[A-Z0-9_]*ROOT)\s*='
+    for line in launcher_content.split('\n'):
+        line = line.strip()
+        match = re.match(pattern, line)
+        if match:
+            return match.group(1)
+    
+    # Alternative: check for ORCA*_ROOT in export statements
+    export_pattern = r'^export\s+(ORCA[A-Z0-9_]*ROOT)\s*='
+    for line in launcher_content.split('\n'):
+        line = line.strip()
+        match = re.match(export_pattern, line)
+        if match:
+            return match.group(1)
+    
+    return None
+
+
 # Summary functionality - integrated from summary_files.py
 def parse_orca_output(filepath):
     """Parse an ORCA output file to extract key information."""
@@ -10816,8 +10849,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
                                 f.write(f"mkdir -p \"$TMPDIR\"\n")
                                 f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                                # Execute ORCA (launcher sets up PATH with ORCA directory)
-                                f.write(f"orca {input_file} > {output_file}\n")
+                                # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
+                                orca_root_var = extract_orca_root_from_launcher(launcher_content)
+                                if orca_root_var:
+                                    f.write(f"${{{orca_root_var}}}/orca {input_file} > {output_file}\n")
+                                else:
+                                    # Fall back to PATH lookup if no ORCA root variable found
+                                    f.write(f"orca {input_file} > {output_file}\n")
                             elif qm_program == 'gaussian':
                                 # Use GAUSS_ROOT (generic, works with G09 or G16)
                                 f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
@@ -12123,8 +12161,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename_only}_$$\"\n")
                         f.write(f"mkdir -p \"$TMPDIR\"\n")
                         f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                        # Execute ORCA (launcher sets up PATH with ORCA directory)
-                        f.write(f"orca {input_file} > {output_file}\n")
+                        # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
+                        orca_root_var = extract_orca_root_from_launcher(launcher_content)
+                        if orca_root_var:
+                            f.write(f"${{{orca_root_var}}}/orca {input_file} > {output_file}\n")
+                        else:
+                            # Fall back to PATH lookup if no ORCA root variable found
+                            f.write(f"orca {input_file} > {output_file}\n")
                     elif qm_program == 'gaussian':
                         # Use GAUSS_ROOT (generic, works with G09 or G16)
                         f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
