@@ -36,6 +36,22 @@ except ImportError:
     MATPLOTLIB_AVAILABLE = False
     plt = None  # type: ignore
 
+# OPI (ORCA Python Interface) for ORCA 6.1+ support
+try:
+    from opi.output.core import Output as OPIOutput  # type: ignore
+    OPI_AVAILABLE = True
+except ImportError:
+    OPI_AVAILABLE = False
+    OPIOutput = None  # type: ignore
+
+# cclib for ORCA 5.x and Gaussian support (used for output parsing)
+try:
+    from cclib.io import ccread
+    CCLIB_AVAILABLE = True
+except ImportError:
+    CCLIB_AVAILABLE = False
+    ccread = None  # type: ignore
+
 # Set multiprocessing start method for better compatibility
 if __name__ == '__main__':
     try:
@@ -6142,6 +6158,216 @@ def create_combined_mol():
         print("No combined_results.xyz file found to convert.")
         return False
 
+
+# ============================================================================
+# OPI (ORCA Python Interface) Helper Functions for ORCA 6.1+ Support
+# ============================================================================
+
+def detect_orca_version(logfile_path: str) -> Optional[Tuple[int, int]]:
+    """
+    Detect ORCA version from output file.
+    
+    Args:
+        logfile_path: Path to ORCA output file (.out)
+        
+    Returns:
+        Tuple of (major, minor) version numbers, or None if not detected
+    """
+    try:
+        with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f:
+            # Read first 100 lines where version info typically appears
+            for i, line in enumerate(f):
+                if i > 100:
+                    break
+                # Look for version pattern like "Program Version 6.1.0"
+                match = re.search(r'Program Version\s+(\d+)\.(\d+)', line, re.IGNORECASE)
+                if match:
+                    major = int(match.group(1))
+                    minor = int(match.group(2))
+                    return (major, minor)
+    except Exception:
+        pass
+    return None
+
+
+def check_orca_terminated_normally_opi(output_path: str) -> bool:
+    """
+    Check if ORCA calculation terminated normally using OPI for ORCA 6.1+.
+    Falls back to text search for ORCA 5.x or when OPI is not available.
+    
+    Args:
+        output_path: Path to ORCA output file (.out)
+        
+    Returns:
+        True if terminated normally, False otherwise
+    """
+    if not os.path.exists(output_path):
+        return False
+    
+    # Detect ORCA version
+    version = detect_orca_version(output_path)
+    
+    # For ORCA 6.1+, try to use OPI
+    if version and version >= (6, 1) and OPI_AVAILABLE and OPIOutput is not None:
+        try:
+            file_path = Path(output_path)
+            basename = file_path.stem
+            working_dir = file_path.parent
+            
+            opi_output = OPIOutput(
+                basename=basename,
+                working_dir=working_dir,
+                version_check=False
+            )
+            
+            return opi_output.terminated_normally()
+        except Exception:
+            # Fall back to text search if OPI fails
+            pass
+    
+    # Fall back to text search (works for all ORCA versions)
+    try:
+        with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        return '****ORCA TERMINATED NORMALLY****' in content
+    except Exception:
+        return False
+
+
+def extract_orca_energy_opi(output_path: str) -> Optional[float]:
+    """
+    Extract final energy from ORCA output using OPI for ORCA 6.1+.
+    Falls back to regex for ORCA 5.x or when OPI is not available.
+    
+    Args:
+        output_path: Path to ORCA output file (.out)
+        
+    Returns:
+        Final single point energy in Hartree, or None if not found
+    """
+    if not os.path.exists(output_path):
+        return None
+    
+    # Detect ORCA version
+    version = detect_orca_version(output_path)
+    
+    # For ORCA 6.1+, try to use OPI
+    if version and version >= (6, 1) and OPI_AVAILABLE and OPIOutput is not None:
+        try:
+            file_path = Path(output_path)
+            basename = file_path.stem
+            working_dir = file_path.parent
+            
+            opi_output = OPIOutput(
+                basename=basename,
+                working_dir=working_dir,
+                version_check=False
+            )
+            
+            # Check if terminated normally
+            if not opi_output.terminated_normally():
+                return None
+            
+            # Try to parse energy from OPI (if JSON exists)
+            prop_json = working_dir / f"{basename}.property.json"
+            if prop_json.exists():
+                try:
+                    opi_output.parse()
+                    if opi_output.results_properties and hasattr(opi_output.results_properties, 'energies'):
+                        energies = opi_output.results_properties.energies
+                        if energies:
+                            return energies[-1]  # Last energy (final SCF)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Fall back to regex (works for all ORCA versions)
+    try:
+        with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        
+        # Pattern matches ORCA 5 (with colon) and ORCA 6 (without colon)
+        matches = re.findall(r"FINAL SINGLE POINT ENERGY:?\s*([-+]?\d+\.\d+)", content)
+        if matches:
+            return float(matches[-1])
+    except Exception:
+        pass
+    
+    return None
+
+
+def extract_orca_geometry_opi(output_path: str) -> Optional[List[str]]:
+    """
+    Extract final geometry from ORCA output using OPI for ORCA 6.1+.
+    Falls back to text parsing for ORCA 5.x or when OPI is not available.
+    
+    Args:
+        output_path: Path to ORCA output file (.out)
+        
+    Returns:
+        List of XYZ lines (including atom count and comment), or None if not found
+    """
+    if not os.path.exists(output_path):
+        return None
+    
+    # Detect ORCA version
+    version = detect_orca_version(output_path)
+    
+    # For ORCA 6.1+, try to use OPI
+    if version and version >= (6, 1) and OPI_AVAILABLE and OPIOutput is not None:
+        try:
+            file_path = Path(output_path)
+            basename = file_path.stem
+            working_dir = file_path.parent
+            
+            opi_output = OPIOutput(
+                basename=basename,
+                working_dir=working_dir,
+                version_check=False
+            )
+            
+            # Try to parse geometry from OPI (if JSON exists)
+            prop_json = working_dir / f"{basename}.property.json"
+            if prop_json.exists():
+                try:
+                    opi_output.parse()
+                    if opi_output.results_properties and hasattr(opi_output.results_properties, 'geometries'):
+                        geom = opi_output.results_properties.geometries[-1]
+                        if hasattr(geom.geometry, 'coordinates') and geom.geometry.coordinates:
+                            coords_data = geom.geometry.coordinates.cartesians
+                            
+                            # Check if conversion from Bohr is needed
+                            coord_units = getattr(geom.geometry.coordinates, 'units', None)
+                            bohr_to_angstrom = 0.529177210903
+                            need_conversion = True
+                            if coord_units and 'angst' in str(coord_units).lower():
+                                need_conversion = False
+                            
+                            xyz_lines = []
+                            xyz_lines.append(f"{len(coords_data)}\n")
+                            xyz_lines.append(f"{basename} - extracted by ASCEC OPI\n")
+                            
+                            for atom_data in coords_data:
+                                element = atom_data[0]
+                                if need_conversion:
+                                    x = atom_data[1] * bohr_to_angstrom
+                                    y = atom_data[2] * bohr_to_angstrom
+                                    z = atom_data[3] * bohr_to_angstrom
+                                else:
+                                    x, y, z = atom_data[1], atom_data[2], atom_data[3]
+                                xyz_lines.append(f"{element:2s} {x:15.8f} {y:15.8f} {z:15.8f}\n")
+                            
+                            return xyz_lines
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Fall back to text parsing (extract_final_geometry function handles this)
+    return None
+
+
 # Summary functionality - integrated from summary_files.py
 def parse_orca_output(filepath):
     """Parse an ORCA output file to extract key information."""
@@ -10199,14 +10425,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # Check if this subdirectory has a completed calculation (.out file, not just .backup)
                     out_file = os.path.join(item_path, f"{item}.out")
                     if os.path.exists(out_file):
-                        # Verify completion
-                        try:
-                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
-                                content = f.read()
-                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                    actual_completed.append(item)
-                        except Exception:
-                            pass
+                        # Verify completion (OPI-aware for ORCA 6.1+)
+                        if check_orca_terminated_normally_opi(out_file):
+                            actual_completed.append(item)
             
             # 1b. Check for flat files in calculation directory (e.g. opt_conf_1.out)
             # This handles the case where calculations are not in subdirectories
@@ -10216,14 +10437,18 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # Skip if already found in subdir or marked for redo
                     if basename not in actual_completed and basename not in redo_files:
                         out_file = os.path.join(calc_dir, item)
-                        # Verify completion
-                        try:
-                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
-                                content = f.read()
-                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                    actual_completed.append(basename)
-                        except Exception:
-                            pass
+                        # Verify completion (OPI-aware for ORCA 6.1+)
+                        if item.endswith('.out'):
+                            if check_orca_terminated_normally_opi(out_file):
+                                actual_completed.append(basename)
+                        else:  # Gaussian .log files
+                            try:
+                                with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
+                                    content = f.read()
+                                    if 'Normal termination' in content:
+                                        actual_completed.append(basename)
+                            except Exception:
+                                pass
         
         # 2. Check similarity/orca_out_* folders (files moved there after sorting)
         # This is CRITICAL for showing correct counts (e.g. 11/11) when resuming
@@ -10238,15 +10463,19 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             if f.endswith('.out') or f.endswith('.log'):
                                 basename = os.path.splitext(f)[0]
                                 if basename not in actual_completed and basename not in redo_files:
-                                    # Verify completion here too
+                                    # Verify completion (OPI-aware for ORCA 6.1+)
                                     out_file = os.path.join(out_dir, f)
-                                    try:
-                                        with open(out_file, 'r', encoding='utf-8', errors='replace') as f_obj:
-                                            content = f_obj.read()
-                                            if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                                actual_completed.append(basename)
-                                    except:
-                                        pass
+                                    if f.endswith('.out'):
+                                        if check_orca_terminated_normally_opi(out_file):
+                                            actual_completed.append(basename)
+                                    else:  # Gaussian .log files
+                                        try:
+                                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f_obj:
+                                                content = f_obj.read()
+                                                if 'Normal termination' in content:
+                                                    actual_completed.append(basename)
+                                        except:
+                                            pass
         
         # Also check for similarity_2, similarity_3, etc.
         # This is needed if we have multiple similarity stages
@@ -10420,11 +10649,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # This handles redo scenarios where failed .out files were deleted
                     if os.path.exists(output_path):
                         try:
-                            with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
-                                output_content = f.read()
                             if qm_program == 'orca':
-                                is_complete = '****ORCA TERMINATED NORMALLY****' in output_content
+                                # Use OPI-aware check for ORCA 6.1+ support
+                                is_complete = check_orca_terminated_normally_opi(output_path)
                             else:
+                                with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                    output_content = f.read()
                                 is_complete = 'Normal termination of Gaussian' in output_content
                             
                             if is_complete:
@@ -10584,8 +10814,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
                                 f.write(f"mkdir -p \"$TMPDIR\"\n")
                                 f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                                # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
-                                f.write(f"$ORCA_ROOT/orca {input_file} > {output_file}\n")
+                                # Execute ORCA (launcher sets up PATH with ORCA directory)
+                                f.write(f"orca {input_file} > {output_file}\n")
                             elif qm_program == 'gaussian':
                                 # Use GAUSS_ROOT (generic, works with G09 or G16)
                                 f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
@@ -10614,13 +10844,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         if os.path.exists(output_path):
                             try:
-                                with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
-                                    output_content = f.read()
-                                
-                                # Check for normal termination
+                                # Check for normal termination (OPI-aware for ORCA 6.1+)
                                 if qm_program == 'orca':
-                                    normal_term = '****ORCA TERMINATED NORMALLY****' in output_content
+                                    normal_term = check_orca_terminated_normally_opi(output_path)
                                 else:
+                                    with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                        output_content = f.read()
                                     normal_term = 'Normal termination of Gaussian' in output_content
                                 
                                 if normal_term:
@@ -11440,8 +11669,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             for i, inp_file in enumerate(sorted(launcher_input_files, key=natural_sort_key)):
                 basename = os.path.splitext(inp_file)[0]
                 if qm_program == "orca":
-                    # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
-                    f.write(f"$ORCA_ROOT/orca {basename}.inp > {basename}.out")
+                    # Execute ORCA (launcher sets up PATH with ORCA directory)
+                    f.write(f"orca {basename}.inp > {basename}.out")
                 else:
                     # For Gaussian, use g16 or g09
                     f.write(f"g16 {basename}.com")
@@ -11525,18 +11754,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             break
                     
                     if out_file:
-                        # Verify completion
-                        try:
-                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
-                                content = f.read()
-                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                    # Store with _opt suffix for consistency
-                                    if '_opt' not in item and '_calc' not in item:
-                                        actual_completed.append(f"{item}_opt")
-                                    else:
-                                        actual_completed.append(item)
-                        except Exception:
-                            pass
+                        # Verify completion (OPI-aware for ORCA 6.1+)
+                        if check_orca_terminated_normally_opi(out_file):
+                            # Store with _opt suffix for consistency
+                            if '_opt' not in item and '_calc' not in item:
+                                actual_completed.append(f"{item}_opt")
+                            else:
+                                actual_completed.append(item)
             
             # 1b. Check for flat files in optimization directory
             for item in os.listdir(opt_dir):
@@ -11545,14 +11769,18 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     # Skip if already found in subdir or marked for redo
                     if basename not in actual_completed and basename not in redo_files:
                         out_file = os.path.join(opt_dir, item)
-                        # Verify completion
-                        try:
-                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
-                                content = f.read()
-                                if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                    actual_completed.append(basename)
-                        except Exception:
-                            pass
+                        # Verify completion (OPI-aware for ORCA 6.1+)
+                        if item.endswith('.out'):
+                            if check_orca_terminated_normally_opi(out_file):
+                                actual_completed.append(basename)
+                        else:  # Gaussian .log files
+                            try:
+                                with open(out_file, 'r', encoding='utf-8', errors='replace') as f:
+                                    content = f.read()
+                                    if 'Normal termination' in content:
+                                        actual_completed.append(basename)
+                            except Exception:
+                                pass
         
         # 2. Check similarity_X/orca_out_* folders (files moved there after sorting)
         # This is CRITICAL for showing correct counts when resuming
@@ -11601,15 +11829,19 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             if f.endswith('.out') or f.endswith('.log'):
                                 basename = os.path.splitext(f)[0]
                                 if basename not in actual_completed and basename not in redo_files:
-                                    # Verify completion here too
+                                    # Verify completion (OPI-aware for ORCA 6.1+)
                                     out_file = os.path.join(out_dir, f)
-                                    try:
-                                        with open(out_file, 'r', encoding='utf-8', errors='replace') as f_obj:
-                                            content = f_obj.read()
-                                            if 'ORCA TERMINATED NORMALLY' in content or 'Normal termination' in content:
-                                                actual_completed.append(basename)
-                                    except:
-                                        pass
+                                    if f.endswith('.out'):
+                                        if check_orca_terminated_normally_opi(out_file):
+                                            actual_completed.append(basename)
+                                    else:  # Gaussian .log files
+                                        try:
+                                            with open(out_file, 'r', encoding='utf-8', errors='replace') as f_obj:
+                                                content = f_obj.read()
+                                                if 'Normal termination' in content:
+                                                    actual_completed.append(basename)
+                                        except:
+                                            pass
         
         # Update completed_opts to match reality
         completed_opts = actual_completed
@@ -11708,11 +11940,12 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         output_exists = True
 
             if output_exists:
-                with open(output_path, 'r') as f:
-                    output_content = f.read()
                 if qm_program == 'orca':
-                    is_complete = '****ORCA TERMINATED NORMALLY****' in output_content
+                    # Use OPI-aware check for ORCA 6.1+ support
+                    is_complete = check_orca_terminated_normally_opi(output_path)
                 else:
+                    with open(output_path, 'r') as f:
+                        output_content = f.read()
                     is_complete = 'Normal termination of Gaussian' in output_content
                 
                 if is_complete:
@@ -11888,8 +12121,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename_only}_$$\"\n")
                         f.write(f"mkdir -p \"$TMPDIR\"\n")
                         f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                        # Use ORCA_ROOT (generic, works with ORCA 5 or 6)
-                        f.write(f"$ORCA_ROOT/orca {input_file} > {output_file}\n")
+                        # Execute ORCA (launcher sets up PATH with ORCA directory)
+                        f.write(f"orca {input_file} > {output_file}\n")
                     elif qm_program == 'gaussian':
                         # Use GAUSS_ROOT (generic, works with G09 or G16)
                         f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
@@ -11918,13 +12151,12 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 if os.path.exists(output_path):
                     try:
-                        with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
-                            output_content = f.read()
-                        
-                        # Check for normal termination
+                        # Check for normal termination (OPI-aware for ORCA 6.1+)
                         if qm_program == 'orca':
-                            normal_term = '****ORCA TERMINATED NORMALLY****' in output_content
+                            normal_term = check_orca_terminated_normally_opi(output_path)
                         else:
+                            with open(output_path, 'r', encoding='utf-8', errors='replace') as f:
+                                output_content = f.read()
                             normal_term = 'Normal termination of Gaussian' in output_content
                         
                         if normal_term:
