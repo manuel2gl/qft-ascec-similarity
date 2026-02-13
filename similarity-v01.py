@@ -566,11 +566,13 @@ def detect_orca_version(logfile_path):
     """
     try:
         with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f:
-            # Read first 50 lines where version info typically appears
+            # Scan header section until we find version or hit input file section
+            # This is robust to header size changes in future ORCA versions
             for i, line in enumerate(f):
-                if i > 50:
+                # Stop if we've reached the input file section (version should be before this)
+                if 'INPUT FILE' in line or i > 500:
                     break
-                # Look for version pattern like "Program Version 6.1.0"
+                # Look for version pattern like "Program Version 6.1.0" or "Program Version 7.0.0"
                 match = re.search(r'Program Version\s+(\d+)\.(\d+)', line, re.IGNORECASE)
                 if match:
                     major = int(match.group(1))
