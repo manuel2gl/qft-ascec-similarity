@@ -1501,11 +1501,15 @@ def _extract_vibfreqs_from_file_opi(lines, extracted_props, logfile_path):
         freqs = []
         for i in range(freq_section_start + 3, len(lines)):
             line = lines[i].strip()
-            if not line or '---' in line or '=' in line or 'NORMAL MODES' in line:
+            # Skip empty lines and lines without frequency data
+            if not line:
+                continue
+            # Stop at section boundaries (multiple dashes or equals, or specific keywords)
+            if '------' in line or '======' in line or 'NORMAL MODES' in line:
                 break
             parts = line.split()
             # Format: "   0:         0.00 cm**-1" or "   6:       123.45 cm**-1"
-            if len(parts) >= 2:
+            if len(parts) >= 3 and parts[0].endswith(':') and 'cm' in parts[2]:
                 try:
                     freq_val = float(parts[1])
                     if freq_val != 0.0:
@@ -1527,8 +1531,9 @@ def _extract_vibfreqs_from_file_opi(lines, extracted_props, logfile_path):
             if real_freqs:
                 extracted_props['first_vib_freq'] = min(real_freqs)
                 extracted_props['last_vib_freq'] = max(real_freqs)
-    except:
-        pass
+    except Exception as e:
+        if VERBOSE:
+            print(f"  DEBUG: Error extracting frequencies from {os.path.basename(logfile_path)}: {e}")
 
 def _extract_rotconsts_from_file_opi(lines):
     """Extract rotational constants from ORCA output file lines."""
@@ -2162,7 +2167,7 @@ def perform_second_rmsd_clustering(cluster_members_to_refine, rmsd_threshold):
 
 
 def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_dir, rmsd_threshold_value=None, 
-                           hbond_count_for_original_cluster=None, weights=None):
+                           hbond_count_for_original_cluster=None, weights=None, tolerances=None):
     """
     Writes combined .dat file for cluster members, including comparison and RMSD context sections.
     
@@ -2173,9 +2178,12 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
         rmsd_threshold_value: RMSD threshold used
         hbond_count_for_original_cluster: H-bond count for initial group
         weights: Dictionary mapping feature names to weights for conditional printing
+        tolerances: Dictionary mapping feature names to absolute tolerances
     """
     if weights is None:
         weights = {}
+    if tolerances is None:
+        tolerances = {}
 
     num_configurations = len(cluster_members_data)
     
@@ -2337,7 +2345,81 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 all_num_hbonds = [d['num_hydrogen_bonds'] for d in cluster_members_data if d['num_hydrogen_bonds'] is not None]
                 if all_num_hbonds: f.write(f"  Number of Hydrogen Bonds %Dev: {calculate_deviation_percentage(all_num_hbonds):.2f}%\n")
             
+            # Print clustering weights applied
+            f.write("\nClustering Weights Applied:\n")
+            # Create a list of features with their weights, maintaining display order
+            weight_display_order = [
+                ("electronic_energy", "Electronic Energy", "final_electronic_energy"),
+                ("gibbs_free_energy", "Gibbs Free Energy", "gibbs_free_energy"),
+                ("entropy", "Entropy", "entropy"),
+                ("homo_energy", "HOMO Energy", "homo_energy"),
+                ("lumo_energy", "LUMO Energy", "lumo_energy"),
+                ("homo_lumo_gap", "HOMO-LUMO Gap", "homo_lumo_gap"),
+                ("dipole_moment", "Dipole Moment", "dipole_moment"),
+                ("radius_of_gyration", "Radius of Gyration", "radius_of_gyration"),
+                ("rotational_constants_A", "Rotational Constant A", "rotational_constants"),
+                ("rotational_constants_B", "Rotational Constant B", "rotational_constants"),
+                ("rotational_constants_C", "Rotational Constant C", "rotational_constants"),
+                ("first_vib_freq", "First Vibrational Frequency", "first_vib_freq"),
+                ("last_vib_freq", "Last Vibrational Frequency", "last_vib_freq"),
+                ("average_hbond_distance", "Average H-Bond Distance", "average_hbond_distance"),
+                ("average_hbond_angle", "Average H-Bond Angle", "average_hbond_angle"),
+                ("num_hydrogen_bonds", "Number of Hydrogen Bonds", "num_hydrogen_bonds")
+            ]
+            
+            weights_printed = False
+            for feature_key, feature_display_name, data_key in weight_display_order:
+                # Check if this feature has data in the cluster
+                has_data = False
+                if data_key == "rotational_constants":
+                    has_data = any(d.get(data_key) is not None and isinstance(d.get(data_key), np.ndarray) and len(d.get(data_key)) == 3 for d in cluster_members_data)
+                else:
+                    has_data = any(d.get(data_key) is not None for d in cluster_members_data)
+                
+                # Show all features with data, INCLUDING those with weight=0.0
+                # (weight=0 means explicitly excluded from clustering, still important to show)
+                if has_data:
+                    weight_value = weights.get(feature_key, 1.0)
+                    f.write(f"  {feature_display_name}: {weight_value:.2f}\n")
+                    weights_printed = True
+            
+            if not weights_printed:
+                f.write("  No features with available data\n")
+            
             f.write("\n")
+            
+            # Print clustering tolerances applied (if any non-default tolerances exist)
+            has_custom_tolerances = any(tolerances.get(key, 0.0) != 0.0 for key, _, _ in weight_display_order)
+            if has_custom_tolerances:
+                f.write("Clustering Absolute Tolerances Applied:\n")
+                tolerances_printed = False
+                for feature_key, feature_display_name, data_key in weight_display_order:
+                    # Check if this feature has data in the cluster
+                    has_data = False
+                    if data_key == "rotational_constants":
+                        has_data = any(d.get(data_key) is not None and isinstance(d.get(data_key), np.ndarray) and len(d.get(data_key)) == 3 for d in cluster_members_data)
+                    else:
+                        has_data = any(d.get(data_key) is not None for d in cluster_members_data)
+                    
+                    if has_data:
+                        tol_value = tolerances.get(feature_key, 0.0)
+                        if tol_value != 0.0:
+                            # Use consistent decimal notation for all tolerances
+                            # Automatically adjust precision to show significant figures
+                            if abs(tol_value) < 1e-5:
+                                tol_str = f"{tol_value:.7f}".rstrip('0').rstrip('.')
+                            elif abs(tol_value) < 1e-3:
+                                tol_str = f"{tol_value:.6f}".rstrip('0').rstrip('.')
+                            elif abs(tol_value) < 0.1:
+                                tol_str = f"{tol_value:.5f}".rstrip('0').rstrip('.')
+                            else:
+                                tol_str = f"{tol_value:.4f}".rstrip('0').rstrip('.')
+                            f.write(f"  {feature_display_name}: {tol_str}\n")
+                            tolerances_printed = True
+                
+                if not tolerances_printed:
+                    f.write("  None\n")
+                f.write("\n")
             
         # Separator before the detailed descriptor comparison section
         f.write("=" * 90 + "\n\n")
@@ -2371,18 +2453,23 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 f.write(f"        Radius of Gyration (Å): {mol_data['radius_of_gyration']:.6f}\n")
         f.write("\n")
 
-        f.write("Vibrational frequency summary:\n")
-        for mol_data in cluster_members_data:
-            f.write(f"    {mol_data['filename']}:\n")
-            if mol_data.get('_has_freq_calc', False):
-                f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
-                if mol_data['first_vib_freq'] is not None:
-                    f.write(f"        First Vibrational Frequency (cm^-1): {mol_data['first_vib_freq']:.2f}\n")
-                if mol_data['last_vib_freq'] is not None:
-                    f.write(f"        Last Vibrational Frequency (cm^-1): {mol_data['last_vib_freq']:.2f}\n")
-            else:
-                f.write("        Frequency calculation not performed.\n")
-        f.write("\n")
+        # Print vibrational frequency summary if any file has frequency data
+        # (regardless of weight - weight=0 means not used for clustering, but data should still be shown)
+        has_any_freq_data = any(d.get('_has_freq_calc', False) for d in cluster_members_data)
+        
+        if has_any_freq_data:
+            f.write("Vibrational frequency summary:\n")
+            for mol_data in cluster_members_data:
+                f.write(f"    {mol_data['filename']}:\n")
+                if mol_data.get('_has_freq_calc', False):
+                    f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
+                    if mol_data['first_vib_freq'] is not None:
+                        f.write(f"        First Vibrational Frequency (cm^-1): {mol_data['first_vib_freq']:.2f}\n")
+                    if mol_data['last_vib_freq'] is not None:
+                        f.write(f"        Last Vibrational Frequency (cm^-1): {mol_data['last_vib_freq']:.2f}\n")
+                else:
+                    f.write("        Frequency calculation not performed.\n")
+            f.write("\n")
 
         f.write("Hydrogen bond analysis:\n")
         HB_min_angle_actual_for_display = 30.0 # Define explicitly for display
@@ -3971,7 +4058,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 cluster_name_prefix = f"cluster_{current_global_cluster_id}_{num_configurations_in_cluster}"
 
             write_cluster_dat_file(cluster_name_prefix, members_data, output_base_dir, rmsd_threshold, 
-                                   hbond_count_for_original_cluster=hbond_count, weights=weights)
+                                   hbond_count_for_original_cluster=hbond_count, weights=weights, tolerances=abs_tolerances)
             vprint(f"Wrote combined data for Cluster '{cluster_name_prefix}' to '{cluster_name_prefix}.dat'")
 
             cluster_xyz_subfolder = os.path.join(extracted_clusters_folder, cluster_name_prefix)
