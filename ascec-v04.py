@@ -10588,9 +10588,18 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         if os.path.exists(launcher_script):
             print(f"\nExecuting calculations...\n")
             
+            # Helper function to filter out ORCA intermediate files
+            def is_valid_input_file(filename):
+                """Check if file is a valid input file (not an ORCA intermediate file)"""
+                if not filename.endswith(('.inp', '.com', '.gjf')):
+                    return False
+                # Exclude ORCA intermediate files
+                excluded_patterns = ['.scfgrad.', '.scfp.', '.gbw.', '.tmp.', '.densities.', '.scfhess.']
+                return not any(pattern in filename for pattern in excluded_patterns)
+            
             # Get list of input files to process
             # Check if files are at root level or in subdirectories (after sort command)
-            input_files = sorted([f for f in os.listdir(calc_dir) if f.endswith(('.inp', '.com', '.gjf'))], key=natural_sort_key)
+            input_files = sorted([f for f in os.listdir(calc_dir) if is_valid_input_file(f)], key=natural_sort_key)
             
             if not input_files:
                 # No input files at root - check if they're in subdirectories (sorted)
@@ -10598,7 +10607,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 for item in os.listdir(calc_dir):
                     item_path = os.path.join(calc_dir, item)
                     if os.path.isdir(item_path):
-                        subdir_files = [f for f in os.listdir(item_path) if f.endswith(('.inp', '.com', '.gjf'))]
+                        subdir_files = [f for f in os.listdir(item_path) if is_valid_input_file(f)]
                         if subdir_files:
                             # Found input files in subdirectory - add them with relative path
                             for f in subdir_files:
