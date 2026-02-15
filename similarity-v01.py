@@ -2551,7 +2551,7 @@ def write_xyz_file(mol_data, filename):
         for i in range(len(atomnos)):
             f.write(f"{symbols[i]:<2} {atomcoords[i][0]:10.6f} {atomcoords[i][1]:10.6f} {atomcoords[i][2]:10.6f}\n")
 
-def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel", cluster_id_mapping=None, output_prefix='motif', folder_prefix='motifs'):
+def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_alias="obabel", cluster_id_mapping=None, output_prefix='motif', folder_prefix='motifs', boltzmann_data=None):
     """
     Creates a motifs/umotifs folder containing the lowest energy representative structure from each cluster.
     Also creates a combined XYZ file with all representatives and attempts to convert to MOL format.
@@ -2563,6 +2563,8 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         cluster_id_mapping (dict): Optional mapping from cluster index to original cluster ID
         output_prefix (str): Prefix for output files - 'motif' for first step, 'umotif' for second step
         folder_prefix (str): Prefix for output folder - 'motifs' or 'umotifs'
+        boltzmann_data (dict): Optional Boltzmann population data keyed by cluster_id, 
+                              each entry has 'filename' and 'population' for sorting by population
         
     Returns:
         dict: Mapping from motif number to cluster ID
@@ -2610,12 +2612,32 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
         representatives.append(representative)
         representative_cluster_ids.append(cluster_id)
     
-    # Sort representatives by Gibbs free energy, keeping track of their original cluster IDs
+    # Sort representatives by Boltzmann population (if available) or Gibbs free energy as fallback
     representatives_with_ids = list(zip(representatives, representative_cluster_ids))
-    sorted_representatives_with_ids = sorted(
-        representatives_with_ids,
-        key=lambda x: (x[0].get('gibbs_free_energy') if x[0].get('gibbs_free_energy') is not None else float('inf'), x[0]['filename'])
-    )
+    
+    if boltzmann_data:
+        # Create a filename-to-population mapping for sorting
+        filename_to_population = {}
+        for cluster_id_key, data in boltzmann_data.items():
+            filename_to_population[data['filename']] = data['population']
+        
+        def get_population_for_rep(rep_tuple):
+            """Get Boltzmann population for a representative, or -inf if not found (to sort last)."""
+            rep, cid = rep_tuple
+            filename = rep.get('filename', '')
+            return filename_to_population.get(filename, -float('inf'))
+        
+        # Sort by population descending (highest population = motif_01)
+        sorted_representatives_with_ids = sorted(
+            representatives_with_ids,
+            key=lambda x: (-get_population_for_rep(x), x[0]['filename'])  # Negative for descending
+        )
+    else:
+        # Fallback: sort by Gibbs free energy (lowest = motif_01)
+        sorted_representatives_with_ids = sorted(
+            representatives_with_ids,
+            key=lambda x: (x[0].get('gibbs_free_energy') if x[0].get('gibbs_free_energy') is not None else float('inf'), x[0]['filename'])
+        )
     
 
     for motif_idx, (representative, cluster_id) in enumerate(sorted_representatives_with_ids, 1):
@@ -4141,6 +4163,72 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             cluster_id = cluster_members[0].get('_cluster_global_id', cluster_idx + 1)
             cluster_id_mapping[cluster_idx] = cluster_id
 
+    # --- RE-COMPUTE Boltzmann using FINAL cluster IDs ---
+    # This ensures traceability: cluster IDs in Boltzmann match cluster IDs in summary
+    boltzmann_final_data = {}
+    final_global_min_energy = None
+    final_global_min_filename = "N/A"
+    final_global_min_cluster_id = "N/A"
+    
+    # First pass: find representatives and global minimum
+    final_representatives = []
+    for cluster_members in all_final_clusters:
+        if not cluster_members:
+            continue
+        
+        # Get the final cluster ID
+        final_cluster_id = cluster_members[0].get('_cluster_global_id')
+        if final_cluster_id is None:
+            continue
+        
+        # Find lowest energy representative in this cluster (excluding imaginary freq structures)
+        valid_members = [m for m in cluster_members if not m.get('_has_imaginary_freqs', False)]
+        if not valid_members:
+            valid_members = cluster_members  # Use all if none are valid
+        
+        rep = min(valid_members, 
+                  key=lambda x: (x.get('gibbs_free_energy') if x.get('gibbs_free_energy') is not None else float('inf'), x['filename']))
+        
+        if rep.get('gibbs_free_energy') is not None:
+            final_representatives.append({
+                'cluster_id': final_cluster_id,
+                'filename': rep['filename'],
+                'energy': rep['gibbs_free_energy'],
+                'cluster_size': len(cluster_members)
+            })
+    
+    # Find global minimum
+    if final_representatives:
+        min_rep = min(final_representatives, key=lambda x: x['energy'])
+        final_global_min_energy = min_rep['energy']
+        final_global_min_filename = min_rep['filename']
+        final_global_min_cluster_id = min_rep['cluster_id']
+        
+        # Calculate Boltzmann factors
+        sum_factors = 0.0
+        for rep in final_representatives:
+            delta_e = rep['energy'] - final_global_min_energy
+            if BOLTZMANN_CONSTANT_HARTREE_PER_K * temperature_k == 0:
+                factor = 1.0 if delta_e == 0 else 0.0
+            else:
+                factor = np.exp(-delta_e / (BOLTZMANN_CONSTANT_HARTREE_PER_K * temperature_k))
+            
+            boltzmann_final_data[rep['cluster_id']] = {
+                'energy': rep['energy'],
+                'filename': rep['filename'],
+                'population': factor,
+                'cluster_size': rep['cluster_size']
+            }
+            sum_factors += factor
+        
+        # Normalize populations
+        if sum_factors > 0:
+            for cid in boltzmann_final_data:
+                boltzmann_final_data[cid]['population'] = (boltzmann_final_data[cid]['population'] / sum_factors) * 100.0
+        else:
+            for cid in boltzmann_final_data:
+                boltzmann_final_data[cid]['population'] = 0.0
+
     # Detect if inputs are from a previous motif step to determine output naming
     # This enables the workflow: conf_### → motif_## → umotif_##
     all_input_filenames = [m.get('filename', '') for m in clean_data_for_clustering]
@@ -4150,14 +4238,16 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         print_step(f"Detected motif inputs - using '{output_prefix}_##' naming for unique motifs")
 
     # Create motifs folder with representative structures from each cluster
+    # Pass boltzmann_final_data to sort motifs by population (highest population = motif_01)
     motif_to_cluster_mapping = create_unique_motifs_folder(all_final_clusters, output_base_dir, 
                                                           cluster_id_mapping=cluster_id_mapping,
                                                           output_prefix=output_prefix,
-                                                          folder_prefix=folder_prefix)
+                                                          folder_prefix=folder_prefix,
+                                                          boltzmann_data=boltzmann_final_data)
 
     # --- Create separate Boltzmann Distribution Analysis file ---
     boltzmann_file_content_lines = []
-    if global_min_gibbs_energy is not None:
+    if final_global_min_energy is not None:
         # Helper function to center text within 75 characters (same as summary)
         def center_text_boltzmann(text, width=75):
             return text.center(width)
@@ -4197,8 +4287,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         
         # Reference configuration info
         boltzmann_file_content_lines.append("Reference Configuration:")
-        boltzmann_file_content_lines.append(f"  Structure: {os.path.splitext(global_min_rep_filename)[0]} from cluster_{global_min_cluster_id}")
-        boltzmann_file_content_lines.append(f"  Reference Energy (Emin): {global_min_gibbs_energy:.6f} Hartree ({hartree_to_kcal_mol(global_min_gibbs_energy):.2f} kcal/mol, {hartree_to_ev(global_min_gibbs_energy):.2f} eV)")
+        boltzmann_file_content_lines.append(f"  Structure: {os.path.splitext(final_global_min_filename)[0]} from cluster_{final_global_min_cluster_id}")
+        boltzmann_file_content_lines.append(f"  Reference Energy (Emin): {final_global_min_energy:.6f} Hartree ({hartree_to_kcal_mol(final_global_min_energy):.2f} kcal/mol, {hartree_to_ev(final_global_min_energy):.2f} eV)")
         boltzmann_file_content_lines.append(f"  Temperature (T): {temperature_k:.2f} K")
         boltzmann_file_content_lines.append("")
         
@@ -4210,62 +4300,25 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         boltzmann_file_content_lines.append("")
         
         # Sort by population percentage descending for better readability
-        sorted_g1_data = sorted(boltzmann_g1_data.items(), key=lambda item: item[1]['population'], reverse=True)
-        for cluster_id, data in sorted_g1_data:
-            # Find corresponding motif number
-            motif_num = None
-            if motif_to_cluster_mapping:
-                for motif_idx, mapped_cluster_id in motif_to_cluster_mapping.items():
-                    if mapped_cluster_id == cluster_id:
-                        motif_num = motif_idx
-                        break
-            
-            cluster_line = f"cluster_{cluster_id}"
-            if motif_num is not None:
-                # Use the detected output prefix (motif_ or umotif_)
-                cluster_line += f" ({output_prefix}_{motif_num:02d})"
+        # Number motifs by population rank: highest population = motif_01/umotif_01
+        sorted_final_data = sorted(boltzmann_final_data.items(), key=lambda item: item[1]['population'], reverse=True)
+        
+        # Add section header for motif assignment
+        display_name = "Unique Motif (umotif)" if output_prefix == 'umotif' else "Motif"
+        boltzmann_file_content_lines.append(f"{display_name} Assignment Summary")
+        boltzmann_file_content_lines.append("(sorted by Boltzmann population)\n")
+        
+        for motif_rank, (cluster_id, data) in enumerate(sorted_final_data, 1):
+            # Motif number is based on population rank (most populated = 01)
+            cluster_line = f"cluster_{cluster_id} ({output_prefix}_{motif_rank:02d})"
                 
             boltzmann_file_content_lines.append(cluster_line)
-            boltzmann_file_content_lines.append(f"  Structure: {os.path.splitext(data['filename'])[0]}")
+            boltzmann_file_content_lines.append(f"  From structure: {os.path.splitext(data['filename'])[0]}")
             boltzmann_file_content_lines.append(f"  Energy: {data['energy']:.6f} Hartree ({hartree_to_kcal_mol(data['energy']):.2f} kcal/mol, {hartree_to_ev(data['energy']):.2f} eV)")
             boltzmann_file_content_lines.append(f"  Population: {data['population']:.2f} %")
             boltzmann_file_content_lines.append("")
 
         boltzmann_file_content_lines.append("=" * 75)
-    
-    # --- Create enhanced summary with motif/umotif assignments ---
-    # Add a section at the end of the summary showing the mapping from clusters to motifs
-    if motif_to_cluster_mapping and boltzmann_g1_data:
-        summary_file_content_lines.append("\n" + "=" * 75)
-        display_name = "Unique Motif (umotif)" if output_prefix == 'umotif' else "Motif"
-        summary_file_content_lines.append(f"\n{display_name} Assignment Summary")
-        summary_file_content_lines.append("(sorted by Boltzmann population)\n")
-        
-        # Create reverse mapping from cluster_id to motif_num
-        cluster_to_motif = {v: k for k, v in motif_to_cluster_mapping.items()}
-        
-        # Sort by population for display
-        sorted_boltzmann = sorted(boltzmann_g1_data.items(), key=lambda x: x[1]['population'], reverse=True)
-        
-        for cluster_id, data in sorted_boltzmann:
-            motif_num = cluster_to_motif.get(cluster_id)
-            if motif_num is not None:
-                source_name = os.path.splitext(data['filename'])[0]
-                summary_file_content_lines.append(
-                    f"cluster_{cluster_id} ({output_prefix}_{motif_num:02d})"
-                )
-                summary_file_content_lines.append(
-                    f"  From structure: {source_name}"
-                )
-                summary_file_content_lines.append(
-                    f"  Energy: {data['energy']:.6f} Hartree ({hartree_to_kcal_mol(data['energy']):.2f} kcal/mol, {hartree_to_ev(data['energy']):.2f} eV)"
-                )
-                summary_file_content_lines.append(
-                    f"  Population: {data['population']:.2f} %"
-                )
-                summary_file_content_lines.append("")
-        
-        summary_file_content_lines.append("=" * 75)
     
     # Write separate files
     summary_file = os.path.join(output_base_dir, "clustering_summary.txt")
