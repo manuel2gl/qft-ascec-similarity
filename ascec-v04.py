@@ -5956,7 +5956,11 @@ def group_files_by_base(directory='.'):
     import multiprocessing as mp
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
-    files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    # Filter out ORCA intermediate files right from the start
+    excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
+    files = [f for f in os.listdir(directory) 
+             if os.path.isfile(os.path.join(directory, f))
+             and not any(pattern in f for pattern in excluded_patterns)]
     base_map = defaultdict(list)
 
     print(f"Analyzing {len(files)} files for grouping...")
@@ -6839,7 +6843,11 @@ def unsort_directory(directory='.'):
 
 def group_files_by_base_with_tracking(directory='.'):
     """Group files by base name and track what was moved."""
-    files = [f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f))]
+    # Filter out ORCA intermediate files right from the start
+    excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
+    files = [f for f in os.listdir(directory) 
+             if os.path.isfile(os.path.join(directory, f)) 
+             and not any(pattern in f for pattern in excluded_patterns)]
     base_map = defaultdict(list)
     
     for file in files:
@@ -6876,8 +6884,13 @@ def group_files_by_base_with_tracking(directory='.'):
     
     # Clean up orphaned .inp/.com/.gjf files at root if their subfolder exists
     # This handles case where files were already organized but input files were left behind
+    # CRITICAL: Filter out ORCA intermediate files (.scfgrad.inp, .scfp.inp, etc.)
+    excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
     for file in os.listdir(directory):
         if file.endswith(('.inp', '.com', '.gjf')) and os.path.isfile(os.path.join(directory, file)):
+            # Skip ORCA intermediate files
+            if any(pattern in file for pattern in excluded_patterns):
+                continue
             base = extract_base(file)
             folder_path = os.path.join(directory, base)
             if base and os.path.isdir(folder_path):
@@ -6943,7 +6956,8 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
             'gaussian_summary' in os.path.basename(f).lower() or
             '.scfhess.' in os.path.basename(f) or
             '.scfgrad.' in os.path.basename(f) or
-            '.scfp.' in os.path.basename(f)
+            '.scfp.' in os.path.basename(f) or
+            '.tmp.' in os.path.basename(f)
         )]
         
         if not all_out_files:
@@ -10555,8 +10569,22 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         else:
             print(f"\nResuming: Using existing calculation directory\n")
         
+        # Clean up ORCA intermediate files at root level (they should not be there)
+        excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
+        for item in os.listdir(calc_dir):
+            item_path = os.path.join(calc_dir, item)
+            if os.path.isfile(item_path) and any(pattern in item for pattern in excluded_patterns):
+                try:
+                    os.remove(item_path)
+                except:
+                    pass
+        
         # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
         for old_inp in glob.glob(os.path.join(calc_dir, "*.inp")) + glob.glob(os.path.join(calc_dir, "*.com")):
+            # Skip ORCA intermediate files (already handled above)
+            if any(pattern in old_inp for pattern in excluded_patterns):
+                continue
+                
             # Only remove if a corresponding subdirectory exists (calculation was run)
             basename = os.path.basename(old_inp).replace('.inp', '').replace('.com', '')
             
@@ -10594,7 +10622,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 if not filename.endswith(('.inp', '.com', '.gjf')):
                     return False
                 # Exclude ORCA intermediate files
-                excluded_patterns = ['.scfgrad.', '.scfp.', '.gbw.', '.tmp.', '.densities.', '.scfhess.']
+                excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
                 return not any(pattern in filename for pattern in excluded_patterns)
             
             # Get list of input files to process
@@ -10842,11 +10870,16 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
                         
-                        # Remove previous auxiliary files for clean run
-                        for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.opt']:
-                            aux_file = os.path.join(calc_dir, basename + ext)
-                            if os.path.exists(aux_file):
-                                os.remove(aux_file)
+                        # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
+                        # This prevents old files from interfering with the new calculation
+                        for item in os.listdir(calc_dir):
+                            if item.startswith(basename) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
+                                item_path = os.path.join(calc_dir, item)
+                                if os.path.isfile(item_path):
+                                    try:
+                                        os.remove(item_path)
+                                    except:
+                                        pass
                         
                         # Create run script
                         temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
@@ -11753,7 +11786,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             if not filename.endswith(('.inp', '.com', '.gjf')):
                 return False
             # Exclude ORCA intermediate files
-            excluded_patterns = ['.scfgrad.', '.scfp.', '.gbw.', '.tmp.', '.densities.', '.scfhess.']
+            excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
             return not any(pattern in filename for pattern in excluded_patterns)
         
         input_files = sorted([f for f in os.listdir("optimization") if is_valid_input_file(f)], key=natural_sort_key)
@@ -12147,18 +12180,30 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 input_filename = os.path.basename(input_file)
                 basename_only = os.path.splitext(input_filename)[0]
                 
-                # Remove previous auxiliary files for clean run (check both root and subdir)
-                for ext in ['.gbw', '.prop', '.densities', '.tmp', '_property.txt', '.opt']:
-                    # Check root
-                    aux_file = os.path.join("optimization", basename_only + ext)
-                    if os.path.exists(aux_file):
-                        os.remove(aux_file)
-                    # Check subdir if input is in subdir
-                    if '/' in input_file:
-                        subdir = os.path.dirname(input_file)
-                        aux_file = os.path.join("optimization", subdir, basename_only + ext)
-                        if os.path.exists(aux_file):
-                            os.remove(aux_file)
+                # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
+                # This prevents old files from interfering with the new calculation
+                # Check root level
+                for item in os.listdir("optimization"):
+                    if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
+                        item_path = os.path.join("optimization", item)
+                        if os.path.isfile(item_path):
+                            try:
+                                os.remove(item_path)
+                            except:
+                                pass
+                # Check subdir if input is in subdir
+                if '/' in input_file:
+                    subdir = os.path.dirname(input_file)
+                    subdir_path = os.path.join("optimization", subdir)
+                    if os.path.exists(subdir_path):
+                        for item in os.listdir(subdir_path):
+                            if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
+                                item_path = os.path.join(subdir_path, item)
+                                if os.path.isfile(item_path):
+                                    try:
+                                        os.remove(item_path)
+                                    except:
+                                        pass
                 
                 # Create run script at root level (always flat)
                 temp_script = os.path.join("optimization", f'_run_{basename_only}.sh')
