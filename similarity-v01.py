@@ -4314,7 +4314,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                 
             boltzmann_file_content_lines.append(cluster_line)
             boltzmann_file_content_lines.append(f"  From structure: {os.path.splitext(data['filename'])[0]}")
-            boltzmann_file_content_lines.append(f"  Energy: {data['energy']:.6f} Hartree ({hartree_to_kcal_mol(data['energy']):.2f} kcal/mol, {hartree_to_ev(data['energy']):.2f} eV)")
+            boltzmann_file_content_lines.append(f"  Gibbs Energy: {data['energy']:.6f} Hartree ({hartree_to_kcal_mol(data['energy']):.2f} kcal/mol, {hartree_to_ev(data['energy']):.2f} eV)")
             boltzmann_file_content_lines.append(f"  Population: {data['population']:.2f} %")
             boltzmann_file_content_lines.append("")
 
