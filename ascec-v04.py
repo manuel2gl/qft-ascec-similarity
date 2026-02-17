@@ -654,9 +654,9 @@ def _process_xyz_file_for_opt(xyz_file_data):
             motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
         
         if motif_match:
-            # Use motif name from comment or filename
+            # Use umotif name (optimization stage promotes motif → umotif)
             motif_num = int(motif_match.group(1))
-            input_name = f"motif_{motif_num:0>2}_opt{input_ext}"
+            input_name = f"umotif_{motif_num:0>2}_opt{input_ext}"
             source_name = f"motif_{motif_num:0>2}"
         else:
             # For non-motif files, use simple opt_conf_X naming
@@ -5436,15 +5436,17 @@ def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str =
         print("No XYZ files found.")
         return []
     
-    # Separate combined files from motif files
+    # Separate combined files from motif/umotif files
     combined_files = [f for f in xyz_files if "combined" in os.path.basename(f).lower()]
-    motif_files = [f for f in xyz_files if "motif_" in os.path.basename(f) and "combined" not in os.path.basename(f).lower()]
+    # Match both motif_ and umotif_ files
+    motif_files = [f for f in xyz_files if ("motif_" in os.path.basename(f) or "umotif_" in os.path.basename(f)) and "combined" not in os.path.basename(f).lower()]
     
-    # Sort motif files by motif number
+    # Sort motif/umotif files by number
     def extract_motif_number(filepath):
         import re
         filename = os.path.basename(filepath)
-        match = re.search(r'motif_(\d+)', filename)
+        # Match both motif_XX and umotif_XX patterns
+        match = re.search(r'u?motif_(\d+)', filename)
         return int(match.group(1)) if match else 0
     
     motif_files.sort(key=extract_motif_number)
@@ -6062,6 +6064,7 @@ def get_sort_key(filename):
     """Extract the configuration number from filename for sorting.
     
     Handles various patterns:
+    - umotif_28_opt.xyz -> 28
     - motif_28_opt.xyz -> 28
     - opt_conf_3.xyz -> 3
     - result_123.xyz -> 123
@@ -6070,8 +6073,8 @@ def get_sort_key(filename):
     import re
     # Try multiple patterns in order of specificity
     patterns = [
-        r'motif_(\d+)_opt\.xyz',    # motif_28_opt.xyz
-        r'motif_(\d+)\.xyz',         # motif_28.xyz
+        r'u?motif_(\d+)_opt\.xyz',   # umotif_28_opt.xyz or motif_28_opt.xyz
+        r'u?motif_(\d+)\.xyz',        # umotif_28.xyz or motif_28.xyz
         r'opt_conf_(\d+)\.xyz',      # opt_conf_3.xyz
         r'result_(\d+)\.xyz',        # result_123.xyz
         r'conf_(\d+)\.xyz',          # conf_20.xyz
@@ -7424,6 +7427,7 @@ class WorkflowContext:
     opt_sim_folder: Optional[str] = None
     recalculated_files: Optional[List[str]] = None  # List of basenames for files being recalculated in redo
     pending_similarity_folder: Optional[str] = None  # Folder set by calc/opt to be used by next similarity stage
+    use_skipped_threshold: bool = False  # True if --skipped flag is used, False if --critical (default)
     
     def get_previous_stage_output_dir(self, stage_type: str) -> Optional[str]:
         """
@@ -10185,18 +10189,24 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     need_recalc_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
     clustered_dir = os.path.join(sim_dir, "skipped_structures", "clustered_with_minima")
     
-    # 3. Find XYZ files to process (same as calculation redo)
+    # Check threshold mode from context
+    # --critical: only use need_recalculation (structures with imaginary freqs)
+    # --skipped: use both need_recalculation AND clustered_with_minima
+    use_skipped_threshold = getattr(context, 'use_skipped_threshold', False)
+    
+    # 3. Find XYZ files to process
     xyz_files = []
     
-    # Always include critical structures (need_recalculation)
+    # Always include critical structures (need_recalculation) - these have imaginary frequencies
     if os.path.exists(need_recalc_dir):
         need_recalc_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
         # Filter out combined files
         need_recalc_files = [f for f in need_recalc_files if "combined" not in os.path.basename(f).lower()]
         xyz_files.extend(need_recalc_files)
     
-    # Also check clustered_with_minima if it exists (for --skipped=0)
-    if os.path.exists(clustered_dir):
+    # Only include clustered_with_minima if --skipped threshold is used
+    # These are structures that clustered with existing minima (skipped but not critical)
+    if use_skipped_threshold and os.path.exists(clustered_dir):
         clustered_files = glob.glob(os.path.join(clustered_dir, "*.xyz"))
         clustered_files = [f for f in clustered_files if "combined" not in os.path.basename(f).lower()]
         xyz_files.extend(clustered_files)
@@ -10232,10 +10242,10 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
         
         # 4a. Find the previous output file (to check imaginary freqs and extract geometry)
         # Optimization outputs are tricky. They could be in:
-        # - optimization/motif_XX_opt.out (root)
-        # - optimization/motif_XX_opt/motif_XX_opt.out (subdir)
-        # - similarity_2/orca_out_X/motif_XX_opt.out (moved there)
-        # - need_recalc_dir/motif_XX_opt.out (copied there by similarity script)
+        # - optimization/umotif_XX_opt.out (root)
+        # - optimization/umotif_XX_opt/umotif_XX_opt.out (subdir)
+        # - similarity_2/orca_out_X/umotif_XX_opt.out (moved there)
+        # - need_recalc_dir/umotif_XX_opt.out (copied there by similarity script)
         
         out_file = None
         
@@ -10468,7 +10478,9 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 item_path = os.path.join(calc_dir, item)
                 if os.path.isdir(item_path) and not item.startswith('_'):  # Skip _run_ directories
                     # Skip if this file is marked for redo
-                    if item in redo_files:
+                    # Check both "item" AND "item_opt"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    if any(variant in redo_files for variant in redo_variants):
                         continue
                         
                     # Check if this subdirectory has a completed calculation (.out file, not just .backup)
@@ -10554,7 +10566,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 if os.path.isdir(item_path) and not item.startswith('_'):
                     # Even if no .out file, if the subdirectory exists, a calc was attempted
                     # Check for .out.backup (means it's being redone)
-                    if item not in redo_files and item not in actual_completed:
+                    # Check both "item" AND "item_opt"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    is_redo = any(variant in redo_files for variant in redo_variants)
+                    if not is_redo and item not in actual_completed:
                         # Count any subdirectory as a potential completed calc for total count
                         backup_file = os.path.join(item_path, f"{item}.out.backup")
                         # Only count if it has either .out or .out.backup
@@ -11457,6 +11472,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     # Store in context for this stage
     context.max_attempts_per_calc = max_opt_retries
     
+    # Store threshold mode in context for redo logic
+    # --critical: only retry structures with imaginary freqs (need_recalculation)
+    # --skipped: retry all skipped structures (need_recalculation + clustered_with_minima)
+    context.use_skipped_threshold = (max_skipped is not None)
+    
     if not template_inp or not launcher_sh:
         print("Error: Optimization requires template input and launcher script")
         return 1
@@ -11558,10 +11578,18 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         if os.path.exists(output_sim_folder):
             # Verify this is NOT the motifs source folder (don't delete our input!)
             if output_sim_folder != motifs_source_folder:
-                try:
-                    shutil.rmtree(output_sim_folder)
-                except Exception:
+                # CRITICAL: Check if this similarity folder has skipped_structures for redo
+                # If skipped_structures exists, we're in a redo scenario - do NOT delete!
+                skipped_dir = os.path.join(output_sim_folder, "skipped_structures")
+                if os.path.exists(skipped_dir):
+                    # Redo mode - preserve the similarity folder with skipped structures
                     pass
+                else:
+                    # No skipped structures - safe to delete and rebuild
+                    try:
+                        shutil.rmtree(output_sim_folder)
+                    except Exception:
+                        pass
     
     # Process redo structures at the START of the stage (if need_recalculation exists)
     # This ensures that when the workflow restarts this stage after a similarity failure,
@@ -11822,11 +11850,15 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 item_path = os.path.join(opt_dir, item)
                 if os.path.isdir(item_path):
                     # Skip if this file is marked for redo
-                    if item in redo_files:
+                    # CRITICAL: redo_files contains basenames with _opt suffix (e.g., "umotif_01_opt")
+                    # but item is the directory name (e.g., "umotif_01")
+                    # So we need to check both "item" AND "item_opt"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    if any(variant in redo_files for variant in redo_variants):
                         continue
                     
                     # Check if this subdirectory has a completed calculation
-                    # Try different naming patterns: motif_01/motif_01.out or motif_01/motif_01_opt.out
+                    # Try different naming patterns: umotif_01/umotif_01.out or umotif_01/umotif_01_opt.out
                     possible_names = [f"{item}.out", f"{item}_opt.out", f"{item}_calc.out"]
                     out_file = None
                     for name in possible_names:
@@ -13048,6 +13080,18 @@ WORKFLOW:
 
   Automated workflow:
     ascec input.in protocol     → executes all stages automatically
+
+  Resuming the protocol:
+    The system maintains a cache file to track progress. If interrupted,
+    resume from the last successful stage:
+      ascec input.in protocol
+
+    Resume from a specific stage (e.g., stage 2):
+      ascec input.in protocol 2       → resume from stage 2
+      ascec input.in protocol 2 -i    → resume interactively
+
+    Pipeline stages:
+      1. Annealing → 2. Calculation → 3. Similarity → 4. Optimization → 5. Similarity(2)
 
 OPTIONS:
   -v, --v          Verbose output (print every 10 Monte Carlo cycles)
