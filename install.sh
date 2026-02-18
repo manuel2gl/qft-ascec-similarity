@@ -53,12 +53,15 @@ if ! command -v conda &> /dev/null; then
     if [ -d "$MINICONDA_DIR" ]; then
         echo "> Conda installation found at $MINICONDA_DIR. Initializing..."
         eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
+        # Initialize conda in .bashrc if not already done
+        "$MINICONDA_DIR/bin/conda" init bash > /dev/null 2>&1
         # If still not working after init, try to update/repair
         if ! command -v conda &> /dev/null; then
             echo "> Updating existing Miniconda installation..."
             wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
             bash miniconda.sh -b -u -p "$MINICONDA_DIR"
             eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
+            "$MINICONDA_DIR/bin/conda" init bash > /dev/null 2>&1
             rm miniconda.sh
         fi
     else
@@ -66,12 +69,19 @@ if ! command -v conda &> /dev/null; then
         wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
         bash miniconda.sh -b -p "$MINICONDA_DIR"
         eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
+        # Initialize conda in .bashrc
+        "$MINICONDA_DIR/bin/conda" init bash > /dev/null 2>&1
         rm miniconda.sh
     fi
 else
     echo "> Conda found. Proceeding..."
     # Ensure conda hook is active for this script
     eval "$(conda shell.bash hook)"
+    # Ensure conda is initialized in .bashrc
+    if ! grep -q "conda initialize" "$HOME/.bashrc"; then
+        echo "> Adding conda initialization to .bashrc..."
+        conda init bash > /dev/null 2>&1
+    fi
 fi
 
 #-----------------------------------------
@@ -159,21 +169,22 @@ pip install orca-pi
 echo "> Configuring shortcuts in .bashrc..."
 BASHRC="$HOME/.bashrc"
 
-# Helper function to add alias safely
-add_alias() {
-    if ! grep -q "$1" "$BASHRC"; then
-        echo "alias $1='$2'" >> "$BASHRC"
-    fi
-}
-
 # Add py11 activation alias if separate environment was created
 if [ "$INSTALL_PY11" = "TRUE" ]; then
-    add_alias "py11" "conda activate py11"
+    if ! grep -q "alias py11=" "$BASHRC"; then
+        echo "" >> "$BASHRC"
+        echo "# conda_py11 shortcut" >> "$BASHRC"
+        echo "alias py11='conda activate py11'" >> "$BASHRC"
+    fi
 fi
 
-# These aliases will use whatever python is currently active (base or py11)
-add_alias "ascec" "python $HOME/software/ascec04/ascec-v04.py"
-add_alias "simil" "python $HOME/software/ascec04/similarity-v01.py"
+# Add ASCEC shortcuts
+if ! grep -q "alias ascec=" "$BASHRC"; then
+    echo "" >> "$BASHRC"
+    echo "# ASCEC & Similarity aliases" >> "$BASHRC"
+    echo "alias ascec='python \$HOME/software/ascec04/ascec-v04.py'" >> "$BASHRC"
+    echo "alias simil='python \$HOME/software/ascec04/similarity-v01.py'" >> "$BASHRC"
+fi
 
 echo "-------------------------------------------------------"
 echo "> INSTALLATION COMPLETE!"
