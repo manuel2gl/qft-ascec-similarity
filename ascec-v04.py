@@ -2109,19 +2109,38 @@ def plot_combined_replicas_diagram(tvse_files: List[str], output_file: str, num_
 
 def generate_protocol_summary(cache_file: str = "protocol_cache.pkl", 
                               output_file: str = "protocol_summary.txt"):
-    """Generate comprehensive protocol summary from cache data with enhanced formatting."""
+    """Generate comprehensive protocol summary from cache data with professional formatting."""
     cache = load_protocol_cache(cache_file)
     
     if not cache:
         print("Warning: No cache data found for summary generation")
         return
     
+    def format_duration(seconds: float) -> str:
+        """Format duration as human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            mins = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{mins}m {secs}s"
+        elif seconds < 86400:
+            hours = int(seconds // 3600)
+            mins = int((seconds % 3600) // 60)
+            secs = int(seconds % 60)
+            return f"{hours}h {mins}m {secs}s"
+        else:
+            days = int(seconds // 86400)
+            hours = int((seconds % 86400) // 3600)
+            mins = int((seconds % 3600) // 60)
+            return f"{days}d {hours}h {mins}m"
+    
     def format_wall_time_timing(seconds: float) -> str:
-        """Format wall time as H:M:S.mmm for timing breakdown."""
+        """Format wall time as H:MM:SS.mmm for timing breakdown."""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = seconds % 60
-        return f"{hours}:{minutes}:{secs:.3f}"
+        return f"{hours}:{minutes:02d}:{secs:06.3f}"
     
     def center_text(text: str, width: int = 75) -> str:
         """Center text within given width."""
@@ -2133,7 +2152,6 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
         try:
             with open(summary_file, 'r') as f:
                 content = f.read()
-                # Look for "Total execution time: 0:5:20.482"
                 match = re.search(r'Total execution time:\s+(\d+):(\d+):(\d+\.\d+)', content)
                 if match:
                     hours = int(match.group(1))
@@ -2146,105 +2164,37 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
     
     try:
         with open(output_file, 'w') as f:
-            # ASCII Logo Header
-            f.write("=" * 75 + "\n\n")
-            f.write(center_text("*********************") + "\n")
-            f.write(center_text("*     A S C E C     *") + "\n")
-            f.write(center_text("*********************") + "\n")
-            f.write("\n")
-            f.write("                             √≈≠==≈                                  \n")
-            f.write("   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       \n")
-            f.write("     ÷++÷       ÷++÷           =++=                     ÷×××××=      \n")
-            f.write("     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      \n")
-            f.write("     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     \n")
-            f.write("     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    \n")
-            f.write("     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    \n")
-            f.write("     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   \n")
-            f.write("      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   \n")
-            f.write("       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- \n")
-            f.write("          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ \n")
-            f.write("\n\n")
-            f.write(center_text("Universidad de Antioquia - Medellín - Colombia") + "\n\n\n")
-            f.write(center_text("Annealing Simulado Con Energía Cuántica") + "\n\n")
-            f.write(center_text("* ASCEC-v04: Feb-2026 *") + "\n\n")
-            f.write(center_text("Química Física Teórica - QFT") + "\n\n")
+            # Header
             f.write("=" * 75 + "\n")
-            f.write(center_text("Protocol workflow summary") + "\n")
+            f.write(center_text("A S C E C") + "\n")
+            f.write(center_text("Annealing Simulado Con Energía Cuántica") + "\n")
+            f.write(center_text("Universidad de Antioquia - QFT") + "\n")
             f.write("=" * 75 + "\n\n")
             
-            # Timing Overview
-            if 'start_time_str' in cache:
-                f.write(f"Started:   {cache['start_time_str']}\n")
-            if 'last_update' in cache:
-                f.write(f"Completed: {cache['last_update']}\n")
+            f.write(center_text("PROTOCOL WORKFLOW SUMMARY") + "\n")
+            f.write(center_text("-" * 30) + "\n\n")
             
-            # Calculate total wall time
+            # ══════════════════════════════════════════════════════════════════════
+            # EXECUTION OVERVIEW
+            # ══════════════════════════════════════════════════════════════════════
+            f.write("┌" + "─" * 73 + "┐\n")
+            f.write("│" + center_text("EXECUTION OVERVIEW", 73) + "│\n")
+            f.write("└" + "─" * 73 + "┘\n\n")
+            
+            # Timing info
+            if 'start_time_str' in cache:
+                f.write(f"  Started:    {cache['start_time_str']}\n")
+            if 'last_update' in cache:
+                f.write(f"  Completed:  {cache['last_update']}\n")
+            
             total_wall_time = 0
             if 'start_time' in cache:
                 total_wall_time = time.time() - cache['start_time']
-                total_hours = int(total_wall_time // 3600)
-                minutes = int((total_wall_time % 3600) // 60)
-                seconds = int(total_wall_time % 60)
-                
-                # Format with days if more than 24 hours
-                if total_hours >= 24:
-                    days = total_hours // 24
-                    hours = total_hours % 24
-                    f.write(f"  Total time: {days}d {hours}h {minutes}m {seconds}s\n\n")
-                else:
-                    f.write(f"  Total time: {total_hours}h {minutes}m {seconds}s\n\n")
+                f.write(f"  Duration:   {format_duration(total_wall_time)}\n")
             
-            # Timings for individual modules with percentages (skip Similarity stages)
-            f.write("Timings for individual modules:\n")
-            if 'stages' in cache and total_wall_time > 0:
-                sorted_stages = sorted(cache['stages'].items(), 
-                                     key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
-                
-                for stage_key, stage_info in sorted_stages:
-                    if stage_info.get('status') == 'completed':
-                        stage_type = stage_key.split('_')[0].capitalize()
-                        
-                        # Skip similarity stages in timing display
-                        if stage_type == 'Similarity':
-                            continue
-                        
-                        # For Calculation and Optimization, read time from orca_summary.txt
-                        # For Calculation and Optimization, use wall_time from stage_info if available
-                        wall_time = None
-                        if 'wall_time' in stage_info:
-                            wall_time = stage_info['wall_time']
-                        elif stage_type == 'Calculation' and os.path.exists('calculation/orca_summary.txt'):
-                            wall_time = _extract_time_from_orca_summary('calculation/orca_summary.txt')
-                        elif stage_type == 'Optimization' and os.path.exists('optimization/orca_summary.txt'):
-                            wall_time = _extract_time_from_orca_summary('optimization/orca_summary.txt')
-                        
-                        if wall_time:
-                            percentage = (wall_time / total_wall_time) * 100
-                            type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
-                                      'Optimization': 'Optimization'}
-                            stage_name = type_map.get(stage_type, stage_type)
-                            f.write(f"  {stage_name:13s} {format_wall_time_timing(wall_time):>12s} ({percentage:4.1f} %)\n")
+            f.write("\n")
             
-            # Stage execution details header
-            f.write("\n" + "-" * 70 + "\n")
-            f.write("Stage execution details\n")
-            f.write("-" * 70 + "\n\n")
-            
-            # Protocol Text Display - format as multiple lines for readability
-            if 'protocol_text' in cache:
-                # Split by comma and format each line
-                protocol_lines = cache['protocol_text'].split(',')
-                for line in protocol_lines:
-                    f.write(f"{line.strip()},\n")
-                # Remove trailing comma from last line
-                f.seek(f.tell() - 2)
-                f.write("\n")
-                f.truncate()
-            
-            # Workflow Diagram
-            f.write("\n" + "-" * 70 + "\n\n")
-            f.write("Workflow: ")
-            
+            # Workflow diagram
             if 'stages' in cache:
                 sorted_stages = sorted(cache['stages'].items(), 
                                      key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
@@ -2253,27 +2203,83 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                 for stage_key, stage_info in sorted_stages:
                     if stage_info.get('status') == 'completed':
                         stage_type = stage_key.split('_')[0].capitalize()
-                        type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
-                                  'Similarity': 'Similarity', 'Optimization': 'Optimization'}
+                        type_map = {'Replication': 'Annealing', 'Calculation': 'Calc',
+                                  'Similarity': 'Similarity', 'Optimization': 'Opt'}
                         stage_name = type_map.get(stage_type, stage_type)
                         completed_stages.append(stage_name)
                 
-                f.write(" → ".join(completed_stages) + "\n")
+                f.write(f"  Workflow:   {' → '.join(completed_stages)}\n\n")
             
-            # Detailed Stage Results (only completed stages)
-            f.write("\n")
+            # ══════════════════════════════════════════════════════════════════════
+            # TIMING BREAKDOWN
+            # ══════════════════════════════════════════════════════════════════════
+            if 'stages' in cache and total_wall_time > 0:
+                f.write("┌" + "─" * 73 + "┐\n")
+                f.write("│" + center_text("TIMING BREAKDOWN", 73) + "│\n")
+                f.write("└" + "─" * 73 + "┘\n\n")
+                
+                f.write(f"  {'Stage':<15} {'Duration':>15} {'% Total':>10}\n")
+                f.write(f"  {'-' * 15} {'-' * 15} {'-' * 10}\n")
+                
+                sorted_stages = sorted(cache['stages'].items(), 
+                                     key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
+                
+                for stage_key, stage_info in sorted_stages:
+                    if stage_info.get('status') == 'completed':
+                        stage_type = stage_key.split('_')[0].capitalize()
+                        
+                        # Skip similarity stages in timing (no QM time)
+                        if stage_type == 'Similarity':
+                            continue
+                        
+                        wall_time = stage_info.get('wall_time')
+                        if not wall_time:
+                            if stage_type == 'Calculation' and os.path.exists('calculation/orca_summary.txt'):
+                                wall_time = _extract_time_from_orca_summary('calculation/orca_summary.txt')
+                            elif stage_type == 'Optimization' and os.path.exists('optimization/orca_summary.txt'):
+                                wall_time = _extract_time_from_orca_summary('optimization/orca_summary.txt')
+                        
+                        if wall_time:
+                            percentage = (wall_time / total_wall_time) * 100
+                            type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
+                                      'Optimization': 'Optimization'}
+                            stage_name = type_map.get(stage_type, stage_type)
+                            f.write(f"  {stage_name:<15} {format_wall_time_timing(wall_time):>15} {percentage:>9.1f}%\n")
+                
+                f.write("\n")
+            
+            # ══════════════════════════════════════════════════════════════════════
+            # PROTOCOL DEFINITION
+            # ══════════════════════════════════════════════════════════════════════
+            if 'protocol_text' in cache:
+                f.write("┌" + "─" * 73 + "┐\n")
+                f.write("│" + center_text("PROTOCOL DEFINITION", 73) + "│\n")
+                f.write("└" + "─" * 73 + "┘\n\n")
+                
+                protocol_lines = cache['protocol_text'].split(',')
+                for line in protocol_lines:
+                    line = line.strip()
+                    if line:
+                        f.write(f"  {line}\n")
+                f.write("\n")
+            
+            # ══════════════════════════════════════════════════════════════════════
+            # STAGE DETAILS
+            # ══════════════════════════════════════════════════════════════════════
+            f.write("┌" + "─" * 73 + "┐\n")
+            f.write("│" + center_text("STAGE DETAILS", 73) + "│\n")
+            f.write("└" + "─" * 73 + "┘\n\n")
             
             if 'stages' in cache:
                 sorted_stages = sorted(cache['stages'].items(), 
                                      key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
                 
                 step_num = 1
-                total_completed = len([s for s in sorted_stages if s[1].get('status') == 'completed'])
+                total_stages = cache.get('total_stages', len([s for s in sorted_stages if s[1].get('status') == 'completed']))
                 
                 for stage_key, stage_info in sorted_stages:
                     status = stage_info.get('status', 'unknown')
                     
-                    # Only show completed stages
                     if status != 'completed':
                         continue
                     
@@ -2282,104 +2288,84 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                               'Similarity': 'Similarity', 'Optimization': 'Optimization'}
                     stage_name = type_map.get(stage_type, stage_type)
                     
-                    # Header separator
-                    f.write("─" * 70 + "\n")
-                    f.write(f"[{step_num}/{total_completed}] {stage_name}\n")
-                    f.write("─" * 70 + "\n")
-                    
-                    # Get stage-specific information from result dictionary
                     result = stage_info.get('result', {})
+                    wall_time = stage_info.get('wall_time')
                     
-                    # Display information based on stage type
+                    # Stage header with status indicator
+                    status_icon = "✓"
+                    f.write(f"  [{step_num}/{total_stages}] {stage_name} {status_icon}\n")
+                    f.write(f"  {'─' * 40}\n")
+                    
+                    # Stage-specific details
                     if stage_type == 'Replication':  # Annealing
                         if 'box_size' in result:
-                            box_size = float(result['box_size'])
-                            packing = result.get('packing', 'N/A')
-                            f.write(f"Using recommended box size: {box_size:.1f} Å ({packing}% effective packing)\n\n")
-                        f.write("Results:\n")
+                            f.write(f"    Box size:     {float(result['box_size']):.1f} Å")
+                            if 'packing' in result:
+                                f.write(f" ({result['packing']}% packing)")
+                            f.write("\n")
                         if 'num_replicas' in result:
-                            f.write(f"  • Num Replicas: {result['num_replicas']}\n")
+                            f.write(f"    Replicas:     {result['num_replicas']}\n")
                         if 'total_accepted' in result:
-                            f.write(f"  • Total accepted configurations: {result['total_accepted']}\n")
+                            f.write(f"    Accepted:     {result['total_accepted']} configurations\n")
                     
                     elif stage_type == 'Calculation':
                         if 'xyz_source' in result:
-                            # Use "Annealing" as fallback if xyz_source is None or empty
                             xyz_source = result['xyz_source'] if result['xyz_source'] else "Annealing"
-                            f.write(f"Using structures from: {xyz_source}\n")
-                        
-                        # Check for exclusions
-                        excluded_calcs = cache.get('excluded_calculations', [])
-                        if excluded_calcs:
-                            f.write(f"Excluded conf: {','.join(map(str, excluded_calcs))}\n")
-                        
+                            f.write(f"    Input from:   {xyz_source}\n")
                         if 'completed' in result and 'total' in result:
-                            f.write(f"Calculation results: {result['completed']}/{result['total']} completed successfully\n")
-                        
+                            f.write(f"    Completed:    {result['completed']}/{result['total']} calculations\n")
                         if 'attempts' in result:
-                            f.write(f"  • Attempts: {result['attempts']}\n")
-                        if 'max_tries' in result:
-                            f.write(f"  • Max Tries: {result['max_tries']}\n")
-                        if 'critical_threshold' in result:
-                            f.write(f"  • Critical Threshold: {result['critical_threshold']}%\n")
-                        if 'similarity_folder' in result:
-                            f.write(f"Copied {result.get('completed', 'N/A')} .out files to {result['similarity_folder']}\n")
+                            f.write(f"    Attempts:     {result['attempts']}\n")
+                        if 'similarity_folder' in result and result['similarity_folder']:
+                            f.write(f"    Output to:    {result['similarity_folder']}\n")
                     
                     elif stage_type == 'Similarity':
-                        if 'similarity_folder' in result:
-                            f.write(f"Using files from: {result['similarity_folder']}\n")
+                        if 'similarity_folder' in result and result['similarity_folder']:
+                            f.write(f"    Working dir:  {result['similarity_folder']}\n")
                         if 'motifs_created' in result:
-                            f.write(f"Motifs created: {result['motifs_created']} representatives\n")
+                            motif_label = "Unique motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
+                            f.write(f"    {motif_label}:  {result['motifs_created']} representatives\n")
                         if 'critical_pct' in result and 'skipped_pct' in result:
-                            f.write(f"  • Results: {result['critical_pct']}% critical, {result['skipped_pct']}% skipped\n")
-                        if 'threshold_met' in result and result['threshold_met']:
-                            threshold_type = result.get('threshold_type', 'critical')
-                            threshold_val = result.get('threshold_value', '0.0')
-                            f.write(f"  • Threshold met ({threshold_type} ≤ {threshold_val}%)\n")
+                            f.write(f"    Critical:     {result['critical_pct']}%\n")
+                            f.write(f"    Skipped:      {result['skipped_pct']}%\n")
+                        
+                        # Threshold validation
+                        threshold_met = result.get('threshold_met', True)
+                        if 'threshold_type' in result and 'threshold_value' in result:
+                            threshold_type = result['threshold_type']
+                            threshold_value = result['threshold_value']
+                            if threshold_met:
+                                f.write(f"    Validation:   ✓ Step [{step_num-1}] passed ({threshold_type} ≤ {threshold_value}%)\n")
+                            else:
+                                actual = result.get('critical_pct' if threshold_type == 'critical' else 'skipped_pct', 'N/A')
+                                attempts = result.get('attempts', 'N/A')
+                                f.write(f"    Validation:   ⚠ Step [{step_num-1}] threshold exceeded\n")
+                                f.write(f"                  Target: {threshold_type} ≤ {threshold_value}%  Actual: {actual}%\n")
+                                f.write(f"                  Max attempts ({attempts}) reached\n")
                     
                     elif stage_type == 'Optimization':
-                        if 'motifs_source' in result:
-                            f.write(f"Using motifs from: {result['motifs_source']}\n")
-                        
-                        # Check for exclusions
-                        excluded_opts = cache.get('excluded_optimizations', [])
-                        if excluded_opts:
-                            f.write(f"Excluded motif: {','.join(map(str, excluded_opts))}\n")
-                        
+                        if 'motifs_source' in result and result['motifs_source']:
+                            f.write(f"    Input from:   {result['motifs_source']}\n")
                         if 'completed' in result and 'total' in result:
-                            f.write(f"Optimization results: {result['completed']}/{result['total']} completed successfully\n")
-                        
+                            f.write(f"    Completed:    {result['completed']}/{result['total']} optimizations\n")
                         if 'attempts' in result:
-                            f.write(f"  • Attempts: {result['attempts']}\n")
-                        if 'max_tries' in result:
-                            f.write(f"  • Max Tries: {result['max_tries']}\n")
-                        if 'skipped_threshold' in result:
-                            f.write(f"  • Skipped Threshold: {result['skipped_threshold']}%\n")
-                        if 'similarity_folder' in result:
-                            f.write(f"Copied {result.get('completed', 'N/A')} .out files to {result['similarity_folder']}\n")
+                            f.write(f"    Attempts:     {result['attempts']}\n")
+                        if 'similarity_folder' in result and result['similarity_folder']:
+                            f.write(f"    Output to:    {result['similarity_folder']}\n")
                     
-                    # Show validation message BEFORE status for similarity stages
-                    if stage_type == 'Similarity':
-                        # Calculate which calculation/optimization step this validates
-                        if step_num == 3:  # First similarity (after calc) - validates step 2
-                            f.write(f"Step [2/{total_completed}] validated\n")
-                        elif step_num == 5:  # Second similarity (after opt) - validates step 4
-                            f.write(f"Step [4/{total_completed}] validated\n")
-                    
-                    # Status and Wall time at the end (skip wall time for Similarity stages)
-                    f.write("\nStatus: Completed\n")
-                    if 'wall_time' in stage_info and stage_type != 'Similarity':
-                        f.write(f"Wall time: {format_wall_time_timing(stage_info['wall_time'])}\n")
+                    # Wall time for non-similarity stages
+                    if wall_time and stage_type != 'Similarity':
+                        f.write(f"    Wall time:    {format_wall_time_timing(wall_time)}\n")
                     
                     f.write("\n")
                     step_num += 1
             
-            # Ending
-            f.write("-" * 70 + "\n\n")
-            f.write("Workflow completed\n\n")
-            f.write("=" * 70 + "\n")
-            f.write("End of protocol summary\n")
-            f.write("=" * 70 + "\n")
+            # ══════════════════════════════════════════════════════════════════════
+            # FOOTER
+            # ══════════════════════════════════════════════════════════════════════
+            f.write("=" * 75 + "\n")
+            f.write(center_text("Workflow completed successfully") + "\n")
+            f.write("=" * 75 + "\n")
         
         print(f"✓ Protocol summary saved to {output_file}")
         
@@ -8737,7 +8723,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         cache = {}
                         if protocol_text:
                             cache['protocol_text'] = protocol_text
-                            save_protocol_cache(cache, cache_file)
+                        cache['total_stages'] = len(stages)
+                        save_protocol_cache(cache, cache_file)
                     elif 1 <= choice_idx <= len(stage_list):
                         # Resume from specific stage - mark previous stages as completed
                         resume_stage_key = stage_list[choice_idx - 1][1]
@@ -8750,13 +8737,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         cache = {}
                         if protocol_text:
                             cache['protocol_text'] = protocol_text
-                            save_protocol_cache(cache, cache_file)
+                        cache['total_stages'] = len(stages)
+                        save_protocol_cache(cache, cache_file)
                 except ValueError:
                     print(f"Invalid input. Starting from beginning.")
                     cache = {}
                     if protocol_text:
                         cache['protocol_text'] = protocol_text
-                        save_protocol_cache(cache, cache_file)
+                    cache['total_stages'] = len(stages)
+                    save_protocol_cache(cache, cache_file)
                 
                 print(f"{'='*70}\n")
             elif start_time:
@@ -8766,11 +8755,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 print(f"Resuming workflow (started: {time_str})")
             else:
                 print(f"Resuming workflow")
+            
+            # Backfill total_stages for old cache files (compatibility)
+            if 'total_stages' not in cache:
+                cache['total_stages'] = len(stages)
+                save_protocol_cache(cache, cache_file)
         else:
-            # Store protocol text when first starting
+            # Store protocol text and total stages when first starting
             if protocol_text:
                 cache['protocol_text'] = protocol_text
-                save_protocol_cache(cache, cache_file)
+            cache['total_stages'] = len(stages)
+            save_protocol_cache(cache, cache_file)
     
     # Pre-scan stages to extract similarity args for use in calculation stage
     for stage in stages:
@@ -8997,9 +8992,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         'dendrogram_images', 'extracted_clusters', 'extracted_data',
                                         'skipped_structures', 'clustering_summary.txt', 'boltzmann_distribution.txt'
                                     ]
-                                    # Also remove motifs folders
+                                    # Also remove motifs and umotifs folders
                                     for item in os.listdir(sim_dir):
-                                        if item.startswith('motifs_'):
+                                        if item.startswith('motifs_') or item.startswith('umotifs_'):
                                             items_to_remove.append(item)
                                     
                                     for item in items_to_remove:
@@ -9137,6 +9132,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
                         sim_result['input_dir'] = calc_dir  # Read from calculation
                         sim_result['working_dir'] = sim_dir
+                        # After calculation: use "motifs" prefix (first level clustering)
                         sim_result['output_dir'] = os.path.join(sim_dir, "motifs")  # Motifs for opt stage
                         
                         if final_critical is not None:
@@ -9150,7 +9146,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if hasattr(context, 'sim_motifs_created'):
                             sim_result['motifs_created'] = context.sim_motifs_created
                         
-                        # Add threshold info
+                        # Add threshold info and attempts
+                        sim_result['attempts'] = final_attempt
                         if max_critical is not None:
                             sim_result['threshold_type'] = 'critical'
                             sim_result['threshold_value'] = max_critical
@@ -9281,15 +9278,31 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         'end_time': dt_sim.now().isoformat()
                     }
                     
+                    # Store directories for stage memory
+                    sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
+                    
+                    # Determine input directory and output prefix based on previous stage
+                    # Check if previous stage was optimization or calculation
+                    prev_was_opt = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'optimization')
+                    
+                    if prev_was_opt:
+                        # After optimization: input from opt dir, output to umotifs
+                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        sim_result['input_dir'] = opt_dir
+                        sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")
+                    else:
+                        # After calculation: input from calc dir, output to motifs
+                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
+                        sim_result['input_dir'] = calc_dir
+                        sim_result['output_dir'] = os.path.join(sim_dir, "motifs")
+                    
+                    sim_result['working_dir'] = sim_dir
+                    
                     # Add similarity folder and motifs info if available
                     if hasattr(context, 'sim_folder') and context.sim_folder:
                         sim_result['similarity_folder'] = context.sim_folder
                     if hasattr(context, 'sim_motifs_created') and context.sim_motifs_created is not None:
                         sim_result['motifs_created'] = context.sim_motifs_created
-                    
-                    # Store working directory for later threshold checks
-                    if hasattr(context, 'similarity_dir'):
-                        sim_result['working_dir'] = context.similarity_dir
                     
                     update_protocol_cache(sim_key, 'completed', 
                                         result=sim_result, cache_file=cache_file)
@@ -9388,9 +9401,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         'dendrogram_images', 'extracted_clusters', 'extracted_data',
                                         'skipped_structures', 'clustering_summary.txt', 'boltzmann_distribution.txt'
                                     ]
-                                    # Also remove motifs folders
+                                    # Also remove motifs and umotifs folders
                                     for item in os.listdir(base_sim_dir):
-                                        if item.startswith('motifs_'):
+                                        if item.startswith('motifs_') or item.startswith('umotifs_'):
                                             items_to_remove.append(item)
                                     
                                     for item in items_to_remove:
@@ -9519,10 +9532,30 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         update_protocol_cache(opt_key, 'completed', result=opt_result, cache_file=cache_file)
                         
                         sim_result = {}
+                        
+                        # Store directories for stage memory
+                        sim_dir = context.similarity_dir if context.similarity_dir else "similarity_2"
+                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        sim_result['input_dir'] = opt_dir  # Read from optimization
+                        sim_result['working_dir'] = sim_dir
+                        # After optimization: use "umotifs" prefix (unique motifs, second level)
+                        sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")  # Unique motifs
+                        
                         if final_critical is not None:
                             sim_result['critical_pct'] = final_critical
                         if final_skipped is not None:
                             sim_result['skipped_pct'] = final_skipped
+                        
+                        # Add threshold info and attempts
+                        sim_result['attempts'] = final_attempt
+                        if max_critical is not None:
+                            sim_result['threshold_type'] = 'critical'
+                            sim_result['threshold_value'] = max_critical
+                            sim_result['threshold_met'] = (final_critical is not None and final_critical <= max_critical)
+                        elif max_skipped is not None:
+                            sim_result['threshold_type'] = 'skipped'
+                            sim_result['threshold_value'] = max_skipped
+                            sim_result['threshold_met'] = (final_skipped is not None and final_skipped <= max_skipped)
                         
                         update_protocol_cache(sim_key, 'completed', result=sim_result, cache_file=cache_file)
                     
@@ -11186,9 +11219,9 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             'dendrogram_images', 'extracted_clusters', 'extracted_data',
             'skipped_structures', 'clustering_summary.txt', 'boltzmann_distribution.txt'
         ]
-        # Also remove motifs folders
+        # Also remove motifs and umotifs folders
         for item in os.listdir(similarity_base):
-            if item.startswith('motifs_'):
+            if item.startswith('motifs_') or item.startswith('umotifs_'):
                 items_to_remove.append(item)
         
         for item in items_to_remove:
@@ -11245,6 +11278,11 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     has_cores_arg = any(arg.startswith('--cores') or arg.startswith('-j') for arg in other_args)
     if not has_cores_arg and hasattr(context, 'ascec_parallel_cores') and context.ascec_parallel_cores > 0:
         cmd.extend(['--cores', str(context.ascec_parallel_cores)])
+    
+    # No need to specify motif prefix - similarity script auto-detects from filenames:
+    # conf_* files → creates motifs_*/ folder (after calculation)
+    # motif_* files → creates motifs_*/ folder (first similarity)
+    # umotif_* files → creates umotifs_*/ folder (after optimization)
     
     # If this is a redo and we have a list of recalculated files, pass them for incremental update
     if hasattr(context, 'recalculated_files') and context.recalculated_files:
@@ -11493,8 +11531,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         return 1
     
     # CRITICAL: Optimization needs to READ motifs from calculation's similarity folder
-    # The calculation stage created motifs in similarity/motifs_XX/
-    # Optimization will READ from similarity/ and WRITE outputs to similarity_2/
+    # The calculation stage created motifs in similarity/motifs_XX/ (or umotifs in similarity_N/)
+    # Optimization will READ from similarity/ and WRITE outputs to similarity_2/ (or next numbered)
+    # The subsequent similarity will create umotifs_YY/ (since input came from optimization)
     
     # Step 1: Find where the MOTIFS are (from calculation's similarity stage)
     motifs_source_folder = None
@@ -11515,20 +11554,24 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         if existing_sims:
             # Sort numerically
             existing_sims.sort(key=lambda x: (int(m.group(1)) if (m := re.search(r'_(\d+)', x)) else 0))
-            # Find the first one with motifs
+            # Find the first one with motifs or umotifs
             for sim_folder in existing_sims:
-                if glob.glob(os.path.join(sim_folder, "motifs_*/")):
+                if glob.glob(os.path.join(sim_folder, "motifs_*/")) or glob.glob(os.path.join(sim_folder, "umotifs_*/")):
                     motifs_source_folder = sim_folder
                     break
     
     if not motifs_source_folder:
         motifs_source_folder = "similarity"  # Default
     
-    # Step 2: Find motifs in the source folder
+    # Step 2: Find motifs or umotifs in the source folder (prefer umotifs if both exist)
+    umotif_dirs = glob.glob(os.path.join(motifs_source_folder, "umotifs_*/"))
     motif_dirs = glob.glob(os.path.join(motifs_source_folder, "motifs_*/"))
     
-    if not motif_dirs:
-        print(f"Warning: No motif directories found in {motifs_source_folder}/")
+    # Prefer umotifs over motifs (more refined clustering)
+    if umotif_dirs:
+        motif_dirs = umotif_dirs
+    elif not motif_dirs:
+        print(f"Warning: No motif/umotif directories found in {motifs_source_folder}/")
         print("  Skipping optimization stage")
         return 0
     
