@@ -7083,14 +7083,30 @@ def parse_gaussian_output(filepath):
     else:
         results['energy'] = None
 
-    # Extract job cpu time
-    time_match = re.search(r"Job cpu time:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+\.\d+)\s*seconds", content)
-    if time_match:
-        days = int(time_match.group(1))
-        hours = int(time_match.group(2))
-        minutes = int(time_match.group(3))
-        seconds = float(time_match.group(4))
-        results['time'] = (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds
+    # Extract number of processors
+    nproc = 1  # Default to 1 if not specified
+    nproc_match = re.search(r"Will use up to\s+(\d+)\s+processors", content)
+    if nproc_match:
+        nproc = int(nproc_match.group(1))
+    else:
+        # Try alternative format %NProcShared
+        nproc_match = re.search(r"%NProcShared\s*=\s*(\d+)", content, re.IGNORECASE)
+        if nproc_match:
+            nproc = int(nproc_match.group(1))
+
+    # Extract all job cpu times and sum them (for multi-step calculations)
+    time_matches = re.findall(r"Job cpu time:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+\.\d+)\s*seconds", content)
+    if time_matches:
+        total_cpu_time = 0
+        for time_match in time_matches:
+            days = int(time_match[0])
+            hours = int(time_match[1])
+            minutes = int(time_match[2])
+            seconds = float(time_match[3])
+            total_cpu_time += (days * 24 * 3600) + (hours * 3600) + (minutes * 60) + seconds
+        
+        # Convert CPU time to wall time by dividing by number of processors
+        results['time'] = total_cpu_time / nproc
     else:
         results['time'] = None
     
