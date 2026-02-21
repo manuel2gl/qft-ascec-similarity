@@ -2804,10 +2804,14 @@ def write_single_xyz_configuration(file_handle, natom, rp, iznu, energy, config_
                          "(to get box dimensions).")
     
     L = state.xbox if include_dummy_atoms and state else 0.0 
+    half_L = L / 2.0  # Box is centered at origin
 
+    # Box corners centered at origin (matches web generator)
     box_corners = np.array([
-        [0, 0, 0], [L, 0, 0], [0, L, 0], [0, 0, L],
-        [L, L, 0], [L, 0, L], [0, L, L], [L, L, L]
+        [-half_L, -half_L, -half_L], [ half_L, -half_L, -half_L],
+        [-half_L,  half_L, -half_L], [ half_L,  half_L, -half_L],
+        [-half_L, -half_L,  half_L], [ half_L, -half_L,  half_L],
+        [-half_L,  half_L,  half_L], [ half_L,  half_L,  half_L]
     ])
     dummy_atom_count = len(box_corners) 
 
@@ -2861,7 +2865,7 @@ def write_accepted_xyz(prefix: str, config_number: int, energy: float, temp: flo
         write_single_xyz_configuration(
             f_xyz,
             state.natom,
-            state.rp + (state.xbox / 2.0), # Shift coords for visualization
+            state.rp,  # Coords already centered at origin, no shift needed
             state.iznu,
             energy, 
             config_number, # Use the sequential config_number here
@@ -2878,7 +2882,7 @@ def write_accepted_xyz(prefix: str, config_number: int, energy: float, temp: flo
             write_single_xyz_configuration(
                 f_box_xyz,
                 state.natom,
-                state.rp + (state.xbox / 2.0), # Shift coords for visualization
+                state.rp,  # Coords already centered at origin, no shift needed
                 state.iznu,
                 energy, # Energy is 0.0 as it's not evaluated
                 config_number, # Use the sequential config_number here
