@@ -417,7 +417,7 @@
                     
                     <div class="form-group">
                         <label>Simulation Name</label>
-                        <input type="text" id="sim-name" placeholder="e.g., water_pentamer">
+                        <input type="text" id="sim-name" value="water_pentamer" placeholder="e.g., water_pentamer">
                     </div>
                     
                     <div class="form-row">
@@ -453,36 +453,36 @@
                         </select>
                     </div>
                     
-                    <h3>Linear Quenching (To, dT, nT)</h3>
+                    <h3>Linear Quenching (Ti, ΔT, steps)</h3>
                     <div class="form-row-3" id="linear-params">
                         <div class="form-group">
-                            <label>Initial Temp (To/K)</label>
+                            <label>Initial Temp (K)</label>
                             <input type="number" id="linear-ti" value="100.0" step="10">
                         </div>
                         <div class="form-group">
-                            <label>Temp Reduction (dT/K)</label>
+                            <label>Temp Reduction ΔT (K)</label>
                             <input type="number" id="linear-dt" value="10.0" step="1">
-                            <p class="help-text">T(n+1) = T(n) - dT</p>
+                            <p class="help-text">T(n+1) = T(n) - ΔT</p>
                         </div>
                         <div class="form-group">
-                            <label>Steps (nT)</label>
+                            <label>Steps</label>
                             <input type="number" id="linear-steps" value="50" min="1">
                         </div>
                     </div>
                     
-                    <h3>Geometric Quenching (To, %dism, nT)</h3>
+                    <h3>Geometric Quenching (Ti, factor%, steps)</h3>
                     <div class="form-row-3" id="geometric-params">
                         <div class="form-group">
-                            <label>Initial Temp (To/K)</label>
+                            <label>Initial Temp (K)</label>
                             <input type="number" id="geom-ti" value="600.0" step="50">
                         </div>
                         <div class="form-group">
-                            <label>Cooling Factor (%dism)</label>
+                            <label>Cooling Factor (%)</label>
                             <input type="number" id="geom-factor" value="5.0" step="0.5" min="0.1" max="100">
                             <p class="help-text">T(n+1) = T(n) × (1 - factor/100)</p>
                         </div>
                         <div class="form-group">
-                            <label>Steps (nT)</label>
+                            <label>Steps</label>
                             <input type="number" id="geom-steps" value="100" min="1">
                         </div>
                     </div>
@@ -517,7 +517,7 @@
                     <div class="form-row">
                         <div class="form-group">
                             <label>Conformational Sampling (%)</label>
-                            <input type="number" id="conf-sampling" value="0" min="0" max="100">
+                            <input type="number" id="conf-sampling" value="30" min="0" max="100">
                         </div>
                         <div class="form-group">
                             <label>Max Dihedral Rotation (°)</label>
@@ -721,6 +721,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     <div class="btn-group" style="margin-top: 10px;">
                         <button class="btn btn-sm btn-secondary" onclick="updateBoxViewer()">🔄 Refresh</button>
                         <button class="btn btn-sm btn-secondary" onclick="resetBoxView()">🎯 Reset View</button>
+                        <button class="btn btn-sm btn-primary" onclick="downloadBoxXYZ()">⬇️ Download XYZ</button>
                     </div>
                 </div>
                 
@@ -732,7 +733,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
                             <li><strong>rN:</strong> Run N replica annealings (e.g., r1, r3, r5)
                                 <br><code>--box10</code></li>
-                            <li><strong>calc:</strong> Single-point calculations
+                            <li><strong>calc:</strong> Preoptimization or Single-point calculations
                                 <br><code>--critical=0 --retry=3 ../input.inp ../launcher.sh</code></li>
                             <li><strong>similarity:</strong> Cluster similar structures
                                 <br><code>--th=2 --cores=8</code></li>
@@ -744,10 +745,9 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
                             <li><code>--box10</code> - Use box with 10% effective packing</li>
                             <li><code>--retry=N</code> - Retry failed calcs N times</li>
-                            <li><code>--critical=N</code> - Max N% critical errors allowed</li>
+                            <li><code>--critical=N</code> - Max N% critical structures allowed</li>
                             <li><code>--th=N</code> - Similarity threshold</li>
                             <li><code>--skipped=N</code> - Max N% skipped structures allowed</li>
-                            <li><code>-c</code> - Combine XYZ files before processing</li>
                         </ul>
                     </div>
                 </div>
@@ -1066,6 +1066,56 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 boxViewer.zoomTo();
                 boxViewer.render();
             }
+        }
+        
+        function downloadBoxXYZ() {
+            // Generate XYZ content for box preview
+            const boxSize = parseFloat(document.getElementById('box-size').value) || 5;
+            const half = boxSize / 2;
+            
+            // Box vertices centered at origin
+            const vertices = [
+                [-half, -half, -half],
+                [ half, -half, -half],
+                [-half,  half, -half],
+                [ half,  half, -half],
+                [-half, -half,  half],
+                [ half, -half,  half],
+                [-half,  half,  half],
+                [ half,  half,  half]
+            ];
+            
+            let totalAtoms = 8; // 8 dummy atoms for vertices
+            molecules.forEach(mol => {
+                totalAtoms += mol.atoms.length;
+            });
+            
+            let xyzContent = `${totalAtoms}\n`;
+            xyzContent += `Simulation box preview | BoxL=${boxSize.toFixed(1)} A (X box markers)\n`;
+            
+            // Add all molecules first (already centered at origin)
+            molecules.forEach(mol => {
+                mol.atoms.forEach((atom, i) => {
+                    const [x, y, z] = mol.coords[i];
+                    xyzContent += `${atom.padEnd(3)} ${x.toFixed(6).padStart(12)} ${y.toFixed(6).padStart(12)} ${z.toFixed(6).padStart(12)}\n`;
+                });
+            });
+            
+            // Add dummy atoms at vertices
+            vertices.forEach(([x, y, z]) => {
+                xyzContent += `X   ${x.toFixed(6).padStart(12)} ${y.toFixed(6).padStart(12)} ${z.toFixed(6).padStart(12)}\n`;
+            });
+            
+            // Create download
+            const blob = new Blob([xyzContent], {type: 'text/plain'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'simulation_box_preview.xyz';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }
         
         function loadSmilesExample(smiles) {
