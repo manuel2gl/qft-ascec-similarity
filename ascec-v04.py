@@ -11054,19 +11054,33 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         
                         # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
                         
+                        # Determine if input is in subdirectory
+                        if '/' in input_file or '\\' in input_file:
+                            # File is in subdirectory (e.g., "opt_conf_1/opt_conf_1.inp")
+                            calc_subdir = os.path.dirname(input_file)
+                            calc_working_dir = os.path.join(calc_dir, calc_subdir)
+                            # Adjust file names to be relative to subdirectory
+                            input_file_relative = os.path.basename(input_file)
+                            output_file_relative = os.path.basename(output_file)
+                        else:
+                            # File is at root level
+                            calc_working_dir = calc_dir
+                            input_file_relative = input_file
+                            output_file_relative = output_file
+                        
                         # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
                         # This prevents old files from interfering with the new calculation
-                        for item in os.listdir(calc_dir):
+                        for item in os.listdir(calc_working_dir):
                             if item.startswith(basename) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
-                                item_path = os.path.join(calc_dir, item)
+                                item_path = os.path.join(calc_working_dir, item)
                                 if os.path.isfile(item_path):
                                     try:
                                         os.remove(item_path)
                                     except:
                                         pass
                         
-                        # Create run script
-                        temp_script = os.path.join(calc_dir, f'_run_{basename}.sh')
+                        # Create run script IN THE WORKING DIRECTORY
+                        temp_script = os.path.join(calc_working_dir, f'_run_{basename}.sh')
                         with open(temp_script, 'w') as f:
                             f.write(launcher_content.split('###')[0])  # Environment setup
                             f.write("\n\n")
@@ -11078,20 +11092,21 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
                                 orca_root_var = extract_orca_root_from_launcher(launcher_content)
                                 if orca_root_var:
-                                    f.write(f"${{{orca_root_var}}}/orca {input_file} > {output_file}\n")
+                                    f.write(f"${{{orca_root_var}}}/orca {input_file_relative} > {output_file_relative}\n")
                                 else:
                                     # Fall back to PATH lookup if no ORCA root variable found
-                                    f.write(f"orca {input_file} > {output_file}\n")
+                                    f.write(f"orca {input_file_relative} > {output_file_relative}\n")
                             elif qm_program == 'gaussian':
                                 # Use GAUSS_ROOT (generic, works with G09 or G16)
-                                f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
+                                f.write(f"$GAUSS_ROOT/g16 {input_file_relative}\n")
                         
                         os.chmod(temp_script, 0o755)
                         
-                        # Execute calculation
+                        # Execute calculation from the working directory (subdirectory or root)
+                        script_name = os.path.basename(temp_script)
                         result = subprocess.run(
-                            ['bash', os.path.basename(temp_script)],
-                            cwd=calc_dir,
+                            ['bash', script_name],
+                            cwd=calc_working_dir,
                             capture_output=True,
                             text=True
                         )
@@ -11100,7 +11115,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         if os.path.exists(temp_script):
                             os.remove(temp_script)
                         if qm_program == 'orca':
-                            for tmp_dir in glob.glob(os.path.join(calc_dir, f'.orca_tmp_{basename}_*')):
+                            # Clean up temp directories in the actual working directory
+                            for tmp_dir in glob.glob(os.path.join(calc_working_dir, f'.orca_tmp_{basename}_*')):
                                 try:
                                     shutil.rmtree(tmp_dir)
                                 except:
@@ -12390,37 +12406,37 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
                 
+                # Determine if input is in subdirectory
+                if '/' in input_file or '\\' in input_file:
+                    # File is in subdirectory (e.g., "motif_01/motif_01_opt.inp")
+                    opt_subdir = os.path.dirname(input_file)
+                    opt_working_dir = os.path.join("optimization", opt_subdir)
+                    # Adjust file names to be relative to subdirectory
+                    input_file_relative = os.path.basename(input_file)
+                    output_file_relative = os.path.basename(output_file)
+                else:
+                    # File is at root level
+                    opt_working_dir = "optimization"
+                    input_file_relative = input_file
+                    output_file_relative = output_file
+                
                 # Get just the filename without path for temp script naming
                 input_filename = os.path.basename(input_file)
                 basename_only = os.path.splitext(input_filename)[0]
                 
                 # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
                 # This prevents old files from interfering with the new calculation
-                # Check root level
-                for item in os.listdir("optimization"):
+                for item in os.listdir(opt_working_dir):
                     if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
-                        item_path = os.path.join("optimization", item)
+                        item_path = os.path.join(opt_working_dir, item)
                         if os.path.isfile(item_path):
                             try:
                                 os.remove(item_path)
                             except:
                                 pass
-                # Check subdir if input is in subdir
-                if '/' in input_file:
-                    subdir = os.path.dirname(input_file)
-                    subdir_path = os.path.join("optimization", subdir)
-                    if os.path.exists(subdir_path):
-                        for item in os.listdir(subdir_path):
-                            if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
-                                item_path = os.path.join(subdir_path, item)
-                                if os.path.isfile(item_path):
-                                    try:
-                                        os.remove(item_path)
-                                    except:
-                                        pass
                 
-                # Create run script at root level (always flat)
-                temp_script = os.path.join("optimization", f'_run_{basename_only}.sh')
+                # Create run script IN THE WORKING DIRECTORY
+                temp_script = os.path.join(opt_working_dir, f'_run_{basename_only}.sh')
                 with open(temp_script, 'w') as f:
                     f.write(launcher_content.split('###')[0])  # Environment setup
                     f.write("\n\n")
@@ -12432,20 +12448,21 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
                         orca_root_var = extract_orca_root_from_launcher(launcher_content)
                         if orca_root_var:
-                            f.write(f"${{{orca_root_var}}}/orca {input_file} > {output_file}\n")
+                            f.write(f"${{{orca_root_var}}}/orca {input_file_relative} > {output_file_relative}\n")
                         else:
                             # Fall back to PATH lookup if no ORCA root variable found
-                            f.write(f"orca {input_file} > {output_file}\n")
+                            f.write(f"orca {input_file_relative} > {output_file_relative}\n")
                     elif qm_program == 'gaussian':
                         # Use GAUSS_ROOT (generic, works with G09 or G16)
-                        f.write(f"$GAUSS_ROOT/g16 {input_file}\n")
+                        f.write(f"$GAUSS_ROOT/g16 {input_file_relative}\n")
                 
                 os.chmod(temp_script, 0o755)
                 
-                # Execute calculation
+                # Execute calculation from the working directory (subdirectory or root)
+                script_name = os.path.basename(temp_script)
                 result = subprocess.run(
-                    ['bash', os.path.basename(temp_script)],
-                    cwd="optimization",
+                    ['bash', script_name],
+                    cwd=opt_working_dir,
                     capture_output=True,
                     text=True
                 )
@@ -12454,7 +12471,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 if os.path.exists(temp_script):
                     os.remove(temp_script)
                 if qm_program == 'orca':
-                    for tmp_dir in glob.glob(os.path.join("optimization", f'.orca_tmp_{basename_only}_*')):
+                    # Clean up temp directories in the actual working directory
+                    for tmp_dir in glob.glob(os.path.join(opt_working_dir, f'.orca_tmp_{basename_only}_*')):
                         try:
                             shutil.rmtree(tmp_dir)
                         except:
