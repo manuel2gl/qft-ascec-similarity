@@ -647,17 +647,25 @@ def _process_xyz_file_for_opt(xyz_file_data):
         # Extract motif name from comment if available, otherwise use base filename
         import re
         comment = config['comment']
-        motif_match = re.search(r'[Mm]otif_(\d+)', comment)
+        
+        # Check for umotif first (must come before motif check since umotif contains 'motif')
+        umotif_match = re.search(r'(umotif_\d+)', comment, re.IGNORECASE)
+        motif_match = re.search(r'(?<!u)(motif_\d+)', comment, re.IGNORECASE)
         
         # If not found in comment, try to extract from filename
-        if not motif_match:
-            motif_match = re.search(r'[Mm]otif_(\d+)', base_name)
+        if not umotif_match and not motif_match:
+            umotif_match = re.search(r'(umotif_\d+)', base_name, re.IGNORECASE)
+            motif_match = re.search(r'(?<!u)(motif_\d+)', base_name, re.IGNORECASE)
         
-        if motif_match:
-            # Use umotif name (optimization stage promotes motif → umotif)
-            motif_num = int(motif_match.group(1))
-            input_name = f"umotif_{motif_num:0>2}_opt{input_ext}"
-            source_name = f"motif_{motif_num:0>2}"
+        if umotif_match:
+            # Keep umotif prefix, just add _opt suffix
+            source_name = umotif_match.group(1).lower()
+            input_name = f"{source_name}_opt{input_ext}"
+        elif motif_match:
+            # Keep motif prefix, just add _opt suffix
+            # Similarity will later promote motif_##_opt → umotif_##
+            source_name = motif_match.group(1).lower()
+            input_name = f"{source_name}_opt{input_ext}"
         else:
             # For non-motif files, use simple opt_conf_X naming
             input_name = f"opt_conf_{config['config_num']}{input_ext}"
@@ -11691,12 +11699,15 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     if not (hasattr(context, 'recalculated_files') and context.recalculated_files):
         print(f"Using motifs from: {motif_dir}")
     
-    # Get motif XYZ files from the motifs directory
+    # Get motif/umotif XYZ files from the motifs directory
+    # Look for both motif_*.xyz and umotif_*.xyz patterns
     motif_files = glob.glob(os.path.join(motif_dir, "motif_*.xyz"))
+    umotif_files = glob.glob(os.path.join(motif_dir, "umotif_*.xyz"))
+    motif_files.extend(umotif_files)  # Combine both patterns
     combined_file = glob.glob(os.path.join(motif_dir, "*combined*.xyz"))
     
     if not motif_files and not combined_file:
-        print("Warning: No motif files found in motifs directory")
+        print("Warning: No motif/umotif files found in motifs directory")
         return 0
     
     # Create optimization directory (or reuse if resuming)
