@@ -2491,6 +2491,57 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 f.write("        No hydrogen bonds detected based on the criterion.\n")
         f.write("\n")
 
+        # RMSD comparison section (for clusters with multiple configurations)
+        if num_configurations > 1:
+            f.write("RMSD Analysis (Heavy Atoms):\n")
+            f.write("Pairwise RMSD values between configurations (Å):\n")
+            
+            # Check if all configurations have geometry data
+            all_have_geometry = all(
+                mol['final_geometry_coords'] is not None and 
+                mol['final_geometry_atomnos'] is not None 
+                for mol in cluster_members_data
+            )
+            
+            if all_have_geometry:
+                # Calculate pairwise RMSD matrix
+                rmsd_matrix = []
+                for i in range(num_configurations):
+                    row = []
+                    for j in range(num_configurations):
+                        if i == j:
+                            row.append(0.0)
+                        elif i < j:
+                            # Calculate RMSD
+                            mol_i = cluster_members_data[i]
+                            mol_j = cluster_members_data[j]
+                            rmsd_val = calculate_rmsd(
+                                mol_i['final_geometry_atomnos'], 
+                                mol_i['final_geometry_coords'],
+                                mol_j['final_geometry_atomnos'], 
+                                mol_j['final_geometry_coords']
+                            )
+                            row.append(rmsd_val if rmsd_val is not None else float('nan'))
+                        else:
+                            # Mirror the upper triangle
+                            row.append(rmsd_matrix[j][i])
+                    rmsd_matrix.append(row)
+                
+                # Display RMSD values in a readable format
+                # For each configuration, show RMSD to all others
+                for i, mol_data in enumerate(cluster_members_data):
+                    f.write(f"    {mol_data['filename']}:\n")
+                    for j, mol_other in enumerate(cluster_members_data):
+                        if i != j:
+                            rmsd_val = rmsd_matrix[i][j]
+                            if np.isnan(rmsd_val):
+                                f.write(f"        vs {mol_other['filename']}: N/A (calculation failed)\n")
+                            else:
+                                f.write(f"        vs {mol_other['filename']}: {rmsd_val:.3f} Å\n")
+            else:
+                f.write("    RMSD calculation unavailable: Missing geometry data for one or more configurations.\n")
+            f.write("\n")
+
         # Separator before the individual structure details
         f.write("=" * 90 + "\n\n")
 
