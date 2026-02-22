@@ -2170,6 +2170,22 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             pass
         return None
     
+    def _extract_energy_evals_from_annealing(annealing_dir: str) -> Optional[int]:
+        """Extract total energy evaluations from annealing.out file."""
+        annealing_out = os.path.join(annealing_dir, 'annealing.out')
+        if not os.path.exists(annealing_out):
+            return None
+        try:
+            with open(annealing_out, 'r') as f:
+                content = f.read()
+                # Look for "Energy calculations: XXXX"
+                match = re.search(r'Energy calculations:\s+(\d+)', content)
+                if match:
+                    return int(match.group(1))
+        except:
+            pass
+        return None
+    
     try:
         with open(output_file, 'w') as f:
             # Header
@@ -2307,35 +2323,51 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                     # Stage-specific details
                     if stage_type == 'Replication':  # Annealing
                         if 'box_size' in result:
-                            f.write(f"    Box size:     {float(result['box_size']):.1f} Å")
+                            f.write(f"    Box size:         {float(result['box_size']):.1f} Å")
                             if 'packing' in result:
                                 f.write(f" ({result['packing']}% packing)")
                             f.write("\n")
                         if 'num_replicas' in result:
-                            f.write(f"    Replicas:     {result['num_replicas']}\n")
+                            num_replicas = result['num_replicas']
+                            replica_desc = "Duplicated" if num_replicas == 2 else "Triplicated" if num_replicas == 3 else f"{num_replicas}x"
+                            f.write(f"    Replicas:         {num_replicas} ({replica_desc})\n")
+                        if 'energy_evals' in result:
+                            f.write(f"    Energy evals:     {result['energy_evals']} times\n")
                         if 'total_accepted' in result:
-                            f.write(f"    Accepted:     {result['total_accepted']} configurations\n")
+                            f.write(f"    Accepted:         {result['total_accepted']} configurations\n")
                     
                     elif stage_type == 'Calculation':
                         if 'xyz_source' in result:
                             xyz_source = result['xyz_source'] if result['xyz_source'] else "Annealing"
-                            f.write(f"    Input from:   {xyz_source}\n")
+                            f.write(f"    Inputs from:      {xyz_source}\n")
                         if 'completed' in result and 'total' in result:
-                            f.write(f"    Completed:    {result['completed']}/{result['total']} calculations\n")
-                        if 'attempts' in result:
-                            f.write(f"    Attempts:     {result['attempts']}\n")
+                            f.write(f"    Completed:        {result['completed']}/{result['total']} calculations\n")
+                        # Calculate and show mean execution time
+                        if wall_time and 'completed' in result and result['completed'] > 0:
+                            mean_time = wall_time / result['completed']
+                            f.write(f"    Mean exec time:   {format_wall_time_timing(mean_time)}\n")
                         if 'similarity_folder' in result and result['similarity_folder']:
-                            f.write(f"    Output to:    {result['similarity_folder']}\n")
+                            f.write(f"    Outputs to:       {result['similarity_folder']}\n")
                     
                     elif stage_type == 'Similarity':
                         if 'similarity_folder' in result and result['similarity_folder']:
-                            f.write(f"    Working dir:  {result['similarity_folder']}\n")
+                            f.write(f"    Working dir:      {result['similarity_folder']}\n")
+                        if 'threshold' in result:
+                            f.write(f"    Threshold:        {result['threshold']}\n")
                         if 'motifs_created' in result:
-                            motif_label = "Unique motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
-                            f.write(f"    {motif_label}:  {result['motifs_created']} representatives\n")
-                        if 'critical_pct' in result and 'skipped_pct' in result:
-                            f.write(f"    Critical:     {result['critical_pct']}%\n")
-                            f.write(f"    Skipped:      {result['skipped_pct']}%\n")
+                            motif_label = "Unique Motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
+                            f.write(f"    {motif_label}:    {result['motifs_created']} representatives\n")
+                        
+                        # Show critical and skipped with counts
+                        f.write("\n")
+                        if 'critical_pct' in result:
+                            crit_pct = result['critical_pct']
+                            crit_count = result.get('critical_count', '?')
+                            f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
+                        if 'skipped_pct' in result:
+                            skip_pct = result['skipped_pct']
+                            skip_count = result.get('skipped_count', '?')
+                            f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
                         
                         # Threshold validation
                         threshold_met = result.get('threshold_met', True)
@@ -2343,23 +2375,26 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             threshold_type = result['threshold_type']
                             threshold_value = result['threshold_value']
                             if threshold_met:
-                                f.write(f"    Validation:   ✓ Step [{step_num-1}] passed ({threshold_type} ≤ {threshold_value}%)\n")
+                                f.write(f"\n    Validation: ✓ Step [{step_num-1}] passed\n")
+                                f.write(f"    {threshold_type.capitalize()} ≤ {threshold_value}%\n")
                             else:
                                 actual = result.get('critical_pct' if threshold_type == 'critical' else 'skipped_pct', 'N/A')
                                 attempts = result.get('attempts', 'N/A')
-                                f.write(f"    Validation:   ⚠ Step [{step_num-1}] threshold exceeded\n")
-                                f.write(f"                  Target: {threshold_type} ≤ {threshold_value}%  Actual: {actual}%\n")
-                                f.write(f"                  Max attempts ({attempts}) reached\n")
+                                f.write(f"\n    Validation: Step [{step_num-1}] threshold exceeded!\n")
+                                f.write(f"    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual}%\n")
+                                f.write(f"    Max attempts ({attempts}) reached\n")
                     
                     elif stage_type == 'Optimization':
                         if 'motifs_source' in result and result['motifs_source']:
-                            f.write(f"    Input from:   {result['motifs_source']}\n")
+                            f.write(f"    Inputs from:      {result['motifs_source']}\n")
                         if 'completed' in result and 'total' in result:
-                            f.write(f"    Completed:    {result['completed']}/{result['total']} optimizations\n")
-                        if 'attempts' in result:
-                            f.write(f"    Attempts:     {result['attempts']}\n")
+                            f.write(f"    Completed:        {result['completed']}/{result['total']} optimizations\n")
                         if 'similarity_folder' in result and result['similarity_folder']:
-                            f.write(f"    Output to:    {result['similarity_folder']}\n")
+                            f.write(f"    Outputs to:       {result['similarity_folder']}\n")
+                        # Calculate and show mean execution time
+                        if wall_time and 'completed' in result and result['completed'] > 0:
+                            mean_time = wall_time / result['completed']
+                            f.write(f"    Mean exec time:   {format_wall_time_timing(mean_time)}\n")
                     
                     # Wall time for non-similarity stages
                     if wall_time and stage_type != 'Similarity':
@@ -8939,6 +8974,24 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if total_accepted > 0:
                         result_data['total_accepted'] = total_accepted
                     
+                    # Extract energy evaluations from annealing.out files
+                    total_energy_evals = 0
+                    if context.annealing_dirs:
+                        for adir in context.annealing_dirs:
+                            annealing_out = os.path.join(adir, 'annealing.out')
+                            if os.path.exists(annealing_out):
+                                try:
+                                    with open(annealing_out, 'r') as f:
+                                        content = f.read()
+                                        match = re.search(r'Energy calculations:\s+(\d+)', content)
+                                        if match:
+                                            total_energy_evals += int(match.group(1))
+                                except:
+                                    pass
+                    
+                    if total_energy_evals > 0:
+                        result_data['energy_evals'] = total_energy_evals
+                    
                     update_protocol_cache(stage_key, 'completed', 
                                         result=result_data, 
                                         cache_file=cache_file)
@@ -9168,6 +9221,22 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if final_skipped is not None:
                             sim_result['skipped_pct'] = final_skipped
                         
+                        # Extract critical and skipped counts from similarity output
+                        critical_count, skipped_count = parse_similarity_output(sim_dir)
+                        if critical_count > 0:
+                            sim_result['critical_count'] = critical_count
+                        if skipped_count > 0:
+                            sim_result['skipped_count'] = skipped_count
+                        
+                        # Extract threshold value from similarity command args
+                        sim_stage = stages[stage_idx + 1] if stage_idx + 1 < len(stages) else {}
+                        sim_args = sim_stage.get('args', [])
+                        for arg in sim_args:
+                            if arg.startswith('--th=') or arg.startswith('--threshold='):
+                                threshold_val = float(arg.split('=')[1])
+                                sim_result['threshold'] = threshold_val
+                                break
+                        
                         # Add similarity folder and motifs info if available
                         if hasattr(context, 'sim_folder'):
                             sim_result['similarity_folder'] = context.sim_folder
@@ -9331,6 +9400,29 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         sim_result['similarity_folder'] = context.sim_folder
                     if hasattr(context, 'sim_motifs_created') and context.sim_motifs_created is not None:
                         sim_result['motifs_created'] = context.sim_motifs_created
+                    
+                    # Extract critical and skipped percentages and counts
+                    summary_file = os.path.join(sim_dir, "clustering_summary.txt")
+                    if os.path.exists(summary_file):
+                        critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+                        if critical_pct is not None:
+                            sim_result['critical_pct'] = critical_pct
+                        if skipped_pct is not None:
+                            sim_result['skipped_pct'] = skipped_pct
+                        
+                        critical_count, skipped_count = parse_similarity_output(sim_dir)
+                        if critical_count > 0:
+                            sim_result['critical_count'] = critical_count
+                        if skipped_count > 0:
+                            sim_result['skipped_count'] = skipped_count
+                    
+                    # Extract threshold value from command args
+                    sim_args = stage.get('args', [])
+                    for arg in sim_args:
+                        if arg.startswith('--th=') or arg.startswith('--threshold='):
+                            threshold_val = float(arg.split('=')[1])
+                            sim_result['threshold'] = threshold_val
+                            break
                     
                     update_protocol_cache(sim_key, 'completed', 
                                         result=sim_result, cache_file=cache_file)
@@ -9573,6 +9665,22 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             sim_result['critical_pct'] = final_critical
                         if final_skipped is not None:
                             sim_result['skipped_pct'] = final_skipped
+                        
+                        # Extract critical and skipped counts from similarity output
+                        critical_count, skipped_count = parse_similarity_output(sim_dir)
+                        if critical_count > 0:
+                            sim_result['critical_count'] = critical_count
+                        if skipped_count > 0:
+                            sim_result['skipped_count'] = skipped_count
+                        
+                        # Extract threshold value from similarity command args
+                        sim_stage = stages[stage_idx + 1] if stage_idx + 1 < len(stages) else {}
+                        sim_args = sim_stage.get('args', [])
+                        for arg in sim_args:
+                            if arg.startswith('--th=') or arg.startswith('--threshold='):
+                                threshold_val = float(arg.split('=')[1])
+                                sim_result['threshold'] = threshold_val
+                                break
                         
                         # Add threshold info and attempts
                         sim_result['attempts'] = final_attempt
