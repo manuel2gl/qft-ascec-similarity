@@ -2248,6 +2248,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                 sorted_stages = sorted(cache['stages'].items(), 
                                      key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
                 
+                total_qm_percentage = 0.0
                 for stage_key, stage_info in sorted_stages:
                     if stage_info.get('status') == 'completed':
                         stage_type = stage_key.split('_')[0].capitalize()
@@ -2265,10 +2266,17 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         
                         if wall_time:
                             percentage = (wall_time / total_wall_time) * 100
+                            total_qm_percentage += percentage
                             type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
                                       'Optimization': 'Optimization'}
                             stage_name = type_map.get(stage_type, stage_type)
                             f.write(f"  {stage_name:<15} {format_wall_time_timing(wall_time):>15} {percentage:>9.1f}%\n")
+                
+                # Add redo logic percentage if there's a remainder
+                if total_qm_percentage > 0 and total_qm_percentage < 100:
+                    redo_percentage = 100.0 - total_qm_percentage
+                    redo_time = (redo_percentage / 100.0) * total_wall_time
+                    f.write(f"  {'Redo logic':<15} {format_wall_time_timing(redo_time):>15} {redo_percentage:>9.1f}%\n")
                 
                 f.write("\n")
             
@@ -2362,11 +2370,11 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         f.write("\n")
                         if 'critical_pct' in result:
                             crit_pct = result['critical_pct']
-                            crit_count = result.get('critical_count', '?')
+                            crit_count = result.get('critical_count', 0)
                             f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
                         if 'skipped_pct' in result:
                             skip_pct = result['skipped_pct']
-                            skip_count = result.get('skipped_count', '?')
+                            skip_count = result.get('skipped_count', 0)
                             f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
                         
                         # Threshold validation
@@ -2398,7 +2406,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                     
                     # Wall time for non-similarity stages
                     if wall_time and stage_type != 'Similarity':
-                        f.write(f"    Wall time:    {format_wall_time_timing(wall_time)}\n")
+                        f.write(f"    Wall time:        {format_wall_time_timing(wall_time)}\n")
                     
                     f.write("\n")
                     step_num += 1
