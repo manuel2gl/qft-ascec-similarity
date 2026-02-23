@@ -63,15 +63,15 @@ ASCEC requires **Python 3.9+** (3.11 recommended) and utilizes an external elect
 ### Option 1: Automatic "One-Click" Installation (Recommended)
 We provide a unified shell script that automates the entire setup. It will install Miniconda (if missing), set up a dedicated Python 3.11 environment (`py11`), install all dependencies (`cclib`, `orca-pi`, `openbabel`), and configure your terminal aliases.
 
-# 1. Download the installation script
+#### 1. Download the installation script
 ```bash
 wget https://raw.githubusercontent.com/manuel2gl/qft-ascec-similarity/main/install.sh
 ```
-# 2. Run the script
+#### 2. Run the script
 ```
 bash install.sh
 ```
-# 3. Reload your terminal configuration
+#### 3. Reload your terminal configuration
 ```bash
 source ~/.bashrc
 ```
