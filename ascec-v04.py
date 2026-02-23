@@ -72,7 +72,7 @@ max_overlap_placement_attempts = 100000 # Max attempts to place a single molecul
 
 # Set this to True to create a SEPARATE COPY of the XYZ file
 # (e.g., mtobox_seed.xyz) which will include 8 dummy 'X' atoms for
-# visualizing the box in programs like GaussView.
+# visualizing the box in programs like Avogadro2 or GaussView.
 # If False, only the original XYZ file (mto_seed.xyz) will be generated.
 # This can be overridden by the --nobox command line flag.
 create_box_xyz_copy = True 
@@ -80,7 +80,7 @@ create_box_xyz_copy = True
 version = "* ASCEC-v04: Feb-2026 *"  # Version of the ASCEC script
 
 def print_version_banner(script_name="ASCEC"):
-    """Print the ASCII art banner with UDEA logo and version information."""
+    """Print the ASCII art banner with UdeA logo and version information."""
     banner = """
 ===========================================================================
 
@@ -122,8 +122,7 @@ dummy_atom_symbol = "X"
 
 # Atomic radii - Used in some initial configurations for overlap prevention
 # These are typical Covalent Radii (single bond, in Angstroms).
-# If your Fortran Ratom array uses different values or a specific parameterized set,
-# please ensure consistency with that source.
+# please ensure consistency.
 r_atom = {
     # Covalent radii for elements in Angstroms (for volume calculations and steric interactions)
     # Based on Cordero et al. (2008) "Covalent radii revisited" Dalton Trans. 2832-2838
@@ -269,31 +268,33 @@ atomic_number_to_symbol = {
 }
 
 # Atomic Weights for elements (Global Constant) - used for center of mass calculations
+# T. Prohaska et al.: Pure Appl. Chem. 94, 573 (2022)
+# Based on IUPAC Standard Atomic Weights (2021/2022) rounded to 4 significant figures
 atomic_weights = {
-    1: 1.008,   2: 4.0026,   3: 6.94,    4: 9.012,   5: 10.81,
-    6: 12.011,  7: 14.007,   8: 15.999,  9: 18.998, 10: 20.180,
-    11: 22.990, 12: 24.305,  13: 26.982, 14: 28.085, 15: 30.974,
-    16: 32.06,  17: 35.45,   18: 39.948, 19: 39.098, 20: 40.078,
-    21: 44.956, 22: 47.867,  23: 50.942, 24: 51.996, 25: 54.938,
-    26: 55.845, 27: 58.933,  28: 58.693, 29: 63.546, 30: 65.38,
-    31: 69.723, 32: 72.630,  33: 74.922, 34: 78.971, 35: 79.904,
-    36: 83.798, 37: 85.468,  38: 87.62,  39: 88.906, 40: 91.224,
-    41: 92.906, 42: 95.96,   43: 98.0,   44: 101.07, 45: 102.906,
-    46: 106.42, 47: 107.868, 48: 112.414, 49: 114.818, 50: 118.710,
-    51: 121.760, 52: 127.60, 53: 126.904, 54: 131.293, 55: 132.905,
-    56: 'Ba', 57: 'La', 58: 'Ce', 59: 'Pr', 60: 'Nd',
-    61: 'Pm', 62: 'Sm', 63: 'Eu', 64: 'Gd', 65: 'Tb',
-    66: 'Dy', 67: 'Ho', 68: 'Er', 69: 'Tm', 70: 'Yb',
-    71: 'Lu', 72: 'Hf', 73: 'Ta', 74: 'W',  75: 'Re',
-    76: 'Os', 77: 'Ir', 78: 'Pt', 79: 'Au', 80: 'Hg',
-    81: 'Tl', 82: 'Pb', 83: 'Bi', 84: 'Po', 85: 'At',
-    86: 'Rn', 87: 'Fr', 88: 'Ra', 89: 'Ac', 90: 'Th',
-    91: 'Pa', 92: 'U',  93: 'Np', 94: 'Pu', 95: 'Am',
-    96: 'Cm', 97: 'Bk', 98: 'Cf', 99: 'Es', 100: 'Fm',
-    101: 'Md', 102: 'No', 103: 'Lr', 104: 'Rf', 105: 'Db',
-    106: 'Sg', 107: 'Bh', 108: 'Hs', 109: 'Mt', 110: 'Ds',
-    111: 'Rg', 112: 'Cn', 113: 'Nh', 114: 'Fl', 115: 'Mc',
-    116: 'Lv', 117: 'Ts', 118: 'Og'
+    1: 1.008,    2: 4.003,    3: 6.940,    4: 9.012,    5: 10.81,
+    6: 12.01,    7: 14.01,    8: 16.00,    9: 19.00,   10: 20.18,
+    11: 22.99,   12: 24.31,   13: 26.98,   14: 28.09,   15: 30.97,
+    16: 32.06,   17: 35.45,   18: 39.95,   19: 39.10,   20: 40.08,
+    21: 44.96,   22: 47.87,   23: 50.94,   24: 52.00,   25: 54.94,
+    26: 55.85,   27: 58.93,   28: 58.69,   29: 63.55,   30: 65.38,
+    31: 69.72,   32: 72.63,   33: 74.92,   34: 78.97,   35: 79.90,
+    36: 83.80,   37: 85.47,   38: 87.62,   39: 88.91,   40: 91.22,
+    41: 92.91,   42: 95.95,   43: 97.00,   44: 101.1,   45: 102.9,
+    46: 106.4,   47: 107.9,   48: 112.4,   49: 114.8,   50: 118.7,
+    51: 121.8,   52: 127.6,   53: 126.9,   54: 131.3,   55: 132.9,
+    56: 137.3,   57: 138.9,   58: 140.1,   59: 140.9,   60: 144.2,
+    61: 145.0,   62: 150.4,   63: 152.0,   64: 157.2,   65: 158.9,
+    66: 162.5,   67: 164.9,   68: 167.3,   69: 168.9,   70: 173.0,
+    71: 175.0,   72: 178.5,   73: 180.9,   74: 183.8,   75: 186.2,
+    76: 190.2,   77: 192.2,   78: 195.1,   79: 197.0,   80: 200.6,
+    81: 204.4,   82: 207.2,   83: 209.0,   84: 209.0,   85: 210.0,
+    86: 222.0,   87: 223.0,   88: 226.0,   89: 227.0,   90: 232.0,
+    91: 231.0,   92: 238.0,   93: 237.0,   94: 244.0,   95: 243.0,
+    96: 247.0,   97: 247.0,   98: 251.0,   99: 252.0,  100: 257.0,
+    101: 258.0,  102: 259.0,  103: 262.0,  104: 267.0,  105: 270.0,
+    106: 269.0,  107: 270.0,  108: 270.0,  109: 278.0,  110: 281.0,
+    111: 281.0,  112: 285.0,  113: 286.0,  114: 289.0,  115: 289.0,
+    116: 293.0,  117: 293.0,  118: 294.0
 }
 
 # Electronegativity for elements (used for sorting molecular formula strings)
