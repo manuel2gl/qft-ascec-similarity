@@ -1,7 +1,7 @@
 <div align="center">
 
 # ASCEC & Similarity
-**Automated Configurational Sampling and Topological Clustering of Molecular Clusters**
+**Automated Configurational Sampling and Topological Screening of Molecular Clusters**
 
 [![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.11-blue?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL_v3-coral.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -63,18 +63,20 @@ ASCEC requires **Python 3.9+** (3.11 recommended) and utilizes an external elect
 ### Option 1: Automatic "One-Click" Installation (Recommended)
 We provide a unified shell script that automates the entire setup. It will install Miniconda (if missing), set up a dedicated Python 3.11 environment (`py11`), install all dependencies (`cclib`, `orca-pi`, `openbabel`), and configure your terminal aliases.
 
-```bash
 # 1. Download the installation script
+```bash
 wget https://raw.githubusercontent.com/manuel2gl/qft-ascec-similarity/main/install.sh
-
+```
 # 2. Run the script
+```
 bash install.sh
-
+```
 # 3. Reload your terminal configuration
+```bash
 source ~/.bashrc
 ```
 
-### 🐍 Option 2: Step-by-Step Conda Installation
+### Option 2: Step-by-Step Conda Installation
 If you prefer to manage your environments manually, you can set up ASCEC using Conda:
 
 **1. Clone the repository:**
@@ -109,7 +111,7 @@ Run `source ~/.bashrc` to apply the changes.
 ## Quick Start & Usage
 
 ### 1. Generate Input via Web Interface
-Skip the manual formatting! Use the ASCEC Web Generator with built-in PubChem integration to instantly get 3D coordinates and visualize your simulation box.
+Use the ASCEC Web Generator with built-in PubChem integration to instantly get 3D coordinates and visualize your simulation box.
 
 **[ASCEC Web Input Generator](https://manuel2gl.github.io/qft-ascec-similarity/)**
 
@@ -146,7 +148,7 @@ ascec system.in protocol
 
 ASCEC automatically organizes your data and generates publication-ready analytics:
 *   📉 **`tvse_*.dat / .png`**: Energy evolution profiles across Monte Carlo steps.
-*   🧬 **`result_*.xyz`**: Complete trajectory files ready for visualization in Avogadro, GaussView, or IQmol.
+*   💧 **`result_*.xyz`**: Complete trajectory files ready for visualization in Avogadro, GaussView, or IQmol.
 *   🌳 **Dendrograms**: Beautiful hierarchical tree plots (`.png`) visually detailing the clustering distances of distinct structural families.
 *   🧮 **Boltzmann Distribution**: A concise `.txt` summary ranking unique conformers by their Gibbs Free Energy populations.
 
@@ -154,7 +156,6 @@ ASCEC automatically organizes your data and generates publication-ready analytic
 
 ## 📄 License & Citation
 
-ASCEC & Similarity is free software distributed under the **GNU General Public License (GPL) version 3**. See the `LICENSE` file for more details.
+ASCEC & Similarity is free software distributed under the **GNU General Public License (GPL) version 3**. See the `license` file for more details.
 
 If you use ASCEC or Similarity in your research, please acknowledge the software and the developers. The theoretical implementation of the Modified Metropolis test and topological clustering is based on extensive prior structural studies. Please refer to the User Manual's bibliography for specific literature pertaining to the utilized algorithms.
-```
