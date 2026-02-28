@@ -7858,14 +7858,14 @@ def parse_similarity_output(similarity_dir: str) -> Tuple[int, int]:
         with open(summary_file, 'r') as f:
             content = f.read()
             
-            # Look for lines like "Critical files (imaginary frequencies): 5"
+            # Look for lines like "Critical skipped files: 0 (0.0%)"
             import re
-            critical_match = re.search(r'Critical files.*?:\s*(\d+)', content, re.IGNORECASE)
+            critical_match = re.search(r'Critical skipped files:\s*(\d+)', content, re.IGNORECASE)
             if critical_match:
                 critical_count = int(critical_match.group(1))
             
-            # Look for total skipped count
-            skipped_match = re.search(r'Total skipped files:\s*(\d+)', content, re.IGNORECASE)
+            # Look for total skipped count like "Total files skipped: 97 (19.9%)"
+            skipped_match = re.search(r'Total files skipped:\s*(\d+)', content, re.IGNORECASE)
             if skipped_match:
                 skipped_count = int(skipped_match.group(1))
                 
@@ -9226,10 +9226,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Extract critical and skipped counts from similarity output
                         critical_count, skipped_count = parse_similarity_output(sim_dir)
-                        if critical_count > 0:
-                            sim_result['critical_count'] = critical_count
-                        if skipped_count > 0:
-                            sim_result['skipped_count'] = skipped_count
+                        sim_result['critical_count'] = critical_count
+                        sim_result['skipped_count'] = skipped_count
                         
                         # Extract threshold value from similarity command args
                         sim_stage = stages[stage_idx + 1] if stage_idx + 1 < len(stages) else {}
@@ -9414,10 +9412,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             sim_result['skipped_pct'] = skipped_pct
                         
                         critical_count, skipped_count = parse_similarity_output(sim_dir)
-                        if critical_count > 0:
-                            sim_result['critical_count'] = critical_count
-                        if skipped_count > 0:
-                            sim_result['skipped_count'] = skipped_count
+                        sim_result['critical_count'] = critical_count
+                        sim_result['skipped_count'] = skipped_count
                     
                     # Extract threshold value from command args
                     sim_args = stage.get('args', [])
@@ -9671,10 +9667,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Extract critical and skipped counts from similarity output
                         critical_count, skipped_count = parse_similarity_output(sim_dir)
-                        if critical_count > 0:
-                            sim_result['critical_count'] = critical_count
-                        if skipped_count > 0:
-                            sim_result['skipped_count'] = skipped_count
+                        sim_result['critical_count'] = critical_count
+                        sim_result['skipped_count'] = skipped_count
                         
                         # Extract threshold value from similarity command args
                         sim_stage = stages[stage_idx + 1] if stage_idx + 1 < len(stages) else {}
