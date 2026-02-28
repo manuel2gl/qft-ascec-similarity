@@ -2273,12 +2273,6 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             stage_name = type_map.get(stage_type, stage_type)
                             f.write(f"  {stage_name:<15} {format_wall_time_timing(wall_time):>15} {percentage:>9.1f}%\n")
                 
-                # Add redo logic percentage if there's a remainder
-                if total_qm_percentage > 0 and total_qm_percentage < 100:
-                    redo_percentage = 100.0 - total_qm_percentage
-                    redo_time = (redo_percentage / 100.0) * total_wall_time
-                    f.write(f"  {'Redo logic':<15} {format_wall_time_timing(redo_time):>15} {redo_percentage:>9.1f}%\n")
-                
                 f.write("\n")
             
             # ══════════════════════════════════════════════════════════════════════
