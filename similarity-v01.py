@@ -36,7 +36,7 @@ import sys  # Added for custom argument parsing
 
 # Physical constants for Boltzmann distribution
 BOLTZMANN_CONSTANT_HARTREE_PER_K = 3.1668114e-6  # Hartree/K (k_B in atomic units)
-DEFAULT_TEMPERATURE_K = 298.15  # K (room temperature)
+DEFAULT_TEMPERATURE_K = 298.15  # K (Room temperature)
 
 # Energy conversion constants
 HARTREE_TO_KCAL_MOL = 627.509474  # kcal/mol per Hartree
