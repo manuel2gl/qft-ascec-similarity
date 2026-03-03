@@ -13265,6 +13265,7 @@ COMMANDS:
     update TEMPLATE [PATTERN]   Update existing inputs with new template
     launcher                    Consolidate launcher scripts
     input.in protocol [N]       Execute automated multi-stage workflow
+    input.in exclude [STAGE] [PATTERN]  Exclude structures from paused protocol
 
 WORKFLOW:
   Typical manual workflow:
@@ -13289,6 +13290,15 @@ WORKFLOW:
 
     Pipeline stages:
       1. Annealing → 2. Calculation → 3. Similarity → 4. Optimization → 5. Similarity(2)
+
+  Excluding problematic structures:
+    For resumable protocols, exclude structures that cause errors:
+      ascec input.in exclude              → view current exclusions
+      ascec input.in exclude calc 5,10-15 → exclude 1st calc stage
+      ascec input.in exclude opt 1,5,9    → exclude optimizations
+      ascec input.in exclude clear        → clear all exclusions
+      ascec input.in exclude calc clear   → clear calc exclusions only
+    Then resume: ascec input.in protocol
 
 OPTIONS:
   -v, --v          Verbose output (print every 10 Monte Carlo cycles)
