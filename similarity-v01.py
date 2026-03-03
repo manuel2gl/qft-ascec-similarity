@@ -4597,7 +4597,7 @@ MORE INFORMATION:
             "first_vib_freq": 1e-2,     # Keep as is
             "last_vib_freq": 0.3,      # Keep as is
             "average_hbond_distance": 1e-3, # Keep as is
-            "average_hbond_angle": 1e-2   # Keep as is
+            "average_hbond_angle": 0.1    # Increased from 1e-2 to avoid boundary cases
         }
 
     current_dir = os.getcwd()
