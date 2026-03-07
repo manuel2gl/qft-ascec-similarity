@@ -345,6 +345,94 @@
             display: block;
         }
         
+        .advanced-settings-toggle {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 15px;
+            padding: 8px 12px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        
+        .advanced-settings-toggle input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        
+        .advanced-settings-toggle label {
+            cursor: pointer;
+            margin: 0;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .advanced-flags {
+            display: none;
+            margin-top: 10px;
+            padding: 12px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        
+        .advanced-flags.visible {
+            display: block;
+        }
+        
+        .advanced-flags h4 {
+            margin: 0 0 10px 0;
+            font-size: 1em;
+            color: #555;
+        }
+        
+        .flag-group {
+            margin-bottom: 12px;
+        }
+        
+        .flag-group-title {
+            font-size: 0.95em;
+            color: #666;
+            margin-bottom: 6px;
+            font-weight: 500;
+        }
+        
+        .flag-row {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-bottom: 6px;
+        }
+        
+        .flag-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 1.2em;
+        }
+        
+        .flag-checkbox input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+        }
+        
+        .flag-checkbox input[type="number"] {
+            width: 50px;
+            padding: 2px 4px;
+            font-size: 14px;
+        }
+        
+        .flag-checkbox code {
+            background: #e9ecef;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-size: 0.85em;
+        }
+        
         footer {
             text-align: center;
             padding: 20px;
@@ -693,6 +781,76 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     <div class="protocol-builder" id="protocol-builder">
                         <div id="protocol-stages"></div>
                         <button class="btn btn-sm btn-primary" onclick="addProtocolStage()">➕ Add Stage</button>
+                        
+                        <div class="advanced-settings-toggle">
+                            <input type="checkbox" id="advanced-settings" onchange="toggleAdvancedSettings()">
+                            <label for="advanced-settings">⚙️ Advanced Settings</label>
+                        </div>
+                        
+                        <div class="advanced-flags" id="advanced-flags">
+                            <h4>Protocol Flags (applied to all relevant stages)</h4>
+                            
+                            <div class="flag-group">
+                                <div class="flag-group-title">For calc/opt stages:</div>
+                                <div class="flag-row">
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-retry" onchange="updateAllStagesWithFlags()">
+                                        <code>--retry=</code>
+                                        <input type="number" id="flag-retry-val" value="50" min="0" max="999" onchange="updateAllStagesWithFlags()">
+                                    </div>
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-redo" onchange="updateAllStagesWithFlags()">
+                                        <code>--redo=</code>
+                                        <input type="number" id="flag-redo-val" value="3" min="0" max="99" onchange="updateAllStagesWithFlags()">
+                                    </div>
+                                </div>
+                                <div class="flag-row">
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-critical" onchange="handleCriticalSkippedMutex('critical')">
+                                        <code>--critical=</code>
+                                        <input type="number" id="flag-critical-val" value="0" min="0" max="100" onchange="updateAllStagesWithFlags()">
+                                        <span style="color: #888; font-size: 0.8em;">%</span>
+                                    </div>
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-skipped" onchange="handleCriticalSkippedMutex('skipped')">
+                                        <code>--skipped=</code>
+                                        <input type="number" id="flag-skipped-val" value="0" min="0" max="100" onchange="updateAllStagesWithFlags()">
+                                        <span style="color: #888; font-size: 0.8em;">%</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="flag-group">
+                                <div class="flag-group-title">For similarity stages:</div>
+                                <div class="flag-row">
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-th" checked onchange="updateAllStagesWithFlags()">
+                                        <code>--th=</code>
+                                        <input type="number" id="flag-th-val" value="2" min="0" max="100" step="0.1" onchange="updateAllStagesWithFlags()">
+                                    </div>
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-rmsd" onchange="updateAllStagesWithFlags()">
+                                        <code>--rmsd=</code>
+                                        <input type="number" id="flag-rmsd-val" value="2" min="0" max="100" step="0.1" onchange="updateAllStagesWithFlags()">
+                                    </div>
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-j" onchange="updateAllStagesWithFlags()">
+                                        <code>-j</code>
+                                        <input type="number" id="flag-j-val" value="4" min="1" max="128" onchange="updateAllStagesWithFlags()">
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="flag-group">
+                                <div class="flag-group-title">Include launcher script:</div>
+                                <div class="flag-row">
+                                    <div class="flag-checkbox">
+                                        <input type="checkbox" id="flag-launcher" onchange="updateAllStagesWithFlags()">
+                                        <code>../launcher.sh</code>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     
                     <div class="form-group" style="margin-top: 15px;">
@@ -731,23 +889,26 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     <div class="collapsible-content open">
                         <h3>Protocol Stage Types:</h3>
                         <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
-                            <li><strong>rN:</strong> Run N replica annealings (e.g., r1, r3, r5)
+                            <li><strong>rN:</strong> Run N replica annealings (default N=3)
                                 <br><code>--box10</code></li>
                             <li><strong>calc:</strong> Preoptimization or Single-point calculations
-                                <br><code>--critical=0 --retry=3 ../input.inp ../launcher.sh</code></li>
+                                <br><code>/input.inp</code> (advanced: <code>--retry=50 --redo=3 --critical=0</code>)</li>
                             <li><strong>similarity:</strong> Cluster similar structures
-                                <br><code>--th=2 --cores=8</code></li>
+                                <br><code>--th=2</code> (optional: <code>--rmsd=2 -j4</code>)</li>
                             <li><strong>opt:</strong> Geometry optimization
-                                <br><code>--skipped=0 --retry=3 ../input.inp ../launcher.sh</code></li>
+                                <br><code>/input.inp</code> (advanced: <code>--retry=50 --redo=3 --skipped=0</code>)</li>
                         </ul>
                         
                         <h3 style="margin-top: 15px;">Common Flags:</h3>
                         <ul style="padding-left: 20px; line-height: 1.8; font-size: 0.9em;">
                             <li><code>--box10</code> - Use box with 10% effective packing</li>
-                            <li><code>--retry=N</code> - Retry failed calcs N times</li>
-                            <li><code>--critical=N</code> - Max N% critical structures allowed</li>
-                            <li><code>--th=N</code> - Similarity threshold</li>
-                            <li><code>--skipped=N</code> - Max N% skipped structures allowed</li>
+                            <li><code>--retry=N</code> - Retry failed calcs N times (default: 50)</li>
+                            <li><code>--redo=N</code> - Redo N structures (default: 3)</li>
+                            <li><code>--critical=N</code> - Max N% critical structures (mutually exclusive with --skipped)</li>
+                            <li><code>--skipped=N</code> - Max N% skipped structures (mutually exclusive with --critical)</li>
+                            <li><code>--th=N</code> - Energy similarity threshold (default: 2)</li>
+                            <li><code>--rmsd=N</code> - RMSD similarity threshold (optional)</li>
+                            <li><code>-jN</code> - Number of parallel parsing processes (optional)</li>
                         </ul>
                     </div>
                 </div>
@@ -767,6 +928,115 @@ H  -0.757000  0.586000  0.000000"></textarea>
         let currentMolData = null; // Store current converted molecule data
         let viewer = null; // 3Dmol viewer instance
         let boxViewer = null; // Box viewer instance
+        
+        // Helper function to get default args based on stage type
+        function getDefaultArgs(stageType) {
+            if (stageType === 'rN') {
+                return '--box10';
+            } else if (stageType === 'calc') {
+                return '/input.inp';
+            } else if (stageType === 'similarity') {
+                return '--th=2';
+            } else if (stageType === 'opt') {
+                return '/input.inp';
+            }
+            return '';
+        }
+        
+        // Build args string based on stage type and advanced flags
+        function buildArgsForStage(stageType) {
+            let args = '';
+            
+            if (stageType === 'rN') {
+                return '--box10';
+            } else if (stageType === 'similarity') {
+                // Build similarity args from flags
+                const flags = [];
+                if (document.getElementById('flag-th')?.checked) {
+                    const val = document.getElementById('flag-th-val')?.value || '2';
+                    flags.push(`--th=${val}`);
+                }
+                if (document.getElementById('flag-rmsd')?.checked) {
+                    const val = document.getElementById('flag-rmsd-val')?.value || '2';
+                    flags.push(`--rmsd=${val}`);
+                }
+                if (document.getElementById('flag-j')?.checked) {
+                    const val = document.getElementById('flag-j-val')?.value || '4';
+                    flags.push(`-j${val}`);
+                }
+                return flags.length > 0 ? flags.join(' ') : '--th=2';
+            }
+            
+            // For calc and opt stages
+            const flags = [];
+            
+            // Common flags for calc/opt
+            if (document.getElementById('flag-retry')?.checked) {
+                const val = document.getElementById('flag-retry-val')?.value || '50';
+                flags.push(`--retry=${val}`);
+            }
+            if (document.getElementById('flag-redo')?.checked) {
+                const val = document.getElementById('flag-redo-val')?.value || '3';
+                flags.push(`--redo=${val}`);
+            }
+            
+            // --critical flag (applies to calc/opt)
+            if (document.getElementById('flag-critical')?.checked) {
+                const val = document.getElementById('flag-critical-val')?.value || '0';
+                flags.push(`--critical=${val}`);
+            }
+            
+            // --skipped flag (applies to calc/opt)
+            if (document.getElementById('flag-skipped')?.checked) {
+                const val = document.getElementById('flag-skipped-val')?.value || '0';
+                flags.push(`--skipped=${val}`);
+            }
+            
+            // Build final args: flags + input file + optional launcher
+            args = flags.join(' ');
+            if (args) args += ' ';
+            args += '/input.inp';
+            
+            if (document.getElementById('flag-launcher')?.checked) {
+                args += ' /launcher.sh';
+            }
+            
+            return args;
+        }
+        
+        // Toggle advanced settings visibility
+        function toggleAdvancedSettings() {
+            const flagsDiv = document.getElementById('advanced-flags');
+            const checkbox = document.getElementById('advanced-settings');
+            if (flagsDiv && checkbox) {
+                flagsDiv.classList.toggle('visible', checkbox.checked);
+            }
+        }
+        
+        // Handle mutual exclusivity between --critical and --skipped
+        function handleCriticalSkippedMutex(selected) {
+            const criticalCheckbox = document.getElementById('flag-critical');
+            const skippedCheckbox = document.getElementById('flag-skipped');
+            
+            if (selected === 'critical' && criticalCheckbox?.checked) {
+                if (skippedCheckbox) skippedCheckbox.checked = false;
+            } else if (selected === 'skipped' && skippedCheckbox?.checked) {
+                if (criticalCheckbox) criticalCheckbox.checked = false;
+            }
+            
+            updateAllStagesWithFlags();
+        }
+        
+        // Update all stages with current flag settings
+        function updateAllStagesWithFlags() {
+            protocolStages.forEach((stage, idx) => {
+                if (stage.type === 'calc' || stage.type === 'opt' || stage.type === 'similarity') {
+                    stage.args = buildArgsForStage(stage.type);
+                }
+            });
+            rebuildProtocolStages();
+            updateProtocolPreview();
+        }
         
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
@@ -1364,28 +1634,31 @@ H   1.310269 -1.190546 -1.540368`;
             const stagesDiv = document.getElementById('protocol-stages');
             const idx = protocolStages.length;
             
-            // Default values based on position in typical workflow
+            // Default type based on position in typical workflow
             let defaultType = 'rN';
-            let defaultArgs = '--box10';
-            let defaultN = 1;
+            let defaultN = 3;
             
             if (idx === 0) {
                 defaultType = 'rN';
-                defaultArgs = '--box10';
-                defaultN = 1;
+                defaultN = 3;
             } else if (idx === 1) {
                 defaultType = 'calc';
-                defaultArgs = '--critical=0 --retry=3 ../input.inp ../launcher.sh';
             } else if (idx === 2) {
                 defaultType = 'similarity';
-                defaultArgs = '--th=2 --cores=8';
             } else if (idx === 3) {
                 defaultType = 'opt';
-                defaultArgs = '--skipped=0 --retry=3 ../input.inp ../launcher.sh';
             } else {
                 // For additional stages, cycle through
                 defaultType = 'similarity';
-                defaultArgs = '--th=2 --cores=8';
+            }
+            
+            // Get args based on advanced settings
+            const advancedEnabled = document.getElementById('advanced-settings')?.checked;
+            let defaultArgs;
+            if (advancedEnabled && (defaultType === 'calc' || defaultType === 'opt' || defaultType === 'similarity')) {
+                defaultArgs = buildArgsForStage(defaultType);
+            } else {
+                defaultArgs = getDefaultArgs(defaultType);
             }
             
             protocolStages.push({ type: defaultType, args: defaultArgs, n: defaultN });
@@ -1417,17 +1690,14 @@ H   1.310269 -1.190546 -1.540368`;
             if (nInput) {
                 nInput.style.display = value === 'rN' ? 'block' : 'none';
             }
-            // Update default args based on type
+            // Update args based on type and advanced settings
             const argsInput = document.querySelector(`#stage-${idx} input[type="text"]`);
             if (argsInput) {
-                if (value === 'rN') {
-                    argsInput.value = '--box10';
-                } else if (value === 'calc') {
-                    argsInput.value = '--critical=0 --retry=3 ../input.inp ../launcher.sh';
-                } else if (value === 'similarity') {
-                    argsInput.value = '--th=2 --cores=8';
-                } else if (value === 'opt') {
-                    argsInput.value = '--skipped=0 --retry=3 ../input.inp ../launcher.sh';
+                const advancedEnabled = document.getElementById('advanced-settings')?.checked;
+                if (advancedEnabled && (value === 'calc' || value === 'opt' || value === 'similarity')) {
+                    argsInput.value = buildArgsForStage(value);
+                } else {
+                    argsInput.value = getDefaultArgs(value);
                 }
                 protocolStages[idx].args = argsInput.value;
             }
