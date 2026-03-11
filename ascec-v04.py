@@ -77,7 +77,373 @@ max_overlap_placement_attempts = 100000 # Max attempts to place a single molecul
 # This can be overridden by the --nobox command line flag.
 create_box_xyz_copy = True 
 
-version = "* ASCEC-v04: Feb-2026 *"  # Version of the ASCEC script
+version = "* ASCEC-v04: Mar-2026 *"  # Version of the ASCEC script (added .asc extension + auto-protocol)
+
+# =============================================================================
+# Process Tracking and Output Management System
+# =============================================================================
+# This system manages:
+# - Process locks to prevent duplicate runs of the same file
+# - Run history for the 'status' command
+# - Progress bar rendering
+# - Verbosity levels and background detection
+
+ASCEC_DIR = os.path.expanduser("~/.ascec")
+ASCEC_LOCKS_FILE = os.path.join(ASCEC_DIR, "active_locks.json")
+ASCEC_HISTORY_FILE = os.path.join(ASCEC_DIR, "run_history.json")
+
+# Global flag for background/quiet mode (set when stdout is not a terminal)
+_IS_BACKGROUND_MODE = False
+_VERBOSE_LEVEL = 0  # 0=concise, 1=verbose, 2=extra, 3=max
+_PROGRESS_LINES = 0  # Track lines to erase for progress bar updates
+_WORKFLOW_START_TIME = None
+
+def _ensure_ascec_dir():
+    """Create ~/.ascec directory if it doesn't exist."""
+    os.makedirs(ASCEC_DIR, exist_ok=True)
+
+def _get_active_locks() -> Dict[str, Any]:
+    """Load active locks from file."""
+    _ensure_ascec_dir()
+    if os.path.exists(ASCEC_LOCKS_FILE):
+        try:
+            with open(ASCEC_LOCKS_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return {}
+    return {}
+
+def _save_active_locks(locks: Dict[str, Any]):
+    """Save active locks to file."""
+    _ensure_ascec_dir()
+    with open(ASCEC_LOCKS_FILE, 'w') as f:
+        json.dump(locks, f, indent=2)
+
+def _get_run_history() -> List[Dict[str, Any]]:
+    """Load run history from file."""
+    _ensure_ascec_dir()
+    if os.path.exists(ASCEC_HISTORY_FILE):
+        try:
+            with open(ASCEC_HISTORY_FILE, 'r') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+def _save_run_history(history: List[Dict[str, Any]]):
+    """Save run history to file."""
+    _ensure_ascec_dir()
+    # Keep only last 7 days of history
+    cutoff = time.time() - (7 * 24 * 60 * 60)
+    history = [h for h in history if h.get('start_time', 0) > cutoff]
+    with open(ASCEC_HISTORY_FILE, 'w') as f:
+        json.dump(history, f, indent=2)
+
+def _acquire_lock(input_file: str, cache_file: str = "") -> Tuple[bool, str]:
+    """
+    Try to acquire a lock for the given input file.
+    Returns (success, message).
+    """
+    full_path = os.path.abspath(input_file)
+    locks = _get_active_locks()
+    
+    # Clean up stale locks (process no longer running)
+    stale_keys = []
+    for key, lock_info in locks.items():
+        pid = lock_info.get('pid')
+        if pid:
+            try:
+                os.kill(pid, 0)  # Check if process exists
+            except OSError:
+                stale_keys.append(key)
+    
+    for key in stale_keys:
+        del locks[key]
+    
+    if stale_keys:
+        _save_active_locks(locks)
+    
+    # Check if this file is already locked
+    if full_path in locks:
+        lock_info = locks[full_path]
+        pid = lock_info.get('pid')
+        start_time = lock_info.get('start_time', 0)
+        cache = lock_info.get('cache_file', '')
+        
+        # Double-check process is still running
+        try:
+            os.kill(pid, 0)
+            dt = datetime.fromtimestamp(start_time)
+            return False, f"Already running (pid {pid}, started {dt.strftime('%Y-%m-%d %H:%M')})\nCache: {cache}"
+        except OSError:
+            # Process dead, we can take the lock
+            pass
+    
+    # Acquire lock
+    locks[full_path] = {
+        'pid': os.getpid(),
+        'start_time': time.time(),
+        'cache_file': cache_file
+    }
+    _save_active_locks(locks)
+    return True, ""
+
+def _release_lock(input_file: str):
+    """Release lock for the given input file."""
+    full_path = os.path.abspath(input_file)
+    locks = _get_active_locks()
+    
+    if full_path in locks:
+        # Only release if we own the lock
+        if locks[full_path].get('pid') == os.getpid():
+            del locks[full_path]
+            _save_active_locks(locks)
+
+def _add_to_history(input_file: str, cache_file: str, status: str, 
+                   start_time: float, end_time: Optional[float] = None):
+    """Add a run to history."""
+    history = _get_run_history()
+    
+    entry = {
+        'input_file': os.path.abspath(input_file),
+        'cache_file': cache_file,
+        'status': status,
+        'start_time': start_time,
+        'end_time': end_time
+    }
+    
+    # Update existing entry if same file, or add new
+    updated = False
+    for i, h in enumerate(history):
+        if h.get('input_file') == entry['input_file']:
+            history[i] = entry
+            updated = True
+            break
+    
+    if not updated:
+        history.append(entry)
+    
+    _save_run_history(history)
+
+def _format_duration(seconds: float) -> str:
+    """Format duration as '2w 3d 4h 5m 6s' style."""
+    weeks = int(seconds // (7 * 24 * 3600))
+    seconds %= (7 * 24 * 3600)
+    days = int(seconds // (24 * 3600))
+    seconds %= (24 * 3600)
+    hours = int(seconds // 3600)
+    seconds %= 3600
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    
+    parts = []
+    if weeks > 0:
+        parts.append(f"{weeks}w")
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if secs > 0 or not parts:
+        parts.append(f"{secs}s")
+    
+    return ' '.join(parts)
+
+def _shorten_path(path: str, max_len: int = 50) -> str:
+    """Shorten path for display, replacing $HOME with ~."""
+    home = os.path.expanduser("~")
+    if path.startswith(home):
+        path = "~" + path[len(home):]
+    
+    if len(path) <= max_len:
+        return path
+    
+    # Truncate middle
+    half = (max_len - 3) // 2
+    return path[:half] + "..." + path[-half:]
+
+def _render_progress_bar(current: int, total: int, width: int = 20) -> str:
+    """Render a unicode progress bar."""
+    if total <= 0:
+        return "░" * width
+    
+    ratio = min(current / total, 1.0)
+    filled = int(ratio * width)
+    empty = width - filled
+    
+    return "█" * filled + "░" * empty
+
+def _print_workflow_header(verbose_level: int = 0):
+    """Print the ASCEC header based on verbosity level."""
+    # Skip print in background mode
+    if _IS_BACKGROUND_MODE:
+        return
+    
+    # Only print full banner for verbose level >= 1
+    if verbose_level >= 1:
+        banner = """
+===========================================================================
+
+                        *********************
+                        *     A S C E C     *
+                        *********************
+
+                             √≈≠==≈                                  
+   √≈≠==≠≈√   √≈≠==≠≈√         ÷++=                      ≠===≠       
+     ÷++÷       ÷++÷           =++=                     ÷×××××=      
+     =++=       =++=     ≠===≠ ÷++=      ≠====≠         ÷-÷ ÷-÷      
+     =++=       =++=    =××÷=≠=÷++=    ≠÷÷÷==÷÷÷≈      ≠××≠ =××=     
+     =++=       =++=   ≠××=    ÷++=   ≠×+×    ×+÷      ÷+×   ×+××    
+     =++=       =++=   =+÷     =++=   =+-×÷==÷×-×≠    =×+×÷=÷×+-÷    
+     ≠×+÷       ÷+×≠   =+÷     =++=   =+---×××××÷×   ≠××÷==×==÷××≠   
+      =××÷     =××=    ≠××=    ÷++÷   ≠×-×           ÷+×       ×+÷   
+       ≠=========≠      ≠÷÷÷=≠≠=×+×÷-  ≠======≠≈√  -÷×+×≠     ≠×+×÷- 
+          ≠===≠           ≠==≠  ≠===≠     ≠===≠    ≈====≈     ≈====≈ 
+
+
+            Universidad de Antioquia - Medellín - Colombia
+
+
+               Annealing Simulado Con Energía Cuántica
+
+                       {version}
+
+                     Química Física Teórica - Qft
+
+===========================================================================
+""".format(version=version)
+        print(banner)
+    else:
+        # Concise mode: simple one-line header
+        print(f"\n=== ASCEC & Similarity ===\n")
+
+def _print_workflow_completion(status: str, start_time: float, 
+                               input_file: str, cache_file: str = ""):
+    """Print the final completion message."""
+    # Skip print in background mode
+    if _IS_BACKGROUND_MODE:
+        return
+        
+    end_time = time.time()
+    duration = _format_duration(end_time - start_time)
+    
+    start_dt = datetime.fromtimestamp(start_time)
+    end_dt = datetime.fromtimestamp(end_time)
+    
+    print("\n" + "-" * 60)
+    if status == "completed":
+        print("Ascec protocol run terminated normally")
+    else:
+        print("Ascec protocol got interrupted")
+    print("-" * 60)
+    
+    print(f"Started:   {start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if status == "completed":
+        print(f"Completed: {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"  Total time: {duration}")
+    
+    print(f"\n  {os.path.abspath(input_file)}")
+    
+    if status != "completed" and cache_file:
+        print(f"  Cache file: {os.path.basename(cache_file)}")
+        print(f"\n  Use 'ascec {os.path.basename(input_file)}' to resume")
+    print("")
+
+def execute_status_command():
+    """Execute the 'ascec status' command to show running and recent runs."""
+    _ensure_ascec_dir()
+    
+    # Get active locks
+    locks = _get_active_locks()
+    
+    # Clean up stale locks
+    active_runs = []
+    stale_keys = []
+    for path, lock_info in locks.items():
+        pid = lock_info.get('pid')
+        try:
+            os.kill(pid, 0)
+            active_runs.append({
+                'path': path,
+                'pid': pid,
+                'start_time': lock_info.get('start_time', 0),
+                'cache_file': lock_info.get('cache_file', '')
+            })
+        except OSError:
+            stale_keys.append(path)
+    
+    # Clean up stale locks
+    for key in stale_keys:
+        del locks[key]
+    if stale_keys:
+        _save_active_locks(locks)
+    
+    # Get history
+    history = _get_run_history()
+    
+    # Filter history to exclude currently running
+    active_paths = {r['path'] for r in active_runs}
+    recent_runs = [h for h in history if h.get('input_file') not in active_paths]
+    
+    # Sort by start time, most recent first
+    recent_runs.sort(key=lambda x: x.get('start_time', 0), reverse=True)
+    
+    print()
+    
+    if active_runs:
+        print("Active runs:")
+        print(f"  {'Status':<14} {'Started':<16} {'Path'}")
+        
+        for run in active_runs:
+            start_dt = datetime.fromtimestamp(run['start_time'])
+            elapsed = time.time() - run['start_time']
+            # Estimate progress from cache if available (rough estimate)
+            progress_str = "running"
+            
+            # Try to read cache for progress
+            cache_file = run.get('cache_file', '')
+            if cache_file and os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'rb') as f:
+                        cache = pickle.load(f)
+                    completed = len(cache.get('stages', {}))
+                    total = cache.get('total_stages', 0)
+                    if total > 0:
+                        pct = int((completed / total) * 100)
+                        progress_str = f"running {pct}%"
+                except:
+                    pass
+            
+            path_short = _shorten_path(run['path'], 40)
+            date_str = start_dt.strftime("%d/%m/%y %H:%M")
+            print(f"  {progress_str:<14} {date_str:<16} {path_short}")
+    else:
+        print("No active Ascec runs")
+    
+    if recent_runs:
+        print(f"\nRecent runs:")
+        print(f"  {'Status':<12} {'Date':<10} {'Path'}")
+        
+        for run in recent_runs[:10]:  # Show last 10
+            start_time = run.get('start_time', 0)
+            status = run.get('status', 'unknown')
+            start_dt = datetime.fromtimestamp(start_time)
+            
+            status_str = "completed" if status == "completed" else "interrupted"
+            date_str = start_dt.strftime("%d/%m/%y")
+            path_short = _shorten_path(run.get('input_file', ''), 50)
+            
+            print(f"  {status_str:<12} {date_str:<10} {path_short}")
+    else:
+        if active_runs:
+            pass  # Don't print "no recent runs" if there are active ones
+        else:
+            print("(no recent runs)")
+    
+    print()
+
 
 def print_version_banner(script_name="ASCEC"):
     """Print the ASCII art banner with UdeA logo and version information."""
@@ -508,10 +874,20 @@ class SystemState:
 def _print_verbose(message: str, level: int, state: Optional[SystemState], file=sys.stderr):
     """
     Prints a message to stderr if the state's verbosity level meets or exceeds the required level.
-    level 0: always print (critical errors, final summary, accepted configs, and key annealing steps)
-    level 1: --v (every 10 steps), plus level 0)
-    level 2: --va (all steps, plus level 0 and 1)
+    Also respects background mode (_IS_BACKGROUND_MODE flag).
+    
+    Verbosity levels:
+        level 0: Minimal output (concise progress, errors only) - no flag
+        level 1: Verbose (-v): Show workflow details, stage progress
+        level 2: Extra verbose (-v2): Every 10 MC steps, detailed info  
+        level 3: Maximum verbose (-v3): Every cycle, all debug info
     """
+    global _IS_BACKGROUND_MODE
+    
+    # In background mode, suppress all output except completion message
+    if _IS_BACKGROUND_MODE:
+        return
+    
     if state is None or state.verbosity_level >= level:
         print(message, file=file)
         file.flush()
@@ -551,11 +927,11 @@ def get_optimal_workers(task_type: str, num_items: int) -> int:
 
 def _process_xyz_file_for_calc(xyz_file_data):
     """
-    Process a single XYZ file for calculation system creation.
+    Process a single XYZ file for optimization system creation.
     This is a module-level function to support multiprocessing.
     Used by both simple and standard calculation workflows.
     """
-    xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
+    xyz_file, template_content, opt_dir, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
     
     # Extract configurations
     configurations = extract_configurations_from_xyz(xyz_file)
@@ -617,7 +993,7 @@ def _process_xyz_file_for_calc(xyz_file_data):
             input_name = f"opt_conf_{config['config_num']}{input_ext}"
         else:
             input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
-        input_path = os.path.join(calc_dir, input_name)
+        input_path = os.path.join(opt_dir, input_name)
         
         if create_qm_input_file(config, template_content, input_path, qm_program):
             file_input_files.append(input_name)
@@ -628,9 +1004,9 @@ def _process_xyz_file_for_calc(xyz_file_data):
     else:
         return file_input_files, f"Processed {xyz_file} (run {run_num}) with {len(configurations)} configurations"
 
-def _process_xyz_file_for_opt(xyz_file_data):
+def _process_xyz_file_for_ref(xyz_file_data):
     """
-    Process a single XYZ file for optimization system creation.
+    Process a single XYZ file for refinement system creation.
     This is a module-level function to support multiprocessing.
     """
     xyz_file, template_content, opt_dir, qm_program, input_ext = xyz_file_data
@@ -659,14 +1035,14 @@ def _process_xyz_file_for_opt(xyz_file_data):
             motif_match = re.search(r'(?<!u)(motif_\d+)', base_name, re.IGNORECASE)
         
         if umotif_match:
-            # Keep umotif prefix, just add _opt suffix
+            # Keep umotif prefix, just add _ref suffix
             source_name = umotif_match.group(1).lower()
-            input_name = f"{source_name}_opt{input_ext}"
+            input_name = f"{source_name}_ref{input_ext}"
         elif motif_match:
-            # Keep motif prefix, just add _opt suffix
+            # Keep motif prefix, just add _ref suffix
             # Similarity will later promote motif_##_opt → umotif_##
             source_name = motif_match.group(1).lower()
-            input_name = f"{source_name}_opt{input_ext}"
+            input_name = f"{source_name}_ref{input_ext}"
         else:
             # For non-motif files, use simple opt_conf_X naming
             input_name = f"opt_conf_{config['config_num']}{input_ext}"
@@ -765,11 +1141,11 @@ def convert_xyz_to_mol(xyz_filepath: str, openbabel_alias: str = "obabel", state
         process = subprocess.run(conversion_command, check=False, capture_output=True, text=True, timeout=60) # Added timeout
         
         if process.returncode != 0:
-            _print_verbose(f"  Open Babel conversion failed for '{os.path.basename(xyz_filepath)}'.", 1, state)
+            _print_verbose(f"  Open Babel conversion failed for '{os.path.basename(xyz_filepath)}'.", 2, state)
             # Only print detailed stdout/stderr if verbosity is high
-            if state and state.verbosity_level >= 2:
-                _print_verbose(f"  STDOUT (first 5 lines):\n{_format_stream_output(process.stdout, max_lines=5, prefix='    ')}", 2, state)
-                _print_verbose(f"  STDERR (first 5 lines):\n{_format_stream_output(process.stderr, max_lines=5, prefix='    ')}", 2, state)
+            if state and state.verbosity_level >= 3:
+                _print_verbose(f"  STDOUT (first 5 lines):\n{_format_stream_output(process.stdout, max_lines=5, prefix='    ')}", 3, state)
+                _print_verbose(f"  STDERR (first 5 lines):\n{_format_stream_output(process.stderr, max_lines=5, prefix='    ')}", 3, state)
             return False
 
         if os.path.exists(mol_filepath):
@@ -1264,7 +1640,7 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
         with open(source, 'r') as f_obj:
             lines = f_obj.readlines()
     else:
-        state.input_file_path = "stdin_input.in" # Placeholder name for stdin
+        state.input_file_path = "stdin_input.asc" # Placeholder name for stdin
         lines = source.readlines()
 
     def clean_line(line: str) -> str:
@@ -1569,6 +1945,65 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
     return molecule_definitions
 
 
+def strip_protocol_from_content(content: str) -> str:
+    """
+    Remove the protocol section from input file content.
+    This prevents recursive workflow execution when creating replicated runs.
+    
+    Args:
+        content: Full content of input file
+        
+    Returns:
+        Content with protocol section removed
+    """
+    lines = content.split('\n')
+    result_lines = []
+    in_protocol_section = False
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Remove inline comments for checking purposes (but keep original line for output)
+        check_stripped = stripped
+        if '#' in check_stripped:
+            check_stripped = check_stripped.split('#')[0].strip()
+        
+        # Check if this line starts a protocol section
+        if check_stripped.startswith('.in,') or check_stripped.startswith('.in '):
+            in_protocol_section = True
+            # Skip this line and all following protocol lines
+            continue
+        
+        # If in protocol section, skip lines that are part of it
+        if in_protocol_section:
+            if check_stripped:
+                # Check if this is still part of protocol (ends with comma or starts known stage keywords)
+                if (check_stripped.endswith(',') or 
+                    check_stripped.endswith('.') or
+                    check_stripped.startswith('r') and len(check_stripped) > 1 and check_stripped[1:].split()[0].isdigit() or
+                    check_stripped.startswith('opt ') or
+                    check_stripped.startswith('ref ') or
+                    check_stripped.startswith('similarity')):
+                    continue  # Skip protocol line
+                else:
+                    # This line doesn't look like protocol continuation
+                    # Check if it's the last protocol line (no comma/dot)
+                    if not check_stripped.endswith(',') and not check_stripped.endswith('.'):
+                        # Check if this could be a final protocol line
+                        if (check_stripped.startswith('similarity') or 
+                            check_stripped.startswith('opt') or
+                            check_stripped.startswith('ref') or
+                            (check_stripped.startswith('r') and len(check_stripped) > 1)):
+                            in_protocol_section = False
+                            continue  # Skip this last protocol line too
+                    in_protocol_section = False
+        
+        # Keep non-protocol lines
+        result_lines.append(line)
+    
+    return '\n'.join(result_lines)
+
+
 def extract_protocol_from_input(input_file: str) -> Optional[str]:
     """
     Extract protocol line(s) from input file if present.
@@ -1624,6 +2059,105 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
     return None
 
 
+def extract_embedded_templates(input_file: str) -> Dict[str, str]:
+    """
+    Extract embedded QM templates from input file.
+    
+    Looks for blocks starting with '#orca name' or '#gaussian name' and extracts
+    the template content. Templates are written to files (name.inp or name.com)
+    and the mapping of name -> filepath is returned.
+    
+    Template format in input file:
+        #orca input1
+        #name
+        ! Method
+        %pal
+          nprocs 2
+        end
+        * xyz 0 1
+        #
+        *
+    
+    Args:
+        input_file: Path to the ASCEC input file
+        
+    Returns:
+        Dict mapping template names to file paths (e.g., {'input1': 'input1.inp'})
+    """
+    templates = {}
+    
+    try:
+        with open(input_file, 'r') as f:
+            content = f.read()
+        
+        # Find all template blocks
+        # Pattern: #orca name or #gaussian name followed by content until standalone * or next #orca/#gaussian
+        import re
+        
+        # Match #orca or #gaussian followed by template name
+        template_pattern = re.compile(
+            r'#(orca|gaussian)\s+(\w+)\s*\n'  # Template header: #orca name or #gaussian name
+            r'(.*?)'  # Non-greedy capture of content
+            r'(?=\n#(?:orca|gaussian)\s+\w+|\n\*\s*$|\Z)',  # Lookahead for next template, final *, or end
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        # Also try simpler pattern for templates ending with #\n*
+        matches = []
+        lines = content.split('\n')
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            # Check for template start
+            match = re.match(r'^#(orca|gaussian)\s+(\w+)\s*$', line, re.IGNORECASE)
+            if match:
+                qm_type = match.group(1).lower()
+                template_name = match.group(2)
+                
+                # Collect template content until we hit #\n* or another template start
+                template_lines = []
+                i += 1
+                while i < len(lines):
+                    current_line = lines[i]
+                    stripped = current_line.strip()
+                    
+                    # Check for end markers: standalone * after # line
+                    if stripped == '*' and template_lines and template_lines[-1].strip() == '#':
+                        # Keep the # as coordinate placeholder, add the closing *
+                        template_lines.append(current_line)  # Add the closing *
+                        break
+                    
+                    # Check for another template start
+                    if re.match(r'^#(orca|gaussian)\s+\w+\s*$', stripped, re.IGNORECASE):
+                        i -= 1  # Back up so outer loop catches this
+                        break
+                    
+                    template_lines.append(current_line)
+                    i += 1
+                
+                # Clean up template content
+                template_content = '\n'.join(template_lines).strip()
+                
+                if template_content:
+                    # Determine file extension
+                    ext = '.inp' if qm_type == 'orca' else '.com'
+                    filename = f"{template_name}{ext}"
+                    
+                    # Write template to file
+                    with open(filename, 'w') as tf:
+                        tf.write(template_content + '\n')
+                    
+                    templates[template_name] = os.path.abspath(filename)
+            
+            i += 1
+        
+    except Exception as e:
+        # Silently ignore errors - templates are optional
+        pass
+    
+    return templates
+
+
 def parse_exclusion_pattern(pattern: str) -> List[int]:
     """
     Parse exclusion pattern into list of numbers.
@@ -1663,9 +2197,9 @@ def match_exclusion(filename: str, excluded_numbers: List[int]) -> bool:
     Check if a filename matches any excluded number.
     
     Examples:
-        "motif_01_opt.inp" matches [1]
+        "motif_01_ref.inp" matches [1]
         "opt_conf_3.inp" matches [3]
-        "motif_15_opt.inp" matches [15]
+        "motif_15_ref.inp" matches [15]
     
     Args:
         filename: Input filename
@@ -1718,7 +2252,7 @@ def update_protocol_cache(stage_name: str, status: str, result: Optional[Dict[st
     Update protocol cache with stage completion info.
     
     Args:
-        stage_name: Name of the stage (e.g., 'r1', 'calc', 'similarity')
+        stage_name: Name of the stage (e.g., 'r1', 'opt', 'similarity')
         status: Status ('in_progress', 'completed', 'failed')
         result: Optional result dictionary with stage-specific data
         cache_file: Path to cache file
@@ -1804,21 +2338,21 @@ def parse_exclude_pattern(pattern: str) -> List[int]:
     return sorted(set(numbers))  # Remove duplicates and sort
 
 
-def save_exclude_patterns(input_file: str, calc_patterns: Dict[str, List[int]], 
-                         opt_patterns: Dict[str, List[int]]):
+def save_exclude_patterns(input_file: str, opt_patterns: Dict[str, List[int]], 
+                         ref_patterns: Dict[str, List[int]]):
     """
     Save exclude patterns to a file associated with the input file.
     
     Args:
         input_file: Path to the input file
-        calc_patterns: Dictionary of calc stage patterns {'calc1': [2, 5, 6], 'calc2': [1, 3]}
-        opt_patterns: Dictionary of opt stage patterns {'opt1': [2, 5, 6]}
+        opt_patterns: Dictionary of opt stage patterns {'opt1': [2, 5, 6], 'opt2': [1, 3]}
+        ref_patterns: Dictionary of ref stage patterns {'ref1': [2, 5, 6]}
     """
     exclude_file = f"{input_file}.exclude"
     
     data = {
-        'calc': calc_patterns,
-        'opt': opt_patterns
+        'opt': opt_patterns,
+        'ref': ref_patterns
     }
     
     try:
@@ -1836,7 +2370,7 @@ def load_exclude_patterns(input_file: str) -> Tuple[Dict[str, List[int]], Dict[s
         input_file: Path to the input file
         
     Returns:
-        Tuple of (calc_patterns, opt_patterns)
+        Tuple of (opt_patterns, opt_patterns)
     """
     exclude_file = f"{input_file}.exclude"
     
@@ -1846,27 +2380,27 @@ def load_exclude_patterns(input_file: str) -> Tuple[Dict[str, List[int]], Dict[s
     try:
         with open(exclude_file, 'rb') as f:
             data = pickle.load(f)
-            return data.get('calc', {}), data.get('opt', {})
+            return data.get('opt', {}), data.get('ref', {})
     except Exception as e:
         print(f"Warning: Failed to load exclude patterns: {e}")
         return {}, {}
 
 
-def display_exclude_patterns(calc_patterns: Dict[str, List[int]], opt_patterns: Dict[str, List[int]]):
+def display_exclude_patterns(opt_patterns: Dict[str, List[int]], ref_patterns: Dict[str, List[int]]):
     """Display current exclude patterns."""
     print("\n" + "=" * 60)
     print("Current Exclude Patterns")
     print("=" * 60)
     
-    if calc_patterns:
-        print("\nCalculation stages:")
-        for stage_name, numbers in sorted(calc_patterns.items()):
+    if opt_patterns:
+        print("\nOptimization stages:")
+        for stage_name, numbers in sorted(opt_patterns.items()):
             if numbers:
                 print(f"  {stage_name}: {', '.join(map(str, numbers))}")
             else:
                 print(f"  {stage_name}: (empty)")
     else:
-        print("\nCalculation stages: (none)")
+        print("\nOptimization stages: (none)")
     
     if opt_patterns:
         print("\nOptimization stages:")
@@ -2228,8 +2762,8 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                 for stage_key, stage_info in sorted_stages:
                     if stage_info.get('status') == 'completed':
                         stage_type = stage_key.split('_')[0].capitalize()
-                        type_map = {'Replication': 'Annealing', 'Calculation': 'Calc',
-                                  'Similarity': 'Similarity', 'Optimization': 'Opt'}
+                        type_map = {'Replication': 'Annealing', 'Optimization': 'Opt',
+                                  'Similarity': 'Similarity', 'Refinement': 'Ref'}
                         stage_name = type_map.get(stage_type, stage_type)
                         completed_stages.append(stage_name)
                 
@@ -2250,6 +2784,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                                      key=lambda x: int(x[0].split('_')[1]) if '_' in x[0] else 0)
                 
                 total_qm_percentage = 0.0
+                total_tracked_time = 0.0  # Track sum of all stage times
                 for stage_key, stage_info in sorted_stages:
                     if stage_info.get('status') == 'completed':
                         stage_type = stage_key.split('_')[0].capitalize()
@@ -2260,18 +2795,25 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         
                         wall_time = stage_info.get('wall_time')
                         if not wall_time:
-                            if stage_type == 'Calculation' and os.path.exists('calculation/orca_summary.txt'):
-                                wall_time = _extract_time_from_orca_summary('calculation/orca_summary.txt')
-                            elif stage_type == 'Optimization' and os.path.exists('optimization/orca_summary.txt'):
+                            if stage_type == 'Optimization' and os.path.exists('optimization/orca_summary.txt'):
                                 wall_time = _extract_time_from_orca_summary('optimization/orca_summary.txt')
+                            elif stage_type == 'Refinement' and os.path.exists('refinement/orca_summary.txt'):
+                                wall_time = _extract_time_from_orca_summary('refinement/orca_summary.txt')
                         
                         if wall_time:
+                            total_tracked_time += wall_time
                             percentage = (wall_time / total_wall_time) * 100
                             total_qm_percentage += percentage
-                            type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
-                                      'Optimization': 'Optimization'}
+                            type_map = {'Replication': 'Annealing', 'Optimization': 'Optimization',
+                                      'Refinement': 'Refinement'}
                             stage_name = type_map.get(stage_type, stage_type)
                             f.write(f"  {stage_name:<15} {format_wall_time_timing(wall_time):>15} {percentage:>9.1f}%\n")
+                
+                # Calculate and show recovery time if there's a significant difference
+                recovery_time = total_wall_time - total_tracked_time
+                if recovery_time > 60:  # Only show if recovery time > 1 minute
+                    recovery_percentage = (recovery_time / total_wall_time) * 100
+                    f.write(f"  {'Recovery':<15} {format_wall_time_timing(recovery_time):>15} {recovery_percentage:>9.1f}%\n")
                 
                 f.write("\n")
             
@@ -2311,8 +2853,8 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         continue
                     
                     stage_type = stage_key.split('_')[0].capitalize()
-                    type_map = {'Replication': 'Annealing', 'Calculation': 'Calculation',
-                              'Similarity': 'Similarity', 'Optimization': 'Optimization'}
+                    type_map = {'Replication': 'Annealing', 'Optimization': 'Optimization',
+                              'Similarity': 'Similarity', 'Refinement': 'Refinement'}
                     stage_name = type_map.get(stage_type, stage_type)
                     
                     result = stage_info.get('result', {})
@@ -2335,11 +2877,11 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             replica_desc = "Duplicated" if num_replicas == 2 else "Triplicated" if num_replicas == 3 else f"{num_replicas}x"
                             f.write(f"    Replicas:         {num_replicas} ({replica_desc})\n")
                         if 'energy_evals' in result:
-                            f.write(f"    Energy evals:     {result['energy_evals']} times\n")
+                            f.write(f"    Evaluations:      {result['energy_evals']} times\n")
                         if 'total_accepted' in result:
                             f.write(f"    Accepted:         {result['total_accepted']} configurations\n")
                     
-                    elif stage_type == 'Calculation':
+                    elif stage_type == 'Optimization':
                         if 'xyz_source' in result:
                             xyz_source = result['xyz_source'] if result['xyz_source'] else "Annealing"
                             f.write(f"    Inputs from:      {xyz_source}\n")
@@ -2357,41 +2899,87 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             f.write(f"    Working dir:      {result['similarity_folder']}\n")
                         if 'threshold' in result:
                             f.write(f"    Threshold:        {result['threshold']}\n")
+                        if 'rmsd_threshold' in result:
+                            f.write(f"    RMSD:             {result['rmsd_threshold']}\n")
+                        else:
+                            f.write(f"    RMSD:             N/A\n")
+                        f.write("\n")
+                        
                         if 'motifs_created' in result:
                             motif_label = "Unique Motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
-                            f.write(f"    {motif_label}:    {result['motifs_created']} representatives\n")
+                            f.write(f"    {motif_label}:           {result['motifs_created']} representatives\n")
                         
-                        # Show critical and skipped with counts
-                        f.write("\n")
-                        if 'critical_pct' in result:
-                            crit_pct = result['critical_pct']
-                            crit_count = result.get('critical_count', 0)
-                            f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
-                        if 'skipped_pct' in result:
-                            skip_pct = result['skipped_pct']
-                            skip_count = result.get('skipped_count', 0)
-                            f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
-                        
-                        # Threshold validation
+                        # Get threshold info for validation output
                         threshold_met = result.get('threshold_met', True)
-                        if 'threshold_type' in result and 'threshold_value' in result:
-                            threshold_type = result['threshold_type']
-                            threshold_value = result['threshold_value']
+                        threshold_type = result.get('threshold_type', 'critical')
+                        threshold_value = result.get('threshold_value')
+                        attempts = result.get('attempts', 0)
+                        
+                        # Check if there were redo attempts (initial values differ from final)
+                        has_redo = 'initial_critical' in result or 'initial_skipped' in result
+                        
+                        if has_redo and attempts > 0:
+                            # Show Initial validation
+                            f.write("\n    Initial validation\n")
+                            if 'initial_critical' in result:
+                                init_crit = result['initial_critical']
+                                init_crit_count = result.get('initial_critical_count', 0)
+                                f.write(f"    Critical:         {init_crit}% ({init_crit_count} structures)\n")
+                            if 'initial_skipped' in result:
+                                init_skip = result['initial_skipped']
+                                init_skip_count = result.get('initial_skipped_count', 0)
+                                f.write(f"    Skipped:          {init_skip}% ({init_skip_count} structures)\n")
+                            
+                            if threshold_value is not None:
+                                actual_init = result.get(f'initial_{threshold_type}', 'N/A')
+                                f.write(f"\n    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual_init}%\n")
+                            
+                            # Show Final validation
+                            f.write(f"\n    Final validation ({attempts} Redo Attempts)\n")
+                            if 'critical_pct' in result:
+                                crit_pct = result['critical_pct']
+                                crit_count = result.get('critical_count', 0)
+                                f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
+                            if 'skipped_pct' in result:
+                                skip_pct = result['skipped_pct']
+                                skip_count = result.get('skipped_count', 0)
+                                f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
+                            
+                            if threshold_value is not None:
+                                actual_final = result.get(f'{threshold_type}_pct', 'N/A')
+                                f.write(f"\n    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual_final}%\n")
+                            
                             if threshold_met:
-                                f.write(f"\n    Validation: ✓ Step [{step_num-1}] passed\n")
-                                f.write(f"    {threshold_type.capitalize()} ≤ {threshold_value}%\n")
+                                f.write(f"\n    Validation: Step [{step_num-1}] passed ✓\n")
                             else:
-                                actual = result.get('critical_pct' if threshold_type == 'critical' else 'skipped_pct', 'N/A')
-                                attempts = result.get('attempts', 'N/A')
-                                f.write(f"\n    Validation: Step [{step_num-1}] threshold exceeded!\n")
-                                f.write(f"    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual}%\n")
-                                f.write(f"    Max attempts ({attempts}) reached\n")
+                                f.write(f"\n    Max redo attempts ({attempts}) reached\n")
+                        else:
+                            # No redo - show single validation
+                            f.write("\n")
+                            if 'critical_pct' in result:
+                                crit_pct = result['critical_pct']
+                                crit_count = result.get('critical_count', 0)
+                                f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
+                            if 'skipped_pct' in result:
+                                skip_pct = result['skipped_pct']
+                                skip_count = result.get('skipped_count', 0)
+                                f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
+                            
+                            # Threshold validation
+                            if threshold_value is not None:
+                                actual = result.get(f'{threshold_type}_pct', 'N/A')
+                                if threshold_met:
+                                    f.write(f"\n    Validation: Step [{step_num-1}] passed ✓\n")
+                                    f.write(f"    {threshold_type.capitalize()} ≤ {threshold_value}%\n")
+                                else:
+                                    f.write(f"\n    Validation: Step [{step_num-1}] threshold exceeded!\n")
+                                    f.write(f"    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual}%\n")
                     
-                    elif stage_type == 'Optimization':
+                    elif stage_type == 'Refinement':
                         if 'motifs_source' in result and result['motifs_source']:
                             f.write(f"    Inputs from:      {result['motifs_source']}\n")
                         if 'completed' in result and 'total' in result:
-                            f.write(f"    Completed:        {result['completed']}/{result['total']} optimizations\n")
+                            f.write(f"    Completed:        {result['completed']}/{result['total']} refinements\n")
                         if 'similarity_folder' in result and result['similarity_folder']:
                             f.write(f"    Outputs to:       {result['similarity_folder']}\n")
                         # Calculate and show mean execution time
@@ -4770,13 +5358,13 @@ def extract_config_from_input_file(content: str, qm_program: str) -> Optional[Di
         return None
 
 
-def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", auto_select: Optional[str] = None) -> List[str]:
+def interactive_xyz_file_selection(xyz_files: List[str], opt_dir: str = ".", auto_select: Optional[str] = None) -> List[str]:
     """
     Provides interactive selection for XYZ files to process.
     
     Args:
         xyz_files (List[str]): List of available XYZ file paths
-        calc_dir (str): Directory where combined files should be created
+        opt_dir (str): Directory where combined files should be created
         auto_select (Optional[str]): Auto-selection mode:
             - 'all': Process all result_*.xyz files (excludes combined files)
             - 'combined': Combine all result_*.xyz files into combined_r{N}.xyz, then process that
@@ -4800,23 +5388,28 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", au
     elif auto_select == 'combined':
         if len(result_files) == 1:
             # Single file: just use it directly (treat as "combined")
-            print(f"\nAuto-selected: Single result file (treating as combined)")
-            print(f"Using: {os.path.basename(result_files[0])}")
+            if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                print(f"\nAuto-selected: Single result file (treating as combined)")
+                print(f"Using: {os.path.basename(result_files[0])}")
             return result_files
         elif len(result_files) > 1:
             # Multiple files: combine them
-            print(f"\nAuto-combining {len(result_files)} result_*.xyz files...")
-            combined_filename = os.path.join(calc_dir, f"combined_r{len(result_files)}.xyz")
+            if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                print(f"\nAuto-combining {len(result_files)} result_*.xyz files...")
+            combined_filename = os.path.join(opt_dir, f"combined_r{len(result_files)}.xyz")
             success = merge_xyz_files(result_files, combined_filename)
             if success:
-                print(f"Successfully created {os.path.basename(combined_filename)}")
+                if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                    print(f"Successfully created {os.path.basename(combined_filename)}")
                 return [combined_filename]
             else:
-                print("Failed to combine files. Using individual files instead.")
+                if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                    print("Failed to combine files. Using individual files instead.")
                 return result_files
         else:
             # No files
-            print("\nNo result files found")
+            if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                print("\nNo result files found")
             return []
     
     # Interactive mode
@@ -4874,7 +5467,7 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", au
             if choice.lower() == 'c' and len(result_files) > 1:
                 print(f"Combining {len(result_files)} result_*.xyz files...")
                 # Use merge_xyz_files to combine result files only
-                combined_filename = os.path.join(calc_dir, f"combined_r{len(result_files)}.xyz")
+                combined_filename = os.path.join(opt_dir, f"combined_r{len(result_files)}.xyz")
                 success = merge_xyz_files(result_files, combined_filename)
                 if success:
                     print(f"Successfully created {os.path.basename(combined_filename)}")
@@ -4983,7 +5576,7 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
                 choice = input(f"Select option ({', '.join(option_parts)}, or 'q' to quit): ").strip().lower()
             
             if choice == 'q':
-                print("Calculation system creation cancelled.")
+                print("Optimization system creation cancelled.")
                 return []
             
             if choice == 'c':
@@ -5021,10 +5614,10 @@ def create_combined_xyz_from_list(xyz_files: List[str]) -> bool:
                     print(f"Invalid option. Please choose {', '.join(valid_options[:-1])}, or 'q' to quit.")
                 
         except KeyboardInterrupt:
-            print("\nCalculation system creation cancelled by user.")
+            print("\nOptimization system creation cancelled by user.")
             return []
         except EOFError:
-            print("\nCalculation system creation cancelled.")
+            print("\nOptimization system creation cancelled.")
             return []
 
 
@@ -5130,16 +5723,16 @@ def extract_qm_executable_from_launcher(launcher_content: str, qm_program_idx: i
 
 
 def calculate_input_files(template_file: str, launcher_template: Optional[str] = None, 
-                          auto_select: str = 'interactive', stage_type: str = "calculation", 
+                          auto_select: str = 'interactive', stage_type: str = "optimization", 
                           workflow_mode: bool = False) -> str:
     """
-    Unified function to create QM input files and launcher scripts for both calculation and optimization stages.
+    Unified function to create QM input files and launcher scripts for both calculation and refinement stages.
     
     Args:
         template_file (str): Path to the QM input template file.
         launcher_template (Optional[str]): Path to the launcher script template.
         auto_select (str): 'interactive', 'all', or 'combined' for file selection.
-        stage_type (str): "calculation" or "optimization".
+        stage_type (str): "optimization" or "refinement".
         workflow_mode (bool): True if called from a workflow, suppresses some print statements.
         
     Returns:
@@ -5201,7 +5794,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     
     # File Search Logic
     xyz_files = []
-    if stage_type == "calculation":
+    if stage_type == "optimization":
         # FIRST: Check for retry_input folder (structures from need_recalculation)
         if os.path.exists("retry_input"):
             print("Found retry_input folder, using structures from previous similarity analysis")
@@ -5234,7 +5827,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             return float('inf')
         xyz_files.sort(key=get_annealing_number)
         
-    elif stage_type == "optimization":
+    elif stage_type == "refinement":
         # Check for combined files
         for file in os.listdir("."):
             if file.endswith(".xyz") and "combined" in file.lower():
@@ -5251,29 +5844,30 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             return "No files with 'combined' in name or motif_*.xyz files found."
             
     # File Selection Logic
-    if stage_type == "calculation":
-        print(f"Found {len(xyz_files)} XYZ file(s) to process:")
-        for xyz_file in xyz_files:
-            print(f"  - {xyz_file}")
+    if stage_type == "optimization":
+        if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+            print(f"Found {len(xyz_files)} XYZ file(s) to process:")
+            for xyz_file in xyz_files:
+                print(f"  - {xyz_file}")
             
         # Store first XYZ source for protocol summary
         if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:  # type: ignore[attr-defined]
             if xyz_files:
                 first_file = xyz_files[0]
                 if 'result' in first_file or 'annealing' in first_file.lower():
-                    sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
+                    sys._current_workflow_context.opt_xyz_source = "Annealing"  # type: ignore[attr-defined]
                 else:
-                    sys._current_workflow_context.calc_xyz_source = first_file  # type: ignore[attr-defined]
+                    sys._current_workflow_context.opt_xyz_source = first_file  # type: ignore[attr-defined]
             else:
-                sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
+                sys._current_workflow_context.opt_xyz_source = "Annealing"  # type: ignore[attr-defined]
                 
         if auto_select == 'combined':
             os.makedirs(output_dir, exist_ok=True)
             
         selected_xyz_files = interactive_xyz_file_selection(xyz_files, output_dir, auto_select=auto_select)
         
-    elif stage_type == "optimization":
-        selected_xyz_files = interactive_optimization_file_selection(xyz_files, output_dir)
+    elif stage_type == "refinement":
+        selected_xyz_files = interactive_refinement_file_selection(xyz_files, output_dir)
     else:
         selected_xyz_files = []
         
@@ -5284,7 +5878,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     # Create directory
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-        print(f"Created {stage_type} directory: {output_dir}")
+        if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+            print(f"Created {stage_type} directory: {output_dir}")
         
     # Process files in parallel
     all_input_files = []
@@ -5295,14 +5890,14 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     use_combined_naming = (auto_select == 'combined')
     
     # Prepare arguments
-    if stage_type == "calculation":
+    if stage_type == "optimization":
         xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
                          for xyz_file in xyz_files]
         process_func = _process_xyz_file_for_calc
-    else: # optimization
+    else: # refinement
         xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext) 
                          for xyz_file in xyz_files]
-        process_func = _process_xyz_file_for_opt
+        process_func = _process_xyz_file_for_ref
         
     max_workers = get_optimal_workers('mixed', len(xyz_files))
     
@@ -5322,7 +5917,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                 if not workflow_mode:
                     print(f"  Error processing {xyz_file}: {e}")
                     
-    print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
+    if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+        print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
@@ -5335,7 +5931,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             print(f"Using QM executable: {qm_program}")
             
             # Deduplicate input files: keep only flat filenames (basenames)
-            # This prevents duplicate commands like motif_29/motif_29_opt.inp AND motif_29_opt.inp
+            # This prevents duplicate commands like motif_29/motif_29_ref.inp AND motif_29_ref.inp
             seen_basenames = set()
             deduplicated_files = []
             for input_file in all_input_files:
@@ -5411,7 +6007,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
 
 def create_calculation_system(template_file: str, launcher_template: str) -> str:
     """
-    Creates a calculation system by extracting configurations from XYZ files
+    Creates a optimization system by extracting configurations from XYZ files
     and generating QM input files with launcher scripts.
     
     Args:
@@ -5421,27 +6017,12 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
     Returns:
         str: Status message
     """
-    return calculate_input_files(template_file, launcher_template, stage_type="calculation")
+    return calculate_input_files(template_file, launcher_template, stage_type="optimization")
 
 
-def create_simple_calculation_system(template_file: str, launcher_template: Optional[str] = None) -> str:
+def create_simple_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
     """
-    Creates a calculation system.
-    
-    Args:
-        template_file (str): Path to the QM input template file
-        launcher_template (str): Path to the launcher script template
-    
-    Returns:
-        str: Status message indicating success or failure
-    """
-    return calculate_input_files(template_file, launcher_template, stage_type="calculation")
-
-
-def create_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
-    """
-    Creates an optimization system by looking for files with 'combined' in their name 
-    (like all_motifs_combined.xyz) and motif_*.xyz files.
+    Creates a optimization system.
     
     Args:
         template_file (str): Path to the QM input template file
@@ -5453,9 +6034,24 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
     return calculate_input_files(template_file, launcher_template, stage_type="optimization")
 
 
-def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
+def create_refinement_system(template_file: str, launcher_template: Optional[str] = None) -> str:
     """
-    Provides interactive selection for optimization XYZ files.
+    Creates an refinement system by looking for files with 'combined' in their name 
+    (like all_motifs_combined.xyz) and motif_*.xyz files.
+    
+    Args:
+        template_file (str): Path to the QM input template file
+        launcher_template (str): Path to the launcher script template
+    
+    Returns:
+        str: Status message indicating success or failure
+    """
+    return calculate_input_files(template_file, launcher_template, stage_type="refinement")
+
+
+def interactive_refinement_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
+    """
+    Provides interactive selection for refinement XYZ files.
     
     Args:
         xyz_files (List[str]): List of available XYZ file paths
@@ -5814,15 +6410,18 @@ def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
                     print(f"Warning: Could not read {xyz_file}: {e}")
                     continue
         
-        print(f"Merged {len(sorted_files)} files into {output_filename} with {total_configs} configurations")
+        if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+            print(f"Merged {len(sorted_files)} files into {output_filename} with {total_configs} configurations")
         
         # Create .mol file if obabel is available
         if shutil.which("obabel"):
             success, error_msg = convert_xyz_to_mol_simple(output_filename, output_filename.replace('.xyz', '.mol'))
             if success:
-                print(f"Also created {output_filename.replace('.xyz', '.mol')}")
+                if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                    print(f"Also created {output_filename.replace('.xyz', '.mol')}")
             else:
-                print(f"Warning: Could not create .mol file: {error_msg}")
+                if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+                    print(f"Warning: Could not create .mol file: {error_msg}")
         
         return True
         
@@ -5904,7 +6503,7 @@ def update_box_size_in_input(input_file_path: str, new_box_size: float) -> str:
     
     return ''.join(lines)
 
-def create_replicated_runs(input_file_path: str, num_replicas: int, create_launcher: bool = True, box_size: Optional[float] = None) -> List[str]:
+def create_replicated_runs(input_file_path: str, num_replicas: int, create_launcher: bool = True, box_size: Optional[float] = None, verbose: bool = True) -> List[str]:
     """
     Creates replicated folders and input files for multiple annealing runs.
     
@@ -5913,6 +6512,7 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
         num_replicas (int): Number of replicas to create
         create_launcher (bool): Whether to create launcher script (default: True)
         box_size (Optional[float]): If provided, updates the box size in replicated files
+        verbose (bool): Whether to print progress messages (default: True)
     
     Returns:
         List[str]: List of paths to the replicated input files
@@ -5928,7 +6528,8 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
     parent_folder_name = "annealing"
     parent_folder_path = os.path.join(input_dir, parent_folder_name)
     os.makedirs(parent_folder_path, exist_ok=True)
-    print(f"Creating {num_replicas} replicated runs in '{parent_folder_name}/'...")
+    if verbose:
+        print(f"Creating {num_replicas} replicated runs in '{parent_folder_name}/'...")
     
     for i in range(1, num_replicas + 1):
         # Create folder name: e.g., example_1, example_2, example_3
@@ -5943,19 +6544,27 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
         replicated_input_path = os.path.join(folder_path, replicated_input_name)
         
         # Copy the original input file to the new location
+        # IMPORTANT: Strip protocol section to prevent recursive workflow execution
         try:
             with open(input_file_path_full, 'r') as src:
                 content = src.read()
             
+            # Strip protocol section from replicated files to prevent recursive execution
+            content = strip_protocol_from_content(content)
+            
             # Update box size if specified
             if box_size is not None:
+                # Read again for box size update since update_box_size_in_input re-reads file
                 content = update_box_size_in_input(input_file_path_full, box_size)
+                # Also strip protocol from the box-updated content
+                content = strip_protocol_from_content(content)
             
             with open(replicated_input_path, 'w') as dst:
                 dst.write(content)
             
             replicated_files.append(replicated_input_path)
-            print(f"  Created: {folder_name}/{replicated_input_name}")
+            if verbose:
+                print(f"  Created: {folder_name}/{replicated_input_name}")
             
         except IOError as e:
             print(f"Error creating replicated file '{replicated_input_path}': {e}")
@@ -5964,8 +6573,9 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
     # Create launcher script only if requested
     if create_launcher and replicated_files:
         create_launcher_script(replicated_files, input_dir)
-        print("\nTo run all simulations sequentially, use:")
-        print("  ./launcher_ascec.sh")
+        if verbose:
+            print("\nTo run all simulations sequentially, use:")
+            print("  ./launcher_ascec.sh")
     
     return replicated_files
 
@@ -5974,7 +6584,8 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
 def extract_base(filename):
     """Extract base name from filename by removing extension and known suffixes."""
     # Define optional suffixes that can appear before extensions
-    KNOWN_SUFFIXES = ['_trj', '_opt', '_property', '_gu', '_xtbrestart', '_engrad', '_xyz', '_out', '_inp', '_tmp']
+    # Note: _rescue must come before _inp/_out to handle _rescue.inp properly
+    KNOWN_SUFFIXES = ['_trj', '_opt', '_property', '_gu', '_xtbrestart', '_engrad', '_xyz', '_out', '_inp', '_tmp', '_rescue']
     
     # Remove extension
     name, *_ = filename.split('.', 1)
@@ -6100,8 +6711,8 @@ def get_sort_key(filename):
     """Extract the configuration number from filename for sorting.
     
     Handles various patterns:
-    - umotif_28_opt.xyz -> 28
-    - motif_28_opt.xyz -> 28
+    - umotif_28_ref.xyz -> 28
+    - motif_28_ref.xyz -> 28
     - opt_conf_3.xyz -> 3
     - result_123.xyz -> 123
     - any_456.xyz -> 456
@@ -6109,7 +6720,7 @@ def get_sort_key(filename):
     import re
     # Try multiple patterns in order of specificity
     patterns = [
-        r'u?motif_(\d+)_opt\.xyz',   # umotif_28_opt.xyz or motif_28_opt.xyz
+        r'u?motif_(\d+)_opt\.xyz',   # umotif_28_ref.xyz or motif_28_ref.xyz
         r'u?motif_(\d+)\.xyz',        # umotif_28.xyz or motif_28.xyz
         r'opt_conf_(\d+)\.xyz',      # opt_conf_3.xyz
         r'result_(\d+)\.xyz',        # result_123.xyz
@@ -6277,6 +6888,807 @@ def check_orca_terminated_normally_opi(output_path: str) -> bool:
         return '****ORCA TERMINATED NORMALLY****' in content
     except Exception:
         return False
+
+
+def detect_convergence_status(logfile_path: str) -> dict:
+    """
+    Detect the convergence status of an ORCA optimization.
+    
+    Args:
+        logfile_path: Path to ORCA output file
+        
+    Returns:
+        dict with keys:
+            'status': 'converged', 'not_converged', 'error', or 'unknown'
+            'terminated_normally': bool
+            'max_iterations_reached': bool
+            'error_message': str or None
+    """
+    result = {
+        'status': 'unknown',
+        'terminated_normally': False,
+        'max_iterations_reached': False,
+        'error_message': None
+    }
+    
+    try:
+        with open(logfile_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        
+        # Check for normal termination
+        if 'ORCA TERMINATED NORMALLY' in content:
+            result['terminated_normally'] = True
+            result['status'] = 'converged'
+        
+        # Check for optimization not converged error (max iterations reached)
+        not_converged_patterns = [
+            'The optimization did not converge but reached the maximum',
+            'maximum number of optimization cycles',
+            'ORCA will abort at this point',
+            'Please restart the calculation with the lowest energy geometry',
+            'larger maxiter for the geometry optimization'
+        ]
+        
+        for pattern in not_converged_patterns:
+            if pattern in content:
+                result['max_iterations_reached'] = True
+                result['status'] = 'not_converged'
+                result['error_message'] = 'Optimization reached maximum cycles without converging'
+                break
+        
+        # Also check for explicit convergence success
+        if '*** THE OPTIMIZATION HAS CONVERGED ***' in content:
+            result['status'] = 'converged'
+            result['max_iterations_reached'] = False
+        
+        # If terminated normally but no explicit convergence indicator, check for geometry opt
+        if result['terminated_normally'] and '*** OPTIMIZATION RUN DONE ***' in content:
+            if result['status'] == 'unknown':
+                result['status'] = 'converged'
+        
+        # Check for SCF convergence issues
+        if 'SCF NOT CONVERGED' in content or 'The wavefunction could not be converged' in content:
+            result['status'] = 'error'
+            result['error_message'] = 'SCF did not converge'
+        
+    except Exception as e:
+        result['error_message'] = str(e)
+    
+    return result
+
+
+def detect_orca_version_from_executable(orca_path: Optional[str] = None) -> Optional[Tuple[int, int]]:
+    """
+    Detect ORCA version from the executable by running 'orca --version'.
+    
+    Args:
+        orca_path: Path to ORCA executable. If None, uses 'orca' from PATH.
+        
+    Returns:
+        Tuple of (major, minor) version numbers, or None if not detected
+    """
+    if orca_path is None:
+        # Try to find ORCA in PATH
+        orca_path = shutil.which("orca")
+        if not orca_path:
+            return None
+    
+    try:
+        result = subprocess.run(
+            [orca_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        # Parse version from output (works for both stdout and stderr)
+        output = result.stdout + result.stderr
+        # Look for patterns like "Program Version 6.1.0" or just "6.1.0"
+        match = re.search(r'(?:Program Version\s+)?(\d+)\.(\d+)', output, re.IGNORECASE)
+        if match:
+            major = int(match.group(1))
+            minor = int(match.group(2))
+            return (major, minor)
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+    return None
+
+
+def detect_orca_version_from_launcher(launcher_content: str) -> Optional[Tuple[int, int]]:
+    """
+    Detect ORCA version from launcher variable names like ORCA611_ROOT.
+    
+    This is a fallback when the ORCA executable is not yet in PATH.
+    Parses variable names following the pattern ORCA{major}{minor}[patch]_ROOT.
+    
+    Examples:
+        ORCA611_ROOT -> (6, 1)  # ORCA 6.1.1
+        ORCA61_ROOT  -> (6, 1)  # ORCA 6.1
+        ORCA6_ROOT   -> (6, 0)  # ORCA 6.x (minor assumed 0)
+        ORCA5_ROOT   -> (5, 0)  # ORCA 5.x
+        ORCA_ROOT    -> None    # No version info
+        
+    Args:
+        launcher_content: Content of the launcher script
+        
+    Returns:
+        Tuple of (major, minor) version numbers, or None if not detected
+    """
+    if not launcher_content:
+        return None
+    
+    # Look for ORCA version variable patterns: ORCA611_ROOT, ORCA61_ROOT, ORCA6_ROOT
+    # Pattern: ORCA followed by digits, then _ROOT
+    pattern = r'ORCA(\d)(\d*)_ROOT'
+    
+    for line in launcher_content.split('\n'):
+        match = re.search(pattern, line)
+        if match:
+            major = int(match.group(1))
+            minor_str = match.group(2)
+            if minor_str:
+                # First digit after major is the minor version
+                # e.g., ORCA611_ROOT: major=6, minor_str="11" -> minor=1
+                # e.g., ORCA61_ROOT: major=6, minor_str="1" -> minor=1
+                minor = int(minor_str[0])
+            else:
+                minor = 0
+            return (major, minor)
+    
+    return None
+
+
+def detect_orca_version_combined(orca_path: Optional[str] = None, 
+                                  launcher_content: Optional[str] = None) -> Optional[Tuple[int, int]]:
+    """
+    Detect ORCA version using multiple methods:
+    1. From executable (orca --version)
+    2. From launcher variable names (ORCA611_ROOT)
+    
+    Args:
+        orca_path: Path to ORCA executable (optional)
+        launcher_content: Content of the launcher script (optional)
+        
+    Returns:
+        Tuple of (major, minor) version numbers, or None if not detected
+    """
+    # Try executable first (most reliable)
+    version = detect_orca_version_from_executable(orca_path)
+    if version:
+        return version
+    
+    # Fall back to launcher variable parsing
+    if launcher_content:
+        version = detect_orca_version_from_launcher(launcher_content)
+        if version:
+            return version
+    
+    return None
+
+
+# xTB method synonyms - maps all synonyms to canonical form
+XTB_SYNONYMS = {
+    # Native xTB (ORCA 6.1+)
+    'NATIVE-GFN-XTB': 'NATIVE-GFN-XTB',
+    'NATIVE-GFN1-XTB': 'NATIVE-GFN-XTB',
+    'NATIVE-XTB1': 'NATIVE-GFN-XTB',
+    'NATIVE-GFN2-XTB': 'NATIVE-GFN2-XTB',
+    'NATIVE-XTB2': 'NATIVE-GFN2-XTB',
+    # Non-native xTB (ORCA 5.x, requires external xtb)
+    'GFN0-XTB': 'GFN0-XTB',
+    'XTB0': 'GFN0-XTB',
+    'GFN-XTB': 'GFN-XTB',
+    'XTB1': 'GFN-XTB',
+    'GFN2-XTB': 'GFN2-XTB',
+    'XTB2': 'GFN2-XTB',
+    'GFN-FF': 'GFN-FF',
+    'XTBFF': 'GFN-FF',
+}
+
+# Mapping from non-native to native xTB methods (for ORCA 6.1+ upgrade)
+XTB_NATIVE_MAP = {
+    'GFN-XTB': 'Native-GFN-xTB',
+    'XTB1': 'Native-GFN-xTB',
+    'GFN2-XTB': 'Native-GFN2-xTB',
+    'XTB2': 'Native-GFN2-xTB',
+}
+
+
+def is_xtb_method(method: str) -> bool:
+    """
+    Check if a method string is an xTB method.
+    
+    Args:
+        method: Method string (e.g., "Native-GFN2-xTB", "GFN2-xTB", "XTB2")
+        
+    Returns:
+        True if it's an xTB method, False otherwise
+    """
+    method_upper = method.upper().replace('_', '-')
+    return method_upper in XTB_SYNONYMS or any(kw in method_upper for kw in ['GFN', 'XTB'])
+
+
+def convert_xtb_for_orca_version(method: str, orca_path: Optional[str] = None, 
+                                   launcher_content: Optional[str] = None) -> str:
+    """
+    Convert xTB method to the appropriate version for the detected ORCA version.
+    
+    - ORCA 6.1+: Convert to native xTB methods (Native-GFN-xTB, Native-GFN2-xTB)
+    - ORCA 5.x: Keep non-native xTB methods (GFN-xTB, GFN2-xTB)
+    
+    Args:
+        method: xTB method string
+        orca_path: Path to ORCA executable (for version detection)
+        launcher_content: Launcher script content (for version detection from ORCA611_ROOT etc.)
+        
+    Returns:
+        Appropriate xTB method for the ORCA version
+    """
+    method_upper = method.upper().replace('_', '-')
+    
+    # Detect ORCA version (tries executable first, then launcher variable names)
+    version = detect_orca_version_combined(orca_path, launcher_content)
+    is_orca_61_plus = version and version[0] >= 6 and version[1] >= 1
+    
+    # If already native and ORCA 6.1+, keep it
+    if 'NATIVE' in method_upper and is_orca_61_plus:
+        return method
+    
+    # If native but ORCA < 6.1, convert to non-native
+    if 'NATIVE' in method_upper and not is_orca_61_plus:
+        if 'GFN2' in method_upper or 'XTB2' in method_upper:
+            return 'GFN2-xTB'
+        elif 'GFN' in method_upper or 'XTB1' in method_upper:
+            return 'GFN-xTB'
+        return 'GFN2-xTB'  # Default to GFN2
+    
+    # If non-native and ORCA 6.1+, convert to native
+    if method_upper in XTB_NATIVE_MAP and is_orca_61_plus:
+        return XTB_NATIVE_MAP[method_upper]
+    
+    # Return as-is
+    return method
+
+
+def detect_xtb_in_template(template_content: str) -> Optional[str]:
+    """
+    Detect if the template uses an xTB method in the ! line.
+    
+    Args:
+        template_content: Content of the ORCA input template
+        
+    Returns:
+        The xTB method found (canonical form), or None if not xTB
+    """
+    # Look for the ! line(s) in the template
+    for line in template_content.split('\n'):
+        line_stripped = line.strip()
+        if line_stripped.startswith('!'):
+            # Extract all tokens from the ! line
+            tokens = line_stripped[1:].split()
+            for token in tokens:
+                token_upper = token.upper().replace('_', '-')
+                # Check if this token is an xTB method
+                if token_upper in XTB_SYNONYMS:
+                    return token  # Return original case
+                # Also check for partial matches
+                if any(kw in token_upper for kw in ['GFN', 'NATIVE-GFN', 'NATIVE-XTB']):
+                    return token
+    return None
+
+
+def detect_orca_executable(alias: str = "orca") -> Optional[str]:
+    """
+    Detect ORCA executable path using 'which <alias>' or shutil.which.
+    
+    Args:
+        alias: The command alias to search for (default: "orca")
+               This can come from line 9 of input.in (e.g., "orca", "orca6", etc.)
+    
+    Returns:
+        Full path to ORCA executable, or None if not found
+    """
+    # Try shutil.which first (works cross-platform)
+    orca_path = shutil.which(alias)
+    if orca_path:
+        return orca_path
+    
+    # Fallback: try running 'which <alias>' in shell
+    try:
+        result = subprocess.run(
+            ["which", alias],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            path = result.stdout.strip()
+            if os.path.exists(path):
+                return path
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        pass
+    
+    return None
+
+
+def create_auto_launcher(output_dir: str, qm_program: str = "orca", orca_alias: str = "orca") -> Optional[str]:
+    """
+    Create an auto-generated launcher script when no launcher file is provided.
+    
+    This function detects the ORCA installation path using the alias from input.in
+    and creates a proper launcher script with OpenMPI environment setup.
+    
+    Args:
+        output_dir: Directory to create the launcher script in
+        qm_program: QM program type ('orca' or 'gaussian')
+        orca_alias: The ORCA executable alias from input.in line 9 (default: "orca")
+        
+    Returns:
+        Path to the created launcher script, or None if ORCA not found
+    """
+    if qm_program != 'orca':
+        print(f"  Warning: Auto-launcher only supported for ORCA, not {qm_program}")
+        return None
+    
+    # Detect ORCA executable using the alias
+    orca_path = detect_orca_executable(orca_alias)
+    if not orca_path:
+        if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+            print(f"  Warning: ORCA executable '{orca_alias}' not found in PATH. Please provide a launcher script.")
+        return None
+    
+    if not _IS_BACKGROUND_MODE and _VERBOSE_LEVEL >= 1:
+        print(f"  Auto-detected ORCA at: {orca_path}")
+    
+    # Create launcher script
+    launcher_path = os.path.join(output_dir, "launcher_orca.sh")
+    
+    # Get ORCA directory (for parallel execution, ORCA needs full path)
+    orca_dir = os.path.dirname(orca_path)
+    
+    # Try to detect OpenMPI directory (commonly in same parent as ORCA or in software folder)
+    orca_base = os.path.dirname(orca_dir)  # e.g., /home/user/software
+    
+    # Look for OpenMPI installation in common locations
+    openmpi_dir = None
+    openmpi_search_patterns = [
+        os.path.join(orca_base, "openmpi*"),
+        os.path.join(orca_base, "OpenMPI*"),
+        "/usr/lib/openmpi*",
+        "/usr/local/lib/openmpi*",
+    ]
+    for pattern in openmpi_search_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            # Sort and take the latest version
+            matches.sort(reverse=True)
+            for match in matches:
+                if os.path.isdir(match):
+                    openmpi_dir = match
+                    break
+            if openmpi_dir:
+                break
+    
+    # Try to detect ORCA version from directory name (e.g., orca_6_1_1 -> 611)
+    orca_version_str = ""
+    orca_dir_name = os.path.basename(orca_dir)
+    version_match = re.search(r'orca[_-]?(\d+)[_.]?(\d+)?[_.]?(\d+)?', orca_dir_name, re.IGNORECASE)
+    if version_match:
+        major = version_match.group(1) or ""
+        minor = version_match.group(2) or ""
+        patch = version_match.group(3) or ""
+        orca_version_str = f"{major}{minor}{patch}"  # e.g., "611"
+    
+    # Build the launcher content using the default template structure
+    if openmpi_dir:
+        openmpi_version = os.path.basename(openmpi_dir)
+        launcher_content = f'''#!/bin/bash
+# Auto-generated launcher script for ORCA
+# Created by ASCEC
+
+# Define the paths to your ORCA installation
+export ORCA_BASE="{orca_base}"
+export ORCA{orca_version_str}_ROOT="{orca_dir}"
+export OPENMPI_ROOT="{openmpi_dir}"
+
+# Save system paths to prevent infinite nesting if sourced multiple times
+_SYSTEM_PATH="$PATH"
+_SYSTEM_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+
+# Prepend ORCA and OpenMPI to the system paths
+export PATH="$ORCA{orca_version_str}_ROOT:$OPENMPI_ROOT/bin:$_SYSTEM_PATH"
+export LD_LIBRARY_PATH="$ORCA{orca_version_str}_ROOT:$OPENMPI_ROOT/lib:$_SYSTEM_LD_LIBRARY_PATH"
+
+###
+'''
+    else:
+        # No OpenMPI found - create simpler launcher
+        launcher_content = f'''#!/bin/bash
+# Auto-generated launcher script for ORCA
+# Created by ASCEC
+
+# Define the paths to your ORCA installation
+export ORCA_BASE="{orca_base}"
+export ORCA{orca_version_str}_ROOT="{orca_dir}"
+
+# Save system paths to prevent infinite nesting if sourced multiple times
+_SYSTEM_PATH="$PATH"
+_SYSTEM_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+
+# Prepend ORCA to the system paths
+export PATH="$ORCA{orca_version_str}_ROOT:$_SYSTEM_PATH"
+export LD_LIBRARY_PATH="$ORCA{orca_version_str}_ROOT:$_SYSTEM_LD_LIBRARY_PATH"
+
+###
+'''
+    
+    try:
+        with open(launcher_path, 'w') as f:
+            f.write(launcher_content)
+        os.chmod(launcher_path, 0o755)
+        return launcher_path
+    except Exception as e:
+        print(f"  Warning: Could not create launcher script: {e}")
+        return None
+
+
+def parse_rescue_method(input_content: str, orca_path: Optional[str] = None,
+                         launcher_content: Optional[str] = None) -> Tuple[str, bool]:
+    """
+    Parse the #rescue(Method) directive from an ORCA input file, or detect
+    the rescue method from the template's method line.
+    
+    Logic:
+    1. If #rescue(method) is specified, use that method
+    2. If #rescue(method,num) is specified, use that method with NumFreq
+    3. If template uses an xTB method, reuse that method with NumFreq
+       (converting to native for ORCA 6.1+ or non-native for 5.x)
+    4. Default: HF-3c with Freq
+    
+    Example input:
+        #rescue(Native-GFN2-xTB)       -> Uses Native-GFN2-xTB with NumFreq (xTB)
+        #rescue(b97-c)                 -> Uses b97-c with Freq
+        #rescue(b97-c,num)             -> Uses b97-c with NumFreq
+        Template: ! Native-GFN2-xTB Opt -> Uses Native-GFN2-xTB with NumFreq
+        Template: ! B98-3c Opt         -> Uses HF-3c with Freq (default)
+    
+    Args:
+        input_content: Content of the ORCA input file
+        orca_path: Optional path to ORCA executable (for version detection)
+        launcher_content: Optional launcher script content (for version detection from ORCA611_ROOT etc.)
+        
+    Returns:
+        Tuple of (rescue_method, use_numfreq) where:
+        - rescue_method: Method string (e.g., "Native-GFN2-xTB", "HF-3c")
+        - use_numfreq: True if NumFreq should be used, False for Freq
+    """
+    # Look for #rescue(method) or #rescue(method,num) pattern
+    match = re.search(r'#rescue\(([^)]+)\)', input_content, re.IGNORECASE)
+    if match:
+        rescue_spec = match.group(1).strip()
+        # Check if ",num" suffix is present for NumFreq
+        if ',' in rescue_spec:
+            parts = [p.strip() for p in rescue_spec.split(',')]
+            method = parts[0]
+            use_numfreq = any(p.lower() in ('num', 'numfreq') for p in parts[1:])
+            # Convert xTB method for ORCA version
+            if is_xtb_method(method):
+                method = convert_xtb_for_orca_version(method, orca_path, launcher_content)
+            return (method, use_numfreq)
+        # No ,num suffix - check if it's an xTB method (auto-enable NumFreq)
+        method = rescue_spec
+        if is_xtb_method(method):
+            method = convert_xtb_for_orca_version(method, orca_path, launcher_content)
+            return (method, True)  # xTB methods use NumFreq
+        return (method, False)  # Non-xTB methods use Freq
+    
+    # No #rescue directive - check if template uses xTB method
+    xtb_method = detect_xtb_in_template(input_content)
+    if xtb_method:
+        # Reuse the template's xTB method, converted for ORCA version
+        converted_method = convert_xtb_for_orca_version(xtb_method, orca_path, launcher_content)
+        return (converted_method, True)  # xTB methods use NumFreq
+    
+    # Default: HF-3c with Freq
+    return ('HF-3c', False)
+
+
+def generate_rescue_hessian_input(template_content: str, rescue_method: str, xyz_coords: str, 
+                                   charge: int = 0, multiplicity: int = 1, 
+                                   nprocs: int = 8, use_numfreq: Optional[bool] = None) -> str:
+    """
+    Generate an ORCA input file for calculating the Hessian with the rescue method.
+    
+    Args:
+        template_content: Original input file content (for extracting settings)
+        rescue_method: Method to use for Hessian calculation (e.g., "Native-GFN2-xTB")
+        xyz_coords: XYZ coordinates block (without first two lines)
+        charge: Molecular charge
+        multiplicity: Spin multiplicity
+        nprocs: Number of processors to use
+        use_numfreq: If True, use NumFreq; if False, use Freq; if None, auto-detect
+        
+    Returns:
+        ORCA input file content for Hessian calculation
+    """
+    # Check if it's a semiempirical/xTB method (no basis set needed)
+    rescue_upper = rescue_method.upper()
+    is_xtb = any(kw in rescue_upper for kw in ['GFN', 'XTB'])
+    is_semiempirical = any(kw in rescue_upper for kw in ['PM3', 'PM6', 'PM7', 'AM1', 'MNDO'])
+    
+    # Determine whether to use NumFreq or Freq
+    # If use_numfreq is explicitly set, use that; otherwise auto-detect
+    if use_numfreq is None:
+        use_numfreq = is_xtb  # xTB methods default to NumFreq
+    
+    lines = []
+    lines.append(f"# Rescue Hessian calculation with {rescue_method}")
+    
+    # Build the method line
+    freq_keyword = "NumFreq" if use_numfreq else "Freq"
+    if is_xtb or is_semiempirical:
+        lines.append(f"! {rescue_method} {freq_keyword}")
+    else:
+        lines.append(f"! {rescue_method} {freq_keyword} TightSCF")
+    
+    lines.append("")
+    
+    # %pal block - use the same nprocs as the template
+    lines.append(f"%pal")
+    lines.append(f"  nprocs {nprocs}")
+    lines.append(f"end")
+    
+    lines.append("")
+    lines.append(f"* xyz {charge} {multiplicity}")
+    lines.append(xyz_coords.strip())
+    lines.append("*")
+    lines.append("")
+    
+    return "\n".join(lines)
+
+
+def enable_hessian_restart(input_path: str, hessian_path: str) -> bool:
+    """
+    Modify an ORCA input file to use a pre-calculated Hessian for the optimization.
+    
+    This function automatically adds inhess read and inhessname directives to the
+    %geom block. If no %geom block exists, one is created. If the user included
+    #inhess read and #inhessname placeholders, they are uncommented.
+    
+    Args:
+        input_path: Path to the ORCA input file to modify
+        hessian_path: Path to the .hess file to read
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
+            content = f.read()
+        
+        # Get basename of hess file
+        hess_basename = os.path.basename(hessian_path)
+        
+        # First, check if placeholders exist and uncomment them
+        has_inhess_placeholder = re.search(r'#\s*inhess\s+read', content, re.IGNORECASE)
+        has_inhessname_placeholder = re.search(r'#\s*inhessname\s+["\'][^"\']*["\']', content, re.IGNORECASE)
+        
+        if has_inhess_placeholder or has_inhessname_placeholder:
+            # User provided placeholders - uncomment them
+            content = re.sub(r'#\s*inhess\s+read', 'inhess read', content, flags=re.IGNORECASE)
+            content = re.sub(
+                r'#\s*inhessname\s+["\'][^"\']*["\']',
+                f'inhessname "{hess_basename}"',
+                content,
+                flags=re.IGNORECASE
+            )
+            # If inhessname wasn't in the file, add it after inhess read
+            if 'inhess read' in content.lower() and 'inhessname' not in content.lower():
+                content = re.sub(
+                    r'(inhess\s+read)',
+                    f'\\1\n  inhessname "{hess_basename}"',
+                    content,
+                    flags=re.IGNORECASE
+                )
+        else:
+            # No placeholders - auto-add to %geom block
+            # Check if %geom block already exists
+            geom_match = re.search(r'(%geom\b.*?)(end)', content, re.IGNORECASE | re.DOTALL)
+            
+            if geom_match:
+                # %geom block exists - add inhess directives at the end
+                geom_block = geom_match.group(1)
+                # Check if inhess already exists (shouldn't, but be safe)
+                if 'inhess' not in geom_block.lower():
+                    new_geom_block = geom_block.rstrip() + f'\n  inhess read\n  inhessname "{hess_basename}"\n'
+                    content = content[:geom_match.start()] + new_geom_block + 'end' + content[geom_match.end():]
+            else:
+                # No %geom block - create one
+                # Insert before the coordinate block (* xyz or * xyzfile)
+                coord_match = re.search(r'^\s*\*\s*(xyz|xyzfile)', content, re.IGNORECASE | re.MULTILINE)
+                if coord_match:
+                    geom_block = f'\n%geom\n  inhess read\n  inhessname "{hess_basename}"\nend\n\n'
+                    content = content[:coord_match.start()] + geom_block + content[coord_match.start():]
+                else:
+                    # Fallback: append to end (before last * if it exists)
+                    # This is a less common case
+                    geom_block = f'\n%geom\n  inhess read\n  inhessname "{hess_basename}"\nend\n'
+                    # Insert before the last section
+                    content += geom_block
+        
+        with open(input_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return True
+    except Exception as e:
+        print(f"  Warning: Could not enable Hessian restart: {e}")
+        return False
+
+
+def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_path: str,
+                                     charge: int = 0, multiplicity: int = 1,
+                                     nprocs: int = 8, verbose: bool = False,
+                                     output_basename: Optional[str] = None,
+                                     use_numfreq: Optional[bool] = None) -> Optional[str]:
+    """
+    Run a rescue Hessian calculation for a structure that failed to converge.
+    
+    Args:
+        xyz_file: Path to XYZ file with the geometry
+        rescue_method: Method to use (e.g., "Native-GFN2-xTB")
+        launcher_path: Path to launcher script
+        charge: Molecular charge
+        multiplicity: Spin multiplicity
+        nprocs: Number of processors
+        verbose: If True, print detailed error information
+        output_basename: Base name for output files (e.g., "opt_conf_8" -> "opt_conf_8_rescue.hess")
+                        If None, derives from xyz_file name
+        use_numfreq: If True, use NumFreq; if False, use Freq; if None, auto-detect
+        
+    Returns:
+        Path to the generated .hess file, or None if failed
+    """
+    # Get working directory and basename
+    working_dir = os.path.dirname(xyz_file)
+    if not working_dir:
+        working_dir = "."
+    # Make working_dir absolute for reliable path handling
+    working_dir = os.path.abspath(working_dir)
+    
+    # Use provided basename or derive from xyz_file
+    if output_basename:
+        basename = output_basename
+    else:
+        basename = os.path.splitext(os.path.basename(xyz_file))[0]
+    
+    # Read XYZ coordinates
+    try:
+        with open(xyz_file, 'r') as f:
+            lines = f.readlines()
+        # Skip first two lines (atom count and comment)
+        xyz_coords = "".join(lines[2:])
+    except Exception as e:
+        print(f"  Error reading XYZ file: {e}")
+        return None
+    
+    # Generate rescue input (pass use_numfreq for explicit control)
+    rescue_input = generate_rescue_hessian_input(
+        "", rescue_method, xyz_coords, charge, multiplicity, nprocs, use_numfreq
+    )
+    
+    # Write rescue input file
+    rescue_inp_path = os.path.join(working_dir, f"{basename}_rescue.inp")
+    rescue_out_path = os.path.join(working_dir, f"{basename}_rescue.out")
+    rescue_hess_path = os.path.join(working_dir, f"{basename}_rescue.hess")
+    
+    with open(rescue_inp_path, 'w') as f:
+        f.write(rescue_input)
+    
+    # Read launcher for environment setup
+    try:
+        with open(launcher_path, 'r') as f:
+            launcher_content = f.read()
+    except Exception as e:
+        print(f"  Error reading launcher: {e}")
+        return None
+    
+    # Extract environment setup from launcher (before ### separator if present)
+    env_setup = launcher_content.split('###')[0]
+    
+    # Ensure shebang is present
+    if not env_setup.strip().startswith('#!'):
+        env_setup = "#!/bin/bash\nset -e\n\n" + env_setup
+    
+    # Find the ORCA root variable name from the launcher (e.g., ORCA611_ROOT, ORCA_ROOT, etc.)
+    # Look for patterns like: export ORCA*_ROOT=... or ORCA*_ROOT=...
+    orca_root_var = None
+    for line in env_setup.split('\n'):
+        # Match patterns like ORCA611_ROOT, ORCA_ROOT, ORCA5_ROOT, etc.
+        match = re.search(r'\b(ORCA\w*_ROOT)\s*=', line)
+        if match:
+            orca_root_var = match.group(1)
+            # Prefer more specific names (e.g., ORCA611_ROOT over ORCA_ROOT)
+            if 'ORCA_ROOT' not in orca_root_var or orca_root_var != 'ORCA_ROOT':
+                break  # Use the specific one
+    
+    # Create run script with full paths
+    temp_script = os.path.join(working_dir, f'_run_rescue_{basename}.sh')
+    with open(temp_script, 'w') as f:
+        f.write(env_setup)
+        f.write("\n\n")
+        f.write(f"cd \"{working_dir}\"\n")
+        # Use the ORCA root variable from the launcher if found, otherwise fall back to PATH
+        if orca_root_var:
+            f.write(f"\"${orca_root_var}/orca\" \"{os.path.basename(rescue_inp_path)}\" > \"{os.path.basename(rescue_out_path)}\" 2>&1\n")
+        else:
+            # Fallback: use orca from PATH
+            f.write(f"orca \"{os.path.basename(rescue_inp_path)}\" > \"{os.path.basename(rescue_out_path)}\" 2>&1\n")
+    
+    os.chmod(temp_script, 0o755)
+    
+    # Run calculation with timeout
+    try:
+        result = subprocess.run(
+            ['bash', temp_script],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+            timeout=3600  # 1 hour timeout for Hessian calculation
+        )
+    except subprocess.TimeoutExpired:
+        print(f"  ✗ Rescue Hessian calculation timed out (1 hour)")
+        if os.path.exists(temp_script):
+            os.remove(temp_script)
+        return None
+    except Exception as e:
+        print(f"  ✗ Rescue Hessian calculation error: {e}")
+        if os.path.exists(temp_script):
+            os.remove(temp_script)
+        return None
+    
+    # Cleanup script
+    if os.path.exists(temp_script):
+        os.remove(temp_script)
+    
+    # Check if Hessian was generated
+    if os.path.exists(rescue_hess_path):
+        # Success - return path silently (calling code will print status)
+        return rescue_hess_path
+    else:
+        # Detailed error reporting
+        error_msg = "  ✗ Rescue Hessian calculation failed"
+        
+        # Check if output file exists and look for errors
+        if os.path.exists(rescue_out_path):
+            try:
+                with open(rescue_out_path, 'r', encoding='utf-8', errors='replace') as f:
+                    out_content = f.read()
+                
+                # Check for common ORCA errors
+                if "ORCA TERMINATED NORMALLY" in out_content:
+                    # Calculation finished but no .hess file - check if freq was actually requested
+                    if ".hess" not in out_content and "VIBRATIONAL FREQUENCIES" not in out_content:
+                        error_msg += " (Freq calculation may not be supported for this method)"
+                elif "ERROR" in out_content.upper():
+                    # Find the error message
+                    error_lines = [line for line in out_content.split('\n') 
+                                   if 'ERROR' in line.upper() or 'ABORTING' in line.upper()]
+                    if error_lines:
+                        error_msg += f"\n    Error: {error_lines[0][:100]}"
+                elif "ORCA finished by error termination" in out_content:
+                    error_msg += " (ORCA error termination)"
+                elif len(out_content) < 100:
+                    error_msg += " (Output file is nearly empty - ORCA may not have started)"
+                    if verbose:
+                        error_msg += f"\n    Launcher check: {result.stderr[:200] if result.stderr else 'No stderr'}"
+            except Exception:
+                pass
+        else:
+            error_msg += " (No output file generated - ORCA may not have been found)"
+            if verbose and result.stderr:
+                error_msg += f"\n    stderr: {result.stderr[:200]}"
+        
+        print(error_msg)
+        return None
 
 
 def extract_orca_energy_opi(output_path: str) -> Optional[float]:
@@ -6492,6 +7904,19 @@ def parse_orca_output(filepath):
     else:
         results['energy'] = None
 
+    # Extract optimization cycles (AFTER XXX CYCLES)
+    cycles_match = re.search(r"\(AFTER\s+(\d+)\s+CYCLES\)", content)
+    if cycles_match:
+        results['cycles'] = int(cycles_match.group(1))
+    else:
+        results['cycles'] = None
+
+    # Check if optimization converged
+    if "THE OPTIMIZATION HAS CONVERGED" in content:
+        results['converged'] = True
+    else:
+        results['converged'] = False
+
     # Extract total run time
     time_match = re.search(r"TOTAL RUN TIME:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+)\s*seconds\s*(\d+)\s*msec", content)
     if time_match:
@@ -6614,13 +8039,21 @@ def summarize_calculations(directory=".", file_types=None):
             'total_time': 0,
             'min_time': None,
             'max_time': None,
+            'total_cycles': 0,
+            'min_cycles': None,
+            'max_cycles': None,
+            'cycles_count': 0,  # Count of jobs with cycle data
+            'non_converged': 0,  # Count of non-converged optimizations
         }
 
-        # Find files of this type
+        # Find files of this type (exclude rescue files like _rescue.out, _rescue.log)
         found_files = []
         for root, _, files in os.walk(directory):
             for filename in files:
                 if filename.endswith(file_extension):
+                    # Skip rescue files - they are intermediate files from redo workflow
+                    if '_rescue' in filename:
+                        continue
                     found_files.append(os.path.join(root, filename))
         
         if not found_files:
@@ -6648,6 +8081,15 @@ def summarize_calculations(directory=".", file_types=None):
                                 all_results['min_time'] = results['time']
                             if all_results['max_time'] is None or results['time'] > all_results['max_time']:
                                 all_results['max_time'] = results['time']
+                        if results.get('cycles') is not None:
+                            all_results['total_cycles'] += results['cycles']
+                            all_results['cycles_count'] += 1
+                            if all_results['min_cycles'] is None or results['cycles'] < all_results['min_cycles']:
+                                all_results['min_cycles'] = results['cycles']
+                            if all_results['max_cycles'] is None or results['cycles'] > all_results['max_cycles']:
+                                all_results['max_cycles'] = results['cycles']
+                        if results.get('converged') is False:
+                            all_results['non_converged'] += 1
                 except Exception as e:
                     print(f"Error processing file: {e}")
         
@@ -6656,19 +8098,26 @@ def summarize_calculations(directory=".", file_types=None):
         # Write summary file with collected results
         with open(summary_file, 'w', encoding='utf-8') as outfile:
 
-            # Sort the job summaries by total_time
-            job_summaries.sort(key=lambda x: x.get('time') or float('inf'))
+            # Sort the job summaries by time, then by cycles
+            job_summaries.sort(key=lambda x: (x.get('time') or float('inf'), x.get('cycles') or float('inf')))
 
             # Write summary
             outfile.write("=" * 40 + "\n")
             outfile.write("Summary of all calculations:\n")
             outfile.write(f"  Number of jobs: {all_results['job_count']}\n")
+            outfile.write("-" * 40 + "\n")
             if all_results['total_time']:
                 outfile.write(f"  Total execution time: {format_total_time(all_results['total_time'])}\n")
                 outfile.write(f"  Mean execution time: {format_mean_time(all_results['total_time'] / all_results['job_count'])}\n")
                 outfile.write(f"  Shortest execution time: {format_time_summary(all_results['min_time'], include_days=False)}\n")
                 outfile.write(f"  Longest execution time: {format_time_summary(all_results['max_time'], include_days=False)}\n")
                 outfile.write(f"  Total wall time: {format_wall_time(all_results['total_time'])}\n")
+            outfile.write("-" * 40 + "\n")
+            if all_results['cycles_count'] > 0:
+                outfile.write(f"  Mean cycles: {all_results['total_cycles'] // all_results['cycles_count']}\n")
+                outfile.write(f"  Min cycles: {all_results['min_cycles']}\n")
+                outfile.write(f"  Max cycles: {all_results['max_cycles']}\n")
+                outfile.write(f"  Non-converged: {all_results['non_converged']}\n")
 
             outfile.write("=" * 40 + "\n\n")
 
@@ -6680,11 +8129,13 @@ def summarize_calculations(directory=".", file_types=None):
                 else:  # gaussian
                     outfile.write(f"=> {job_index}. {result['input_file']}.log\n")
                 job_index += 1
-                for key, value in result.items():
-                    if key == 'time' and value is not None:
-                        outfile.write(f"  time = {format_time_summary(value, include_days=False)}\n")
-                    elif key != 'input_file':
-                        outfile.write(f"  {key} = {value}\n")
+                # Write in specific order: energy, cycles, time
+                if 'energy' in result and result['energy'] is not None:
+                    outfile.write(f"  energy = {result['energy']}\n")
+                if 'cycles' in result and result['cycles'] is not None:
+                    outfile.write(f"  cycles = {result['cycles']}\n")
+                if 'time' in result and result['time'] is not None:
+                    outfile.write(f"  time = {format_time_summary(result['time'], include_days=False)}\n")
                 outfile.write("\n")
 
         print(f"Summary written to {summary_file}")
@@ -7055,9 +8506,9 @@ def collect_out_files_with_tracking(reuse_existing=False, target_sim_folder=None
             # Look for any of the possible folder patterns
             existing_orca_dirs = glob.glob(os.path.join(similarity_dir, f"orca_out_{num_files}*"))
             existing_gaussian_dirs = glob.glob(os.path.join(similarity_dir, f"gaussian_out_{num_files}*"))
-            existing_calc_dirs = glob.glob(os.path.join(similarity_dir, f"calc_out_{num_files}*"))
+            existing_opt_dirs = glob.glob(os.path.join(similarity_dir, f"calc_out_{num_files}*"))
             existing_orca_dirs.extend(existing_gaussian_dirs)
-            existing_orca_dirs.extend(existing_calc_dirs)
+            existing_orca_dirs.extend(existing_opt_dirs)
             
             if existing_orca_dirs:
                 # Use the first existing folder (should be *_out_N, not *_out_N_1)
@@ -7143,6 +8594,25 @@ def parse_gaussian_output(filepath):
         nproc_match = re.search(r"%NProcShared\s*=\s*(\d+)", content, re.IGNORECASE)
         if nproc_match:
             nproc = int(nproc_match.group(1))
+
+    # Extract optimization cycles (last "Optimization completed" or SCF cycles count)
+    # Gaussian uses "-- Stationary point found" after geometry optimization
+    cycles_match = re.search(r"Step number\s+(\d+)\s+out of", content)
+    if cycles_match:
+        results['cycles'] = int(cycles_match.group(1))
+    else:
+        # Alternative: count number of optimization steps
+        opt_steps = re.findall(r"Step number\s+(\d+)", content)
+        if opt_steps:
+            results['cycles'] = int(opt_steps[-1])  # Take the last step number
+        else:
+            results['cycles'] = None
+
+    # Check if optimization converged
+    if "Stationary point found" in content or "Optimization completed" in content:
+        results['converged'] = True
+    else:
+        results['converged'] = False
 
     # Extract all job cpu times and sum them (for multi-step calculations)
     time_matches = re.findall(r"Job cpu time:\s*(\d+)\s*days\s*(\d+)\s*hours\s*(\d+)\s*minutes\s*(\d+\.\d+)\s*seconds", content)
@@ -7446,54 +8916,61 @@ class WorkflowContext:
     input_file: str = ""
     num_replicas: int = 0
     annealing_dirs: List[str] = dataclasses.field(default_factory=list)
-    calculation_dir: str = ""
-    similarity_dir: str = ""
     optimization_dir: str = ""
+    similarity_dir: str = ""
+    refinement_dir: str = ""
     critical_count: int = 0
     skipped_count: int = 0
     total_structures: int = 0
     current_try: int = 1
     max_tries: int = 3
-    calc_stage_number: int = 0  # Track which calculation stage (1 or 2)
+    opt_stage_number: int = 0  # Track which optimization stage (1 or 2)
     cache_file: str = ""  # Protocol-specific cache filename
-    current_stage_key: str = ""  # Current stage key (e.g., "calculation_2")
+    current_stage_key: str = ""  # Current stage key (e.g., "optimization_2")
     similarity_args: List[str] = dataclasses.field(default_factory=list)  # Store all similarity args
     is_workflow: bool = False  # True when running in workflow mode (with , or then separators)
-    max_attempts_per_calc: int = 5  # Maximum retry attempts per individual calculation/optimization (set by --attempt flag)
+    max_launch_retries: int = 10  # Hardcoded retry attempts for launch failures only (instant crashes)
     ascec_parallel_cores: int = 0  # Number of cores for parallel processing (0 = auto-detect, capped at 12)
     # Exclude patterns for calc and opt stages
-    calc_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'calc1': [2, 5, 6, 7, 8, 9]}
-    opt_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'opt1': [2, 5, 6, 7, 8, 9]}
+    opt_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'calc1': [2, 5, 6, 7, 8, 9]}
+    ref_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'opt1': [2, 5, 6, 7, 8, 9]}
+    # QM program alias from input.in line 9 (e.g., "orca", "g16")
+    qm_alias: str = "orca"  # Default to "orca" for ORCA installations
     # Data capture attributes for protocol summary
     annealing_box_size: Optional[float] = None
     annealing_packing: Optional[float] = None
-    calc_xyz_source: Optional[str] = None
-    calc_completed: Optional[int] = None
-    calc_total: Optional[int] = None
-    calc_sim_folder: Optional[str] = None
-    sim_folder: Optional[str] = None
-    sim_motifs_created: Optional[int] = None
-    opt_motifs_source: Optional[str] = None
+    opt_xyz_source: Optional[str] = None
     opt_completed: Optional[int] = None
     opt_total: Optional[int] = None
     opt_sim_folder: Optional[str] = None
+    sim_folder: Optional[str] = None
+    sim_motifs_created: Optional[int] = None
+    ref_motifs_source: Optional[str] = None
+    ref_completed: Optional[int] = None
+    ref_total: Optional[int] = None
+    ref_sim_folder: Optional[str] = None
     recalculated_files: Optional[List[str]] = None  # List of basenames for files being recalculated in redo
     pending_similarity_folder: Optional[str] = None  # Folder set by calc/opt to be used by next similarity stage
     use_skipped_threshold: bool = False  # True if --skipped flag is used, False if --critical (default)
+    verbose_level: int = 0  # Verbosity level (0=minimal, 1=verbose, 2=extra, 3=max)
+    embedded_templates: Dict[str, str] = dataclasses.field(default_factory=dict)  # Mapping of template names to file paths
+    update_progress: Any = None  # Lambda function to update progress bar (set at runtime)
+    completed_stage_count: int = 0  # Number of completed stages (for progress tracking)
+    total_stages: int = 0  # Total number of stages in workflow
     
     def get_previous_stage_output_dir(self, stage_type: str) -> Optional[str]:
         """
         Get output directory from the most recent completed stage of given type.
         
         Args:
-            stage_type: Stage type prefix (e.g., 'r', 'calculation', 'similarity', 'optimization')
+            stage_type: Stage type prefix (e.g., 'r', 'optimization', 'similarity', 'refinement')
         
         Returns:
             Output directory path or None if not found
             
         Example:
             context.get_previous_stage_output_dir('similarity')  # Returns 'similarity/motifs'
-            context.get_previous_stage_output_dir('calculation')  # Returns 'calculation'
+            context.get_previous_stage_output_dir('optimization')  # Returns 'optimization'
         """
         if not self.cache_file:
             return None
@@ -7516,13 +8993,13 @@ class WorkflowContext:
         Get working directory for a specific stage by its key.
         
         Args:
-            stage_key: Exact stage key (e.g., 'calculation_1', 'similarity_2')
+            stage_key: Exact stage key (e.g., 'optimization_1', 'similarity_2')
         
         Returns:
             Working directory path or None if not found
             
         Example:
-            context.get_stage_working_dir('calculation_1')  # Returns 'calculation'
+            context.get_stage_working_dir('optimization_1')  # Returns 'optimization'
         """
         if not self.cache_file:
             return None
@@ -7541,7 +9018,7 @@ class WorkflowContext:
         Get input directory from the most recent completed stage of given type.
         
         Args:
-            stage_type: Stage type prefix (e.g., 'r', 'calculation', 'similarity', 'optimization')
+            stage_type: Stage type prefix (e.g., 'r', 'optimization', 'similarity', 'refinement')
         
         Returns:
             Input directory path or None if not found
@@ -7573,24 +9050,25 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
     Supports both space-separated and comma-attached formats.
     
     Examples:
-        ascec04 at_annealing.in , r3 , calc --redo=3 --retry=10 preopt.inp launcher.sh , similarity --th=2
-        ascec04 at_annealing.in, r3, calc --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
-        ascec04 .in, r3 --retry=5, calc -c --redo=3 --retry=10 preopt.inp launcher.sh, similarity --th=2
+        ascec04 at_annealing.in , r3 , calc --redo=3 preopt.inp launcher.sh , similarity --th=2
+        ascec04 at_annealing.in, r3, calc --redo=3 preopt.inp launcher.sh, similarity --th=2
+        ascec04 .in, r3, calc -c --redo=3 preopt.inp launcher.sh, similarity --th=2
         
         With pause after stage (using dot separator):
-        ascec04 .in, r3, calc --redo=3 --retry=10 preopt.inp launcher.sh. similarity --th=2
+        ascec04 .in, r3, calc --redo=3 preopt.inp launcher.sh. similarity --th=2
             (dot after launcher.sh means pause after calc stage for manual review)
         
         With auto-selection flags:
-        ascec04 at_annealing.in , r3 , calc -a --redo=3 --retry=10 preopt.inp launcher.sh
+        ascec04 at_annealing.in , r3 , calc -a --redo=3 preopt.inp launcher.sh
             (-a: Process all result_*.xyz files separately)
-        ascec04 at_annealing.in , r3 , calc -c --redo=3 --retry=10 preopt.inp launcher.sh
+        ascec04 at_annealing.in , r3 , calc -c --redo=3 preopt.inp launcher.sh
             (-c: Combine all result_*.xyz into combined_r{N}.xyz first, then process)
         
         Flag meanings:
-            --retry=N: Retry each individual calculation/optimization up to N times
-            --retry: Retry until all succeed (unlimited attempts)
             --redo=N: Redo entire stage (calc+similarity or opt+similarity) up to N times
+            
+        Note: Launch failures (instant crashes) are automatically retried up to 10 times.
+        Once a calculation starts running normally, it will not be retried regardless of exit code.
     
     Returns:
         List of stage dictionaries with 'type', 'args', and optional 'pause_after' keys
@@ -7600,6 +9078,10 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
     pause_after_current = False
     
     for arg in args:
+        # Skip blank/empty arguments (allows blank lines in protocol)
+        if not arg or not arg.strip():
+            continue
+            
         # Handle comma or dot attached to argument (e.g., "r3," or "launcher.sh.")
         has_comma = ',' in arg and arg != ','
         has_dot = '.' in arg and not arg.startswith('.') and not arg.endswith(('.inp', '.sh', '.xyz', '.in'))
@@ -7683,10 +9165,10 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
             stage_dict['pause_after'] = True
         return stage_dict
     
-    # Calculation stage: calc ...
-    elif first_arg == 'calc':
+    # Optimization stage: opt ...
+    elif first_arg == 'opt':
         stage_dict = {
-            'type': 'calculation',
+            'type': 'optimization',
             'args': stage_args[1:]
         }
         if pause_after:
@@ -7703,9 +9185,9 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
             stage_dict['pause_after'] = True
         return stage_dict
     
-    # Optimization stage: opt ...
-    elif first_arg == 'opt':
-        # Parse opt stage: opt [flags] template_file launcher_file
+    # Refinement stage: ref ...
+    elif first_arg == 'ref':
+        # Parse ref stage: opt [flags] template_file launcher_file
         # Find template and launcher (non-flag arguments)
         remaining_args = stage_args[1:]
         flags = []
@@ -7722,7 +9204,7 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
         launcher_sh = files[1] if len(files) >= 2 else None
         
         stage_dict = {
-            'type': 'optimization',
+            'type': 'refinement',
             'args': flags,  # Only flags, not file paths
             'template_inp': template_inp,
             'launcher_sh': launcher_sh
@@ -7874,7 +9356,7 @@ def parse_similarity_output(similarity_dir: str) -> Tuple[int, int]:
     
     return (critical_count, skipped_count)
 
-def get_critical_count(calc_dir: str) -> int:
+def get_critical_count(opt_dir: str) -> int:
     """
     Count files with imaginary frequencies in calculation directory.
     
@@ -7884,7 +9366,7 @@ def get_critical_count(calc_dir: str) -> int:
     critical_count = 0
     
     # Look for ORCA (.out) and Gaussian (.log) output files
-    for root, dirs, files in os.walk(calc_dir):
+    for root, dirs, files in os.walk(opt_dir):
         for file in files:
             if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
@@ -7899,7 +9381,7 @@ def get_critical_count(calc_dir: str) -> int:
     
     return critical_count
 
-def get_critical_files_list(calc_dir: str) -> List[str]:
+def get_critical_files_list(opt_dir: str) -> List[str]:
     """
     Get list of files with imaginary frequencies.
     
@@ -7908,7 +9390,7 @@ def get_critical_files_list(calc_dir: str) -> List[str]:
     """
     critical_files = []
     
-    for root, dirs, files in os.walk(calc_dir):
+    for root, dirs, files in os.walk(opt_dir):
         for file in files:
             if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
@@ -7922,7 +9404,7 @@ def get_critical_files_list(calc_dir: str) -> List[str]:
     
     return critical_files
 
-def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> int:
+def handle_imaginary_frequencies(critical_files: List[str], opt_dir: str) -> int:
     """
     Process structures with imaginary frequencies:
     - For 1 imaginary frequency: Use orca_pltvib to displace along the mode
@@ -7930,7 +9412,7 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
     
     Args:
         critical_files: List of output files with imaginary frequencies
-        calc_dir: Calculation directory
+        opt_dir: Calculation directory
         
     Returns:
         Number of structures successfully processed
@@ -7946,18 +9428,18 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
             
             if imag_count == 1:
                 # Single imaginary frequency: displace along the mode
-                if displace_along_imaginary_mode(out_file, calc_dir):
+                if displace_along_imaginary_mode(out_file, opt_dir):
                     processed += 1
                     print(f"      Displaced structure created")
                 else:
                     print(f"      Could not create displaced structure")
             elif imag_count >= 2:
-                # Multiple imaginary frequencies: extract from final geometry
-                if extract_final_geometry(out_file, calc_dir):
+                # Multiple imaginary frequencies: displace along highest (most negative) mode
+                if displace_along_imaginary_mode(out_file, opt_dir, use_highest_mode=True):
                     processed += 1
-                    print(f"      Final geometry extracted for re-optimization")
+                    print(f"      Displaced structure created (highest imaginary mode)")
                 else:
-                    print(f"      Could not extract final geometry")
+                    print(f"      Could not create displaced structure")
         except Exception as e:
             print(f"      Error processing {os.path.basename(out_file)}: {e}")
     
@@ -7991,7 +9473,7 @@ def count_imaginary_frequencies(out_file: str) -> int:
     except:
         return 0
 
-def displace_along_imaginary_mode(out_file: str, calc_dir: str):
+def displace_along_imaginary_mode(out_file: str, opt_dir: str, use_highest_mode: bool = False):
     """
     Create displaced structure along imaginary mode.
     
@@ -8002,7 +9484,9 @@ def displace_along_imaginary_mode(out_file: str, calc_dir: str):
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory (unused, kept for compatibility)
+        opt_dir: Calculation directory (unused, kept for compatibility)
+        use_highest_mode: If True, displace along the highest (most negative) imaginary mode.
+                         If False (default), displace along the first imaginary mode.
         
     Returns:
         List of XYZ lines if successful, None otherwise
@@ -8016,18 +9500,18 @@ def displace_along_imaginary_mode(out_file: str, calc_dir: str):
         
         if is_orca:
             # ORCA: Parse normal modes directly from output file
-            return displace_orca_imaginary_mode(out_file)
+            return displace_orca_imaginary_mode(out_file, use_highest_mode=use_highest_mode)
         
         elif is_gaussian:
             # Gaussian: Manually displace along imaginary mode
-            return displace_gaussian_imaginary_mode(out_file)
+            return displace_gaussian_imaginary_mode(out_file, use_highest_mode=use_highest_mode)
         
         return None
         
     except Exception as e:
         return None
 
-def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5):
+def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5, use_highest_mode: bool = False):
     """
     Manually displace geometry along imaginary mode for ORCA output.
     Extracts geometry and normal mode directly from output, then creates displaced structure.
@@ -8042,6 +9526,8 @@ def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5
         displacement_factor: Scaling factor for displacement (default: 0.5 Angstrom)
                            This is larger than Gaussian default because ORCA modes
                            are mass-weighted and normalized
+        use_highest_mode: If True, use the mode with the most negative frequency.
+                         If False (default), use the first imaginary mode found.
     
     Returns:
         List of lines in XYZ format (including header) if successful, None otherwise
@@ -8074,13 +9560,12 @@ def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5
         if not geometry:
             return False
         
-        # Step 2: Find imaginary frequency mode number
+        # Step 2: Find ALL imaginary frequency modes
         # Look in VIBRATIONAL FREQUENCIES section for negative frequencies
-        imaginary_mode_idx = None
-        imaginary_freq = None
+        imaginary_modes = []  # List of (mode_idx, freq_val)
         for i, line in enumerate(lines):
             if 'VIBRATIONAL FREQUENCIES' in line:
-                # Search next 200 lines for imaginary mode
+                # Search next 200 lines for imaginary modes
                 for j in range(i, min(i+200, len(lines))):
                     # Check for frequency line (handle both cm-1 and cm**-1)
                     if 'cm-1' in lines[j] or 'cm**-1' in lines[j]:
@@ -8094,15 +9579,22 @@ def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5
                                 
                                 # Check if negative
                                 if freq_val < 0:
-                                    imaginary_mode_idx = int(parts[0].strip())
-                                    imaginary_freq = freq_val
-                                    break
+                                    mode_idx = int(parts[0].strip())
+                                    imaginary_modes.append((mode_idx, freq_val))
                             except (ValueError, IndexError):
                                 continue
                 break
         
-        if imaginary_mode_idx is None:
+        if not imaginary_modes:
             return False
+        
+        # Select which imaginary mode to use
+        if use_highest_mode:
+            # Use the mode with the most negative frequency (lowest value)
+            imaginary_mode_idx, imaginary_freq = min(imaginary_modes, key=lambda x: x[1])
+        else:
+            # Use the first imaginary mode found
+            imaginary_mode_idx, imaginary_freq = imaginary_modes[0]
         
         # Step 3: Find NORMAL MODES section and extract displacement vectors for imaginary mode
         mode_section_start = None
@@ -8200,7 +9692,7 @@ def displace_orca_imaginary_mode(out_file: str, displacement_factor: float = 0.5
     except Exception as e:
         return None
 
-def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float = 0.3):
+def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float = 0.3, use_highest_mode: bool = False):
     """
     Manually displace geometry along imaginary mode for Gaussian output.
     Extracts geometry and normal mode, then creates displaced structure.
@@ -8208,6 +9700,8 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
     Args:
         out_file: Gaussian output file (.log)
         displacement_factor: Scaling factor for displacement (default: 0.3)
+        use_highest_mode: If True, use the mode with the most negative frequency.
+                         If False (default), use the first imaginary mode found.
     
     Returns:
         List of lines in XYZ format (including header) if successful, None otherwise
@@ -8246,23 +9740,26 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
         if not geometry:
             return False
         
-        # Extract imaginary frequency mode (first mode with negative frequency)
-        mode_start = None
-        mode_column = 0
+        # Find ALL imaginary frequency modes
+        # Store as list of (line_index, column_index, frequency_value)
+        imaginary_modes = []
         for i, line in enumerate(lines):
             if 'Frequencies --' in line:
                 freqs = [float(x) for x in line.split()[2:]]
-                if any(f < 0 for f in freqs):
-                    # Found section with imaginary frequency
-                    # Find the index of the negative frequency
-                    neg_idx = next((j for j, f in enumerate(freqs) if f < 0), None)
-                    if neg_idx is not None:
-                        mode_start = i
-                        mode_column = neg_idx
-                        break
+                for col_idx, freq_val in enumerate(freqs):
+                    if freq_val < 0:
+                        imaginary_modes.append((i, col_idx, freq_val))
         
-        if mode_start is None:
+        if not imaginary_modes:
             return False
+        
+        # Select which mode to use
+        if use_highest_mode:
+            # Use the mode with the most negative frequency
+            mode_start, mode_column, selected_freq = min(imaginary_modes, key=lambda x: x[2])
+        else:
+            # Use the first imaginary mode found
+            mode_start, mode_column, selected_freq = imaginary_modes[0]
         
         # Extract displacement vectors for this mode
         displacements = []
@@ -8300,7 +9797,7 @@ def displace_gaussian_imaginary_mode(out_file: str, displacement_factor: float =
         # Return displaced structure as XYZ lines (no file creation)
         xyz_lines = []
         xyz_lines.append(f"{len(displaced_geometry)}\n")
-        xyz_lines.append(f"Displaced along imaginary mode (factor={displacement_factor})\n")
+        xyz_lines.append(f"Displaced along imaginary mode ({selected_freq:.2f} cm-1, factor={displacement_factor})\n")
         for symbol, x, y, z in displaced_geometry:
             xyz_lines.append(f"{symbol:2s}  {x:15.8f}  {y:15.8f}  {z:15.8f}\n")
         
@@ -8346,7 +9843,7 @@ def format_ordinal(n):
     return f"{n}{suffix}"
 
 
-def extract_final_geometry(out_file: str, calc_dir: str):
+def extract_final_geometry(out_file: str, opt_dir: str):
     """
     Extract final optimized geometry from output file.
     
@@ -8357,7 +9854,7 @@ def extract_final_geometry(out_file: str, calc_dir: str):
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory (unused, kept for compatibility)
+        opt_dir: Calculation directory (unused, kept for compatibility)
         
     Returns:
         List of XYZ lines if successful, None otherwise
@@ -8503,7 +10000,7 @@ def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_nu
        cache['stages'][next_stage_key].get('status') != 'completed':
         return True, stage_idx
     
-    # Check if calculation stage has redo parameters
+    # Check if optimization stage has redo parameters
     calc_args = stage['args']
     max_critical = None
     max_skipped = None
@@ -8545,12 +10042,12 @@ def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_nu
         threshold_met = critical_pct <= max_critical
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
-            print(f"  Invalidating cache and re-running calculation with redo logic...")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
     elif max_skipped is not None:
         threshold_met = skipped_pct <= max_skipped
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
-            print(f"  Invalidating cache and re-running calculation with redo logic...")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
     
     if not threshold_met:
         # Remove both calc and similarity from cache
@@ -8576,7 +10073,7 @@ def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num
                                    stages: List[Dict[str, Any]], stage_idx: int,
                                    cache_file: str) -> Tuple[bool, int]:
     """
-    Validate cached optimization+similarity results against thresholds.
+    Validate cached refinement+similarity results against thresholds.
     
     Returns:
         Tuple of (should_skip, new_stage_idx)
@@ -8597,7 +10094,7 @@ def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num
        cache['stages'][next_stage_key].get('status') != 'completed':
         return True, stage_idx
     
-    # Check if optimization stage has redo parameters
+    # Check if refinement stage has redo parameters
     opt_args = stage['args']
     max_critical = None
     max_skipped = None
@@ -8639,12 +10136,12 @@ def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num
         threshold_met = critical_pct <= max_critical
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
-            print(f"  Invalidating cache and re-running optimization with redo logic...")
+            print(f"  Invalidating cache and re-running refinement with redo logic...")
     elif max_skipped is not None:
         threshold_met = skipped_pct <= max_skipped
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
-            print(f"  Invalidating cache and re-running optimization with redo logic...")
+            print(f"  Invalidating cache and re-running refinement with redo logic...")
     
     if not threshold_met:
         # Remove both opt and similarity from cache
@@ -8668,7 +10165,9 @@ def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num
 
 # pyright: reportGeneralTypeIssues=false
 def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]], 
-                           use_cache: bool = False, protocol_text: str = "") -> int:
+                           use_cache: bool = False, protocol_text: str = "",
+                           verbose_level: int = 0,
+                           embedded_templates: Optional[Dict[str, str]] = None) -> int:
     """
     Execute all workflow stages in sequence with context passing.
     
@@ -8677,15 +10176,40 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         stages: List of stage dictionaries from parse_workflow_stages()
         use_cache: If True, use protocol_cache for resumability
         protocol_text: Original protocol text from .in file for summary
+        verbose_level: Verbosity level (0=minimal, 1=verbose, 2=extra, 3=max)
+        embedded_templates: Dict mapping template names to file paths
         
     Returns:
         0 on success, non-zero on failure
     """
+    global _IS_BACKGROUND_MODE, _VERBOSE_LEVEL, _PROGRESS_LINES, _WORKFLOW_START_TIME
+    
+    # Set global verbose level for helper functions
+    _VERBOSE_LEVEL = verbose_level
+    _PROGRESS_LINES = 0
+    
+    # Detect background mode: check if stdout is a terminal AND if process is in foreground
+    _IS_BACKGROUND_MODE = False
+    if not sys.stdout.isatty():
+        _IS_BACKGROUND_MODE = True
+    else:
+        try:
+            if os.getpgrp() != os.tcgetpgrp(sys.stdout.fileno()):
+                _IS_BACKGROUND_MODE = True
+        except (OSError, AttributeError):
+            pass
+    
+    _WORKFLOW_START_TIME = time.time()
+    
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
+    context.verbose_level = verbose_level
+    context.embedded_templates = embedded_templates or {}  # Store templates for stage lookup
     
-    # Read ASCEC parallel cores from input file (line 11, second value)
-    # Default to 0 (auto-detect) if not specified or if input file doesn't exist
+    # Read configuration from input file
+    # - Line 9: QM program index and alias (e.g., "2 orca")
+    # - Line 11: nprocs (QM calculations and ASCEC evaluation)
+    # Default to reasonable values if not specified or if input file doesn't exist
     try:
         if os.path.exists(input_file):
             with open(input_file, 'r') as f:
@@ -8696,6 +10220,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if not line or line.startswith('#'):
                         continue
                     config_line_count += 1
+                    
+                    if config_line_count == 9:  # Line 9: QM Program Index & Alias
+                        parts = line.split('#')[0].strip().split()
+                        if len(parts) > 1:
+                            # Second value is the QM program alias (e.g., "orca", "g16")
+                            context.qm_alias = parts[1]
+                        elif len(parts) == 1:
+                            # Only index provided, use default based on index
+                            qm_idx = int(parts[0])
+                            context.qm_alias = "orca" if qm_idx == 2 else "g16" if qm_idx == 1 else "orca"
+                    
                     if config_line_count == 11:  # Line 11: nprocs
                         parts = line.split('#')[0].strip().split()
                         if len(parts) > 1:
@@ -8707,6 +10242,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         break
     except (ValueError, IndexError, IOError):
         context.ascec_parallel_cores = 0  # Default to auto-detect if parsing fails
+        context.qm_alias = "orca"  # Default alias
     
     # Use protocol-specific cache filename with random seed to support parallel protocols
     # First, check if there's an existing protocol cache file for THIS input file
@@ -8720,7 +10256,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             test_cache = load_protocol_cache(cache_path)
             if test_cache and test_cache.get('input_file') == input_file:
                 cache_file = cache_path
-                print(f"Found existing protocol cache: {cache_file} (for {input_file})")
+                if not _IS_BACKGROUND_MODE and verbose_level >= 1:
+                    print(f"Found existing protocol cache: {cache_file} (for {input_file})")
                 break
     
     if cache_file is None:
@@ -8728,9 +10265,130 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         import random
         protocol_seed = random.randint(100000, 999999)
         cache_file = f"protocol_{protocol_seed}.pkl"
-        print(f"Creating new protocol cache: {cache_file} (for {input_file})")
+        if not _IS_BACKGROUND_MODE and verbose_level >= 1:
+            print(f"Creating new protocol cache: {cache_file} (for {input_file})")
     
     context.cache_file = cache_file  # Store in context for use by stages
+    
+    # Try to acquire lock to prevent duplicate runs
+    lock_acquired, lock_msg = _acquire_lock(input_file, cache_file)
+    if not lock_acquired:
+        if not _IS_BACKGROUND_MODE:
+            print(f"\n" + "-" * 60)
+            print(f"Cannot start: Another instance is running")
+            print("-" * 60)
+            print(f"  {lock_msg}")
+            print(f"\nUse 'ascec status' to see active runs")
+            print("-" * 60 + "\n")
+        return 1
+    
+    # Wrapper function that respects background mode
+    def _wprint(msg: str, level: int = 0):
+        """Print only if not in background mode and verbosity level is sufficient."""
+        if _IS_BACKGROUND_MODE:
+            return
+        if verbose_level >= level:
+            print(msg)
+    
+    # Print header (only in non-background mode)
+    _print_workflow_header(verbose_level)
+    
+    # Wrap main logic in try/finally to ensure lock release
+    try:
+        return _execute_workflow_main(
+            input_file, stages, use_cache, protocol_text, verbose_level,
+            context, cache_file, _wprint
+        )
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        _add_to_history(input_file, cache_file, "interrupted", _WORKFLOW_START_TIME)
+        _print_workflow_completion("interrupted", _WORKFLOW_START_TIME, input_file, cache_file)
+        return 1
+    except Exception as e:
+        if not _IS_BACKGROUND_MODE:
+            print(f"\nError: {e}")
+            traceback.print_exc()
+        _add_to_history(input_file, cache_file, "interrupted", _WORKFLOW_START_TIME)
+        return 1
+    finally:
+        _release_lock(input_file)
+
+
+def _execute_workflow_main(input_file: str, stages: List[Dict[str, Any]],
+                           use_cache: bool, protocol_text: str, verbose_level: int,
+                           context: 'WorkflowContext', cache_file: str,
+                           _wprint) -> int:
+    """Internal workflow execution (separated for lock management)."""
+    global _WORKFLOW_START_TIME
+    
+    # Map stage types to display names
+    stage_display_map: Dict[str, str] = {
+        'replication': 'Annealing',
+        'optimization': 'Optimization',
+        'similarity': 'Similarity',
+        'refinement': 'Refinement'
+    }
+    
+    def _print_progress_header(completed_stages: int, total_stages: int, current_stage: str = "", 
+                                sub_progress: str = ""):
+        """Print the concise progress view for verbose_level 0 with in-place updates."""
+        global _PROGRESS_LINES
+        
+        if _IS_BACKGROUND_MODE or verbose_level >= 1:
+            return  # Use verbose output instead
+        
+        # If we've printed before, move cursor up to overwrite
+        if _PROGRESS_LINES > 0:
+            # Move cursor up N lines and clear each line
+            sys.stdout.write(f"\033[{_PROGRESS_LINES}A")  # Move up
+            for _ in range(_PROGRESS_LINES):
+                sys.stdout.write("\033[2K\033[1B")  # Clear line, move down
+            sys.stdout.write(f"\033[{_PROGRESS_LINES}A")  # Move back up
+            sys.stdout.flush()
+        
+        # Build stage status line - show only completed + current stage
+        stage_lines = []
+        for i, s in enumerate(stages):
+            stage_num = i + 1
+            display_name = stage_display_map.get(s['type'], s['type'].capitalize())
+            
+            if stage_num < completed_stages + 1:
+                # Completed stages
+                stage_lines.append(f"[{stage_num}/{total_stages}] {display_name} ✓")
+            elif stage_num == completed_stages + 1:
+                # Current stage (in progress)
+                if sub_progress:
+                    stage_lines.append(f"[{stage_num}/{total_stages}] {display_name} {sub_progress}")
+                else:
+                    stage_lines.append(f"[{stage_num}/{total_stages}] {display_name} ...")
+                break  # Don't show pending stages
+        
+        # Calculate percentage
+        pct = int((completed_stages / total_stages) * 100) if total_stages > 0 else 0
+        
+        # Progress bar
+        bar = _render_progress_bar(completed_stages, total_stages, width=30)
+        
+        # Build output lines
+        output_lines = [
+            "-" * 60,
+            f"Progress [{bar}] {pct}%",
+            "-" * 60,
+        ] + stage_lines + [""]
+        
+        # Print and track line count
+        for line in output_lines:
+            print(line)
+        _PROGRESS_LINES = len(output_lines)
+    
+    # Store progress update function in context for use by stages
+    context.update_progress = lambda sub_progress="": _print_progress_header(
+        context.completed_stage_count if hasattr(context, 'completed_stage_count') else 0, 
+        len(stages), 
+        sub_progress=sub_progress
+    )
+    context.total_stages = len(stages)
+    context.completed_stage_count = 0
     
     # Load cache if in protocol mode
     cache = {}
@@ -8754,73 +10412,81 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             
             if is_completed and completed_stages:
                 # Protocol was completed - offer resume from specific stage
-                print(f"\n{'='*70}")
-                print(f"Protocol was previously completed!")
-                if start_time:
-                    dt = datetime.fromtimestamp(start_time)
-                    time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"Original run started: {time_str}")
-                
-                # Show completed stages
-                print(f"\nCompleted stages:")
-                stage_list = []
-                for idx, (stage_key, stage_data) in enumerate(sorted(completed_stages.items()), 1):
-                    stage_type = stage_data.get('type', 'Unknown')
-                    stage_list.append((idx, stage_key, stage_type))
-                    print(f"  [{idx}] {stage_type}")
-                
-                print(f"\nOptions:")
-                print(f"  [0] Start from beginning (will use existing directories)")
-                for idx, _, stage_type in stage_list:
-                    print(f"  [{idx}] Resume from {stage_type}")
-                print(f"  [q] Quit")
-                
-                choice = input(f"\nSelect starting point [0-{len(stage_list)}, q]: ").strip().lower()
-                
-                if choice == 'q':
-                    print("Exiting...")
-                    sys.exit(0)
-                
-                try:
-                    choice_idx = int(choice)
-                    if choice_idx == 0:
-                        # Start from beginning - clear cache but keep directories
-                        print(f"Starting from beginning (existing directories will be reused)")
-                        cache = {}
-                        if protocol_text:
-                            cache['protocol_text'] = protocol_text
-                        cache['total_stages'] = len(stages)
-                        save_protocol_cache(cache, cache_file)
-                    elif 1 <= choice_idx <= len(stage_list):
-                        # Resume from specific stage - mark previous stages as completed
-                        resume_stage_key = stage_list[choice_idx - 1][1]
-                        print(f"Resuming from stage: {stage_list[choice_idx - 1][2]}")
-                        print(f"Previous stages marked as completed")
-                        # Keep cache but mark as not completed (we're resuming)
-                        cache['completed'] = False
-                    else:
-                        print(f"Invalid choice. Starting from beginning.")
-                        cache = {}
-                        if protocol_text:
-                            cache['protocol_text'] = protocol_text
-                        cache['total_stages'] = len(stages)
-                        save_protocol_cache(cache, cache_file)
-                except ValueError:
-                    print(f"Invalid input. Starting from beginning.")
+                if _IS_BACKGROUND_MODE:
+                    # In background mode, silently start from beginning
                     cache = {}
                     if protocol_text:
                         cache['protocol_text'] = protocol_text
                     cache['total_stages'] = len(stages)
                     save_protocol_cache(cache, cache_file)
-                
-                print(f"{'='*70}\n")
+                else:
+                    _wprint(f"\n{'='*70}", 1)
+                    _wprint(f"Protocol was previously completed!", 1)
+                    if start_time:
+                        dt = datetime.fromtimestamp(start_time)
+                        time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        _wprint(f"Original run started: {time_str}", 1)
+                    
+                    # Show completed stages
+                    _wprint(f"\nCompleted stages:", 1)
+                    stage_list = []
+                    for idx, (stage_key, stage_data) in enumerate(sorted(completed_stages.items()), 1):
+                        stage_type = stage_data.get('type', 'Unknown')
+                        stage_list.append((idx, stage_key, stage_type))
+                        _wprint(f"  [{idx}] {stage_type}", 1)
+                    
+                    _wprint(f"\nOptions:", 1)
+                    _wprint(f"  [0] Start from beginning (will use existing directories)", 1)
+                    for idx, _, stage_type in stage_list:
+                        _wprint(f"  [{idx}] Resume from {stage_type}", 1)
+                    _wprint(f"  [q] Quit", 1)
+                    
+                    choice = input(f"\nSelect starting point [0-{len(stage_list)}, q]: ").strip().lower()
+                    
+                    if choice == 'q':
+                        _wprint("Exiting...", 1)
+                        sys.exit(0)
+                    
+                    try:
+                        choice_idx = int(choice)
+                        if choice_idx == 0:
+                            # Start from beginning - clear cache but keep directories
+                            _wprint(f"Starting from beginning (existing directories will be reused)", 1)
+                            cache = {}
+                            if protocol_text:
+                                cache['protocol_text'] = protocol_text
+                            cache['total_stages'] = len(stages)
+                            save_protocol_cache(cache, cache_file)
+                        elif 1 <= choice_idx <= len(stage_list):
+                            # Resume from specific stage - mark previous stages as completed
+                            resume_stage_key = stage_list[choice_idx - 1][1]
+                            _wprint(f"Resuming from stage: {stage_list[choice_idx - 1][2]}", 1)
+                            _wprint(f"Previous stages marked as completed", 1)
+                            # Keep cache but mark as not completed (we're resuming)
+                            cache['completed'] = False
+                        else:
+                            _wprint(f"Invalid choice. Starting from beginning.", 1)
+                            cache = {}
+                            if protocol_text:
+                                cache['protocol_text'] = protocol_text
+                            cache['total_stages'] = len(stages)
+                            save_protocol_cache(cache, cache_file)
+                    except ValueError:
+                        _wprint(f"Invalid input. Starting from beginning.", 1)
+                        cache = {}
+                        if protocol_text:
+                            cache['protocol_text'] = protocol_text
+                        cache['total_stages'] = len(stages)
+                        save_protocol_cache(cache, cache_file)
+                    
+                    _wprint(f"{'='*70}\n", 1)
             elif start_time:
                 # Protocol in progress - just resume
                 dt = datetime.fromtimestamp(start_time)
                 time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                print(f"Resuming workflow (started: {time_str})")
+                _wprint(f"Resuming workflow (started: {time_str})", 1)
             else:
-                print(f"Resuming workflow")
+                _wprint(f"Resuming workflow", 1)
             
             # Backfill total_stages for old cache files (compatibility)
             if 'total_stages' not in cache:
@@ -8833,21 +10499,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             cache['total_stages'] = len(stages)
             save_protocol_cache(cache, cache_file)
     
-    # Pre-scan stages to extract similarity args for use in calculation stage
+    # Pre-scan stages to extract similarity args for use in optimization stage
     for stage in stages:
         if stage['type'] == 'similarity':
             context.similarity_args = stage.get('args', [])
             break
     
-    # Count calculation stages for proper numbering (calc, calc2)
+    # Count optimization stages for proper numbering (calc, calc2)
     calc_stage_counter = 0
     
     # Map stage types to display names
     stage_display_map: Dict[str, str] = {
         'replication': 'Annealing',
-        'calculation': 'Calculation',
+        'optimization': 'Optimization',
         'similarity': 'Similarity',
-        'optimization': 'Optimization'
+        'refinement': 'Refinement'
     }
     
     # Cleaner output for protocol mode
@@ -8859,10 +10525,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 display_name += ' ⏸'
             stage_display_names.append(display_name)
         stage_names = ' → '.join(stage_display_names)
-        print(f"\nWorkflow: {stage_names}\n")
+        _wprint(f"\nWorkflow: {stage_names}\n", 1)  # Only show at verbose level 1+
     else:
-        print("-" * 60)
-        print(f"Workflow: {input_file}")
+        _wprint("-" * 60, 1)
+        _wprint(f"Workflow: {input_file}", 1)
         stage_display_parts = []
         for s in stages:
             part = s['type']
@@ -8870,11 +10536,14 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 part += ' ⏸'
             stage_display_parts.append(part)
         stage_names = ' → '.join(stage_display_parts)
-        print(f"Pipeline: {stage_names}")
-        print("-" * 60)
+        _wprint(f"Pipeline: {stage_names}", 1)
+        _wprint("-" * 60, 1)
     
     # Execute each stage in sequence with calc+similarity retry logic
     stage_idx = 0
+    completed_stage_count = 0  # Track completed stages for progress display
+    context.completed_stage_count = 0  # Also track in context for update_progress lambda
+    
     while stage_idx < len(stages):
         stage_num = stage_idx + 1
         stage = stages[stage_idx]
@@ -8888,14 +10557,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 if stage_cache.get('status') == 'completed':
                     # Display name (Annealing instead of Replication)
                     display_name = 'Annealing' if stage_type == 'replication' else stage_type.capitalize()
-                    print(f"\n{'-' * 60}")
-                    print(f"[{stage_num}/{len(stages)}] {display_name} (cached)")
-                    print(f"  ✓ Skipped (completed at {stage_cache.get('timestamp', 'unknown')})")
-                    print('-' * 60)
+                    if verbose_level >= 1:
+                        print(f"\n{'-' * 60}")
+                        print(f"[{stage_num}/{len(stages)}] {display_name} (cached)")
+                        print(f"  ✓ Skipped (completed at {stage_cache.get('timestamp', 'unknown')})")
+                        print('-' * 60)
+                    
+                    completed_stage_count = stage_num
+                    context.completed_stage_count = stage_num
                     stage_idx += 1
                     
                     # Validate cached calc+similarity if applicable
-                    if stage_type == 'calculation':
+                    if stage_type == 'optimization':
                         should_skip, new_idx = validate_cached_calc_similarity(
                             cache, stage, stage_num, stages, stage_idx, cache_file
                         )
@@ -8904,7 +10577,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             continue
                         stage_idx = new_idx
                     # Validate cached opt+similarity if applicable
-                    elif stage_type == 'optimization':
+                    elif stage_type == 'refinement':
                         should_skip, new_idx = validate_cached_opt_similarity(
                             cache, stage, stage_num, stages, stage_idx, cache_file
                         )
@@ -8918,14 +10591,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         display_name = stage_type
         if stage_type == 'replication':
             display_name = 'Annealing'
-        elif stage_type == 'calculation':
+        elif stage_type == 'optimization':
             display_name = 'Calculation'
         else:
             display_name = stage_type.capitalize()
         
-        print(f"\n{'-' * 60}")
-        print(f"[{stage_num}/{len(stages)}] {display_name}")
-        print('-' * 60)
+        if verbose_level >= 1:
+            print(f"\n{'-' * 60}")
+            print(f"[{stage_num}/{len(stages)}] {display_name}")
+            print('-' * 60)
+        elif verbose_level == 0 and not _IS_BACKGROUND_MODE:
+            _print_progress_header(completed_stage_count, len(stages), display_name)
         
         # Update cache - mark stage as in progress
         if use_cache:
@@ -9005,11 +10681,14 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         return 0  # Paused successfully
                 
                 stage_idx += 1
+                completed_stage_count = stage_num
+                context.completed_stage_count = stage_num
+                # Progress bar updates at next stage start, not after completion
                 
-            elif stage_type == 'calculation':
-                # Increment calculation stage counter
+            elif stage_type == 'optimization':
+                # Increment optimization stage counter
                 calc_stage_counter += 1
-                context.calc_stage_number = calc_stage_counter
+                context.opt_stage_number = calc_stage_counter
                 
                 # Check if next stage is similarity - if so, handle calc+similarity with retry
                 next_is_similarity = (stage_idx + 1 < len(stages) and 
@@ -9036,32 +10715,38 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         return 1
                     
                     # Show redo configuration
-                    if max_redos > 1:
+                    if max_redos > 1 and not _IS_BACKGROUND_MODE:
                         if max_critical is not None:
-                            print(f"  Stage redo enabled: max {max_redos} attempts, target critical ≤ {max_critical}%")
+                            print(f"  Stage redo enabled: max {max_redos} redo attempts, target critical ≤ {max_critical}%")
                         elif max_skipped is not None:
-                            print(f"  Stage redo enabled: max {max_redos} attempts, target skipped ≤ {max_skipped}%")
+                            print(f"  Stage redo enabled: max {max_redos} redo attempts, target skipped ≤ {max_skipped}%")
                     
                     # Redo loop for calc+similarity
-                    final_attempt = 1
-                    for attempt in range(1, max_redos + 1):
+                    # attempt 0 = initial run, attempts 1..max_redos = redo attempts
+                    final_attempt = 0
+                    initial_critical = None  # Track initial critical % from first attempt
+                    initial_skipped = None   # Track initial skipped % from first attempt
+                    initial_critical_count = None
+                    initial_skipped_count = None
+                    for attempt in range(max_redos + 1):
                         final_attempt = attempt
-                        if attempt > 1:
+                        if attempt > 0 and not _IS_BACKGROUND_MODE:
                             print(f"\n{'-' * 60}")
-                            print(f"Redo attempt {attempt}/{max_redos}")
+                            print(f"Redo {attempt}/{max_redos}")
                         
                         # Don't delete similarity folder - we'll update it with corrected calculations
                         
                         # Run calculation (which includes sort step that creates similarity/)
-                        result = execute_calculation_stage(context, stage)
+                        result = execute_optimization_stage(context, stage)
                         if result != 0:
-                            print(f"\nError: Calculation failed with code {result}")
+                            if not _IS_BACKGROUND_MODE:
+                                print(f"\nError: Optimization failed with code {result}")
                             return result
                         
                         # If this is a redo attempt and we have recalculated files, copy them to similarity folder
-                        if attempt > 1 and hasattr(context, 'recalculated_files') and context.recalculated_files:
+                        if attempt > 0 and hasattr(context, 'recalculated_files') and context.recalculated_files:
                             # Get calculation and similarity directories
-                            calc_dir = getattr(context, 'calculation_dir', 'calculation')
+                            opt_dir = getattr(context, 'optimization_dir', 'optimization')
                             # Get similarity orca output directory
                             sim_dir = context.similarity_dir if hasattr(context, 'similarity_dir') else "similarity"
                             
@@ -9095,7 +10780,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 # Copy updated .out files from calculation subdirectories to similarity
                                 for basename in context.recalculated_files:
                                     # Find the .out file in calculation subdirectories
-                                    calc_subdir = os.path.join(calc_dir, basename)
+                                    calc_subdir = os.path.join(opt_dir, basename)
                                     calc_out_file = os.path.join(calc_subdir, f"{basename}.out")
                                     
                                     if os.path.exists(calc_out_file):
@@ -9106,7 +10791,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 print(f"\n  Warning: No orca_out directory found in {sim_dir}/")
                         
                         # Run similarity (suppress stage header in retry mode)
-                        if attempt == 1:
+                        if attempt == 0:
                             print(f"\n{'-' * 60}")
                             print(f"[{stage_idx + 2}/{len(stages)}] Similarity")
                             print('-' * 60)
@@ -9121,6 +10806,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                         if os.path.exists(summary_file):
                             critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+                            
+                            # Capture initial values on first attempt
+                            if attempt == 0:
+                                initial_critical = critical_pct
+                                initial_skipped = skipped_pct
+                                # Get counts for initial attempt
+                                sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
+                                init_crit_count, init_skip_count = parse_similarity_output(sim_dir)
+                                initial_critical_count = init_crit_count
+                                initial_skipped_count = init_skip_count
                             
                             print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
                             
@@ -9168,7 +10863,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Update cache for both calculation and similarity stages
                     if use_cache:
-                        calc_key = f"calculation_{stage_num}"
+                        calc_key = f"optimization_{stage_num}"
                         sim_key = f"similarity_{stage_num + 1}"
                         
                         calc_result: Dict[str, Any] = {
@@ -9182,10 +10877,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if input_dir is None:
                             input_dir = '.'  # Default if no previous stage
                         
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
+                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
                         calc_result['input_dir'] = input_dir
-                        calc_result['working_dir'] = calc_dir
-                        calc_result['output_dir'] = calc_dir  # .out files are in calc_dir
+                        calc_result['working_dir'] = opt_dir
+                        calc_result['output_dir'] = opt_dir  # .out files are in opt_dir
                         
                         if max_critical is not None:
                             calc_result['critical_threshold'] = max_critical
@@ -9193,18 +10888,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             calc_result['skipped_threshold'] = max_skipped
                         
                         # Add XYZ source info if available
-                        if hasattr(context, 'calc_xyz_source'):
-                            calc_result['xyz_source'] = context.calc_xyz_source
+                        if hasattr(context, 'opt_xyz_source'):
+                            calc_result['xyz_source'] = context.opt_xyz_source
                         
                         # Add completion counts if available
-                        if hasattr(context, 'calc_completed'):
-                            calc_result['completed'] = context.calc_completed
-                        if hasattr(context, 'calc_total'):
-                            calc_result['total'] = context.calc_total
+                        if hasattr(context, 'opt_completed'):
+                            calc_result['completed'] = context.opt_completed
+                        if hasattr(context, 'opt_total'):
+                            calc_result['total'] = context.opt_total
                         
                         # Add similarity folder info if available
-                        if hasattr(context, 'calc_sim_folder'):
-                            calc_result['similarity_folder'] = context.calc_sim_folder
+                        if hasattr(context, 'opt_sim_folder'):
+                            calc_result['similarity_folder'] = context.opt_sim_folder
                         
                         update_protocol_cache(calc_key, 'completed', 
                                             result=calc_result, cache_file=cache_file)
@@ -9213,10 +10908,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Store directories for stage memory
                         sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                        sim_result['input_dir'] = calc_dir  # Read from calculation
+                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        sim_result['input_dir'] = opt_dir  # Read from calculation
                         sim_result['working_dir'] = sim_dir
-                        # After calculation: use "motifs" prefix (first level clustering)
+                        # After optimization: use "motifs" prefix (first level clustering)
                         sim_result['output_dir'] = os.path.join(sim_dir, "motifs")  # Motifs for opt stage
                         
                         if final_critical is not None:
@@ -9236,13 +10931,25 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             if arg.startswith('--th=') or arg.startswith('--threshold='):
                                 threshold_val = float(arg.split('=')[1])
                                 sim_result['threshold'] = threshold_val
-                                break
+                            elif arg.startswith('--rmsd='):
+                                rmsd_val = float(arg.split('=')[1])
+                                sim_result['rmsd_threshold'] = rmsd_val
                         
                         # Add similarity folder and motifs info if available
                         if hasattr(context, 'sim_folder'):
                             sim_result['similarity_folder'] = context.sim_folder
                         if hasattr(context, 'sim_motifs_created'):
                             sim_result['motifs_created'] = context.sim_motifs_created
+                        
+                        # Add initial validation values (from first attempt)
+                        if initial_critical is not None:
+                            sim_result['initial_critical'] = initial_critical
+                        if initial_skipped is not None:
+                            sim_result['initial_skipped'] = initial_skipped
+                        if initial_critical_count is not None:
+                            sim_result['initial_critical_count'] = initial_critical_count
+                        if initial_skipped_count is not None:
+                            sim_result['initial_skipped_count'] = initial_skipped_count
                         
                         # Add threshold info and attempts
                         sim_result['attempts'] = final_attempt
@@ -9270,9 +10977,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Skip both calc and similarity stages since we handled them
                     stage_idx += 2
+                    completed_stage_count = stage_num + 1  # Both stages done
+                    context.completed_stage_count = stage_num + 1
+                    # Progress bar updates at next stage start
                 else:
                     # Standalone calc without similarity
-                    result = execute_calculation_stage(context, stage)
+                    result = execute_optimization_stage(context, stage)
                     
                     # Check if workflow should pause after this stage
                     if result == 0:
@@ -9280,17 +10990,20 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             return 0  # Paused successfully
                     
                     stage_idx += 1
+                    completed_stage_count = stage_num
+                    context.completed_stage_count = stage_num
+                    # Progress bar updates at next stage start
                     
             elif stage_type == 'similarity':
                 # Standalone similarity (not after calc/opt in combined mode)
                 result = execute_similarity_stage(context, stage)
                 
-                # Check if previous stage was calculation or optimization with threshold requirements
+                # Check if previous stage was optimization or refinement with threshold requirements
                 if result == 0 and stage_idx > 0:
                     prev_stage = stages[stage_idx - 1]
                     prev_stage_type = prev_stage['type']
                     
-                    if prev_stage_type in ['calculation', 'optimization']:
+                    if prev_stage_type in ['optimization', 'refinement']:
                         # Check if previous stage had redo parameters
                         prev_args = prev_stage['args']
                         max_critical = None
@@ -9380,18 +11093,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
                     
                     # Determine input directory and output prefix based on previous stage
-                    # Check if previous stage was optimization or calculation
-                    prev_was_opt = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'optimization')
+                    # Check if previous stage was refinement or calculation
+                    prev_was_ref = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'refinement')
                     
-                    if prev_was_opt:
-                        # After optimization: input from opt dir, output to umotifs
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                    if prev_was_ref:
+                        # After refinement: input from opt dir, output to umotifs
+                        opt_dir = context.refinement_dir if context.refinement_dir else "refinement"
                         sim_result['input_dir'] = opt_dir
                         sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")
                     else:
-                        # After calculation: input from calc dir, output to motifs
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                        sim_result['input_dir'] = calc_dir
+                        # After optimization: input from calc dir, output to motifs
+                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        sim_result['input_dir'] = opt_dir
                         sim_result['output_dir'] = os.path.join(sim_dir, "motifs")
                     
                     sim_result['working_dir'] = sim_dir
@@ -9432,8 +11145,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         return 0  # Paused successfully
                 
                 stage_idx += 1
+                completed_stage_count = stage_num
+                context.completed_stage_count = stage_num
+                # Progress bar updates at next stage start
                 
-            elif stage_type == 'optimization':
+            elif stage_type == 'refinement':
                 # Check if next stage is similarity - if so, handle opt+similarity with retry
                 next_is_similarity = (stage_idx + 1 < len(stages) and 
                                      stages[stage_idx + 1]['type'] == 'similarity')
@@ -9461,37 +11177,42 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     # Show redo configuration
                     if max_redos > 1:
                         if max_critical is not None:
-                            print(f"  Stage redo enabled: max {max_redos} attempts, target critical ≤ {max_critical}%")
+                            print(f"  Stage redo enabled: max {max_redos} redo attempts, target critical ≤ {max_critical}%")
                         elif max_skipped is not None:
-                            print(f"  Stage redo enabled: max {max_redos} attempts, target skipped ≤ {max_skipped}%")
+                            print(f"  Stage redo enabled: max {max_redos} redo attempts, target skipped ≤ {max_skipped}%")
                     
                     # Redo loop for opt+similarity
-                    final_attempt = 1
-                    for attempt in range(1, max_redos + 1):
+                    # attempt 0 = initial run, attempts 1..max_redos = redo attempts
+                    final_attempt = 0
+                    initial_critical = None  # Track initial critical % from first attempt
+                    initial_skipped = None   # Track initial skipped % from first attempt
+                    initial_critical_count = None
+                    initial_skipped_count = None
+                    for attempt in range(max_redos + 1):
                         final_attempt = attempt
-                        if attempt > 1:
+                        if attempt > 0:
                             print(f"\n{'-' * 60}")
-                            print(f"Redo attempt {attempt}/{max_redos}")
+                            print(f"Redo {attempt}/{max_redos}")
                         
-                        # Run optimization (includes organizing/copying files to similarity)
-                        result = execute_optimization_stage(context, stage)
+                        # Run refinement (includes organizing/copying files to similarity)
+                        result = execute_refinement_stage(context, stage)
                         if result != 0:
                             print(f"\nError: Optimization failed with code {result}")
                             # Invalidate cache so we can resume from this stage
-                            opt_key = f"optimization_{stage_num}"
-                            if use_cache and 'stages' in cache and opt_key in cache['stages']:
-                                del cache['stages'][opt_key]
+                            ref_key = f"refinement_{stage_num}"
+                            if use_cache and 'stages' in cache and ref_key in cache['stages']:
+                                del cache['stages'][ref_key]
                                 with open(cache_file, 'wb') as f:
                                     pickle.dump(cache, f)
                                 print(f"  Cache invalidated for stage {stage_num}")
                             return result
                         
                         # If this is a redo attempt and we have recalculated files, copy them to similarity folder
-                        if attempt > 1 and hasattr(context, 'recalculated_files') and context.recalculated_files:
-                            # Get optimization and similarity directories
-                            opt_dir = getattr(context, 'optimization_dir', 'optimization') or 'optimization'
+                        if attempt > 0 and hasattr(context, 'recalculated_files') and context.recalculated_files:
+                            # Get refinement and similarity directories
+                            opt_dir = getattr(context, 'refinement_dir', 'refinement') or 'refinement'
                             # Get similarity orca output directory
-                            sim_dir = context.opt_sim_folder if hasattr(context, 'opt_sim_folder') else context.similarity_dir
+                            sim_dir = context.ref_sim_folder if hasattr(context, 'ref_sim_folder') else context.similarity_dir
                             
                             # Strip orca_out suffix if present - we want the BASE similarity directory
                             base_sim_dir = sim_dir
@@ -9536,9 +11257,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                             except Exception:
                                                 pass
                                 
-                                # Copy updated .out files from optimization subdirectories to similarity
+                                # Copy updated .out files from refinement subdirectories to similarity
                                 for basename in context.recalculated_files:
-                                    # For optimization, files are grouped by shortened base name (motif_01_opt -> motif_01/)
+                                    # For refinement, files are grouped by shortened base name (motif_01_ref -> motif_01/)
                                     short_name = basename.replace('_opt', '').replace('_calc', '')
                                     opt_subdir = os.path.join(opt_dir, short_name)
                                     opt_out_file = os.path.join(opt_subdir, f"{basename}.out")
@@ -9551,7 +11272,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 print(f"\n  Warning: No orca_out directory found (sim_dir={sim_dir})")
                         
                         # Run similarity (suppress stage header in retry mode)
-                        if attempt == 1:
+                        if attempt == 0:
                             print(f"\n{'-' * 60}")
                             print(f"[{stage_idx + 2}/{len(stages)}] Similarity")
                             print('-' * 60)
@@ -9566,6 +11287,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         summary_file = os.path.join(context.similarity_dir, "clustering_summary.txt")
                         if os.path.exists(summary_file):
                             critical_pct, skipped_pct = parse_similarity_summary(summary_file)
+                            
+                            # Capture initial values on first attempt
+                            if attempt == 0:
+                                initial_critical = critical_pct
+                                initial_skipped = skipped_pct
+                                # Get counts for initial attempt
+                                sim_dir = context.similarity_dir if context.similarity_dir else "similarity_2"
+                                init_crit_count, init_skip_count = parse_similarity_output(sim_dir)
+                                initial_critical_count = init_crit_count
+                                initial_skipped_count = init_skip_count
                             
                             print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
                             
@@ -9609,7 +11340,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Update cache for both stages
                     if use_cache:
-                        opt_key = f"optimization_{stage_num}"
+                        ref_key = f"refinement_{stage_num}"
                         sim_key = f"similarity_{stage_num + 1}"
                         
                         # Build result data
@@ -9624,7 +11355,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if not motifs_dir:
                             motifs_dir = "similarity/motifs"  # Fallback
                         
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        opt_dir = context.refinement_dir if context.refinement_dir else "refinement"
                         opt_result['input_dir'] = motifs_dir
                         opt_result['working_dir'] = opt_dir
                         opt_result['output_dir'] = opt_dir
@@ -9635,29 +11366,29 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             opt_result['skipped_threshold'] = max_skipped
                         
                         # Add motifs source info if available
-                        if hasattr(context, 'opt_motifs_source') and context.opt_motifs_source:
-                            opt_result['motifs_source'] = context.opt_motifs_source
+                        if hasattr(context, 'ref_motifs_source') and context.ref_motifs_source:
+                            opt_result['motifs_source'] = context.ref_motifs_source
                         
                         # Add completion counts if available
-                        if hasattr(context, 'opt_completed') and context.opt_completed is not None:
-                            opt_result['completed'] = context.opt_completed
-                        if hasattr(context, 'opt_total') and context.opt_total is not None:
-                            opt_result['total'] = context.opt_total
+                        if hasattr(context, 'ref_completed') and context.ref_completed is not None:
+                            opt_result['completed'] = context.ref_completed
+                        if hasattr(context, 'ref_total') and context.ref_total is not None:
+                            opt_result['total'] = context.ref_total
                         
                         # Add similarity folder info if available
-                        if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                            opt_result['similarity_folder'] = context.opt_sim_folder
+                        if hasattr(context, 'ref_sim_folder') and context.ref_sim_folder:
+                            opt_result['similarity_folder'] = context.ref_sim_folder
                         
-                        update_protocol_cache(opt_key, 'completed', result=opt_result, cache_file=cache_file)
+                        update_protocol_cache(ref_key, 'completed', result=opt_result, cache_file=cache_file)
                         
                         sim_result = {}
                         
                         # Store directories for stage memory
                         sim_dir = context.similarity_dir if context.similarity_dir else "similarity_2"
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
-                        sim_result['input_dir'] = opt_dir  # Read from optimization
+                        opt_dir = context.refinement_dir if context.refinement_dir else "refinement"
+                        sim_result['input_dir'] = opt_dir  # Read from refinement
                         sim_result['working_dir'] = sim_dir
-                        # After optimization: use "umotifs" prefix (unique motifs, second level)
+                        # After refinement: use "umotifs" prefix (unique motifs, second level)
                         sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")  # Unique motifs
                         
                         if final_critical is not None:
@@ -9677,7 +11408,25 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             if arg.startswith('--th=') or arg.startswith('--threshold='):
                                 threshold_val = float(arg.split('=')[1])
                                 sim_result['threshold'] = threshold_val
-                                break
+                            elif arg.startswith('--rmsd='):
+                                rmsd_val = float(arg.split('=')[1])
+                                sim_result['rmsd_threshold'] = rmsd_val
+                        
+                        # Add similarity folder and motifs info if available
+                        if hasattr(context, 'sim_folder'):
+                            sim_result['similarity_folder'] = context.sim_folder
+                        if hasattr(context, 'sim_motifs_created'):
+                            sim_result['motifs_created'] = context.sim_motifs_created
+                        
+                        # Add initial validation values (from first attempt)
+                        if initial_critical is not None:
+                            sim_result['initial_critical'] = initial_critical
+                        if initial_skipped is not None:
+                            sim_result['initial_skipped'] = initial_skipped
+                        if initial_critical_count is not None:
+                            sim_result['initial_critical_count'] = initial_critical_count
+                        if initial_skipped_count is not None:
+                            sim_result['initial_skipped_count'] = initial_skipped_count
                         
                         # Add threshold info and attempts
                         sim_result['attempts'] = final_attempt
@@ -9694,7 +11443,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Check if workflow should pause after opt stage (check opt stage for pause marker)
                     if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
-                        return 0  # Paused after optimization
+                        return 0  # Paused after refinement
                     
                     # Check if workflow should pause after similarity stage (check next stage for pause marker)
                     if stage_idx + 1 < len(stages):
@@ -9704,29 +11453,28 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Skip the similarity stage (already executed)
                     stage_idx += 2
+                    completed_stage_count = stage_num + 1  # Both stages done
+                    context.completed_stage_count = stage_num + 1
+                    # Progress bar updates at next stage start
                     continue
                 else:
-                    # No similarity after optimization - just run it once
-                    result = execute_optimization_stage(context, stage)
+                    # No similarity after refinement - just run it once
+                    result = execute_refinement_stage(context, stage)
                 
-                # Build and save optimization result if successful (for standalone opt)
+                # Build and save refinement result if successful (for standalone opt)
                 if result == 0 and use_cache and not next_is_similarity:
-                    opt_key = f"optimization_{stage_num}"
+                    ref_key = f"refinement_{stage_num}"
                     
-                    # Extract optimization parameters from stage
-                    max_tries = 1
+                    # Extract refinement parameters from stage
                     max_skipped = None
                     for arg in stage.get('args', []):
-                        if arg.startswith('--retry='):
-                            max_tries = int(arg.split('=')[1])
-                        elif arg.startswith('--skipped='):
+                        if arg.startswith('--skipped='):
                             max_skipped = float(arg.split('=')[1])
                     
                     from datetime import datetime as dt_now  # Local import to avoid scope issues
                     opt_result = {
                         'status': 'completed',
-                        'end_time': dt_now.now().isoformat(),
-                        'max_tries': max_tries
+                        'end_time': dt_now.now().isoformat()
                     }
                     
                     # Add threshold info
@@ -9734,19 +11482,19 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         opt_result['skipped_threshold'] = max_skipped
                     
                     # Add detailed execution data from context
-                    if hasattr(context, 'opt_motifs_source') and context.opt_motifs_source:
-                        opt_result['motifs_source'] = context.opt_motifs_source
+                    if hasattr(context, 'ref_motifs_source') and context.ref_motifs_source:
+                        opt_result['motifs_source'] = context.ref_motifs_source
                     
-                    if hasattr(context, 'opt_completed') and context.opt_completed is not None:
-                        opt_result['completed'] = context.opt_completed
-                    if hasattr(context, 'opt_total') and context.opt_total is not None:
-                        opt_result['total'] = context.opt_total
+                    if hasattr(context, 'ref_completed') and context.ref_completed is not None:
+                        opt_result['completed'] = context.ref_completed
+                    if hasattr(context, 'ref_total') and context.ref_total is not None:
+                        opt_result['total'] = context.ref_total
                     
-                    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                        opt_result['similarity_folder'] = context.opt_sim_folder
+                    if hasattr(context, 'ref_sim_folder') and context.ref_sim_folder:
+                        opt_result['similarity_folder'] = context.ref_sim_folder
                     
                     # Save to cache
-                    update_protocol_cache(opt_key, 'completed', 
+                    update_protocol_cache(ref_key, 'completed', 
                                         result=opt_result, cache_file=cache_file)
                 
                 # Check if workflow should pause after this stage
@@ -9755,6 +11503,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         return 0  # Paused successfully
                 
                 stage_idx += 1
+                completed_stage_count = stage_num
+                context.completed_stage_count = stage_num
+                # Progress bar updates at next stage start or completion
                 
                 if result != 0:
                     print(f"\nError: Stage {stage_num} ({stage_type}) failed with code {result}")
@@ -9768,29 +11519,43 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             traceback.print_exc()
             return 1
     
-    print(f"\n{'-' * 60}")
-    print("✓ Workflow completed")
-    print(f"{'-' * 60}")
+    if not _IS_BACKGROUND_MODE:
+        if verbose_level >= 1:
+            print(f"\n{'-' * 60}")
+            print("✓ Workflow completed")
+            print(f"{'-' * 60}")
+        else:
+            # Concise mode - show final progress bar complete
+            _print_progress_header(len(stages), len(stages))
+            print()  # New line after progress bar
     
     # Clean up temporary folders from retry attempts (final safety cleanup)
-    temp_calc_folders = glob.glob("calculation_tmp_*")
+    temp_calc_folders = glob.glob("optimization_tmp_*")
     temp_sim_folders = glob.glob("similarity_tmp_*")
     retry_input = ["retry_input"] if os.path.exists("retry_input") else []
     all_temp = temp_calc_folders + temp_sim_folders + retry_input
     
     if all_temp:
-        print("\nCleaning up temporary folders...")
+        if not _IS_BACKGROUND_MODE:
+            print("\nCleaning up temporary folders...")
         for folder in all_temp:
             if os.path.exists(folder):
                 shutil.rmtree(folder)
-                print(f"  Removed: {folder}")
-        print(f"  Cleaned {len(all_temp)} temporary folder(s)")
+                if not _IS_BACKGROUND_MODE:
+                    print(f"  Removed: {folder}")
+        if not _IS_BACKGROUND_MODE:
+            print(f"  Cleaned {len(all_temp)} temporary folder(s)")
     
     # If using cache (protocol mode), generate summary
     # NOTE: Cache is NOT deleted to allow protocol resume
     if use_cache:
         generate_protocol_summary(cache_file=cache_file)
-        print(f"\n→ Protocol cache saved: {cache_file}")
+        if not _IS_BACKGROUND_MODE:
+            print(f"\n→ Protocol cache saved: {cache_file}")
+    
+    # Add to history and print completion message
+    _add_to_history(input_file, cache_file, "completed", _WORKFLOW_START_TIME, time.time())
+    _print_workflow_completion("completed", _WORKFLOW_START_TIME, input_file, cache_file)
     
     return 0
 
@@ -9798,20 +11563,14 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     """Execute replication stage (r3, r5, etc.) and run annealing simulations."""
     num_replicas = stage['num_replicas']
     context.num_replicas = num_replicas
+    verbose = context.verbose_level >= 1
     
-    # Parse --retry and --box flags from stage args
-    max_retries = 3  # Default: retry each annealing run up to 3 times
+    # Parse --box flags from stage args
+    # Note: --retry is removed; launch failures are now auto-retried 10 times
     box_size_override = None
     args = stage.get('args', [])
     for arg in args:
-        if arg.startswith('--retry'):
-            # --retry=N: retry each run up to N times
-            # --retry (no number): retry until all succeed (unlimited)
-            if '=' in arg:
-                max_retries = int(arg.split('=')[1])
-            else:
-                max_retries = 999999  # Effectively unlimited
-        elif arg.startswith('--box'):
+        if arg.startswith('--box'):
             # Extract packing percentage from flag (e.g., --box10 -> 10%)
             try:
                 packing_str = arg.replace('--box', '')
@@ -9824,12 +11583,13 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         # Store for protocol summary
                         context.annealing_box_size = box_size_override
                         context.annealing_packing = packing_percent
-                        print(f"Using recommended box size: {box_size_override:.1f} Å ({packing_percent}% effective packing)")
+                        if verbose:
+                            print(f"Using recommended box size: {box_size_override:.1f} Å ({packing_percent}% effective packing)")
             except ValueError:
                 pass
     
     # Create replicated runs (without launcher script in workflow mode)
-    replicated_files = create_replicated_runs(context.input_file, num_replicas, create_launcher=False, box_size=box_size_override)
+    replicated_files = create_replicated_runs(context.input_file, num_replicas, create_launcher=False, box_size=box_size_override, verbose=verbose)
     
     if not replicated_files:
         print("✗ Failed to create replicated runs")
@@ -9838,7 +11598,11 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     context.annealing_dirs = [os.path.dirname(f) for f in replicated_files]
     
     # Actually run the annealing simulations with retry logic
-    print(f"Running {num_replicas} annealing simulation(s)")
+    if verbose:
+        print(f"Running {num_replicas} annealing simulation(s)")
+    
+    # Hardcoded: retry each annealing run up to 3 times
+    max_retries = 3
     
     failed_runs = []
     for i, input_file in enumerate(replicated_files, 1):
@@ -9846,7 +11610,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         run_name = os.path.basename(run_dir)
         input_basename = os.path.basename(input_file)
         
-        print(f"\n  {run_name}...", end=" ", flush=True)
+        if verbose:
+            print(f"\n  {run_name}...", end=" ", flush=True)
         
         # Retry loop for each annealing run
         success = False
@@ -9876,7 +11641,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     continue
                 
                 # Check if successful
-                output_file = os.path.join(run_dir, input_basename.replace('.in', '.out'))
+                # Handle both .in and .asc extensions
+                output_file = os.path.join(run_dir, re.sub(r'\.(in|asc)$', '.out', input_basename))
                 if os.path.exists(output_file):
                     with open(output_file, 'r') as f:
                         content = f.read()
@@ -9892,7 +11658,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 last_error = str(e)
         
         if success:
-            print("✓")
+            if verbose:
+                print("✓")
         else:
             # Check if result files were created even without proper termination message
             result_files = []
@@ -9901,12 +11668,14 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             
             if result_files:
                 # Files were created, consider it a success
-                print(f"✓ (output files created)")
+                if verbose:
+                    print(f"✓ (output files created)")
                 success = True
             else:
-                print(f"✗ (no output files)")
-                # Check output file for errors
-                output_file = os.path.join(run_dir, input_basename.replace('.in', '.out'))
+                if verbose:
+                    print(f"✗ (no output files)")
+                # Check output file for errors - handle both .in and .asc extensions
+                output_file = os.path.join(run_dir, re.sub(r'\.(in|asc)$', '.out', input_basename))
                 if os.path.exists(output_file):
                     try:
                         with open(output_file, 'r') as f:
@@ -9919,7 +11688,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                     if 'Traceback' in line:
                                         # Show traceback and a few lines after
                                         error_lines = lines[i:min(i+10, len(lines))]
-                                        print(f"    Traceback found in {run_name}/{input_basename.replace('.in', '.out')}:")
+                                        output_name = re.sub(r'\.(in|asc)$', '.out', input_basename)
+                                        print(f"    Traceback found in {run_name}/{output_name}:")
                                         for eline in error_lines:
                                             if eline.strip():
                                                 print(f"      {eline}")
@@ -10019,20 +11789,22 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     Args:
         context: Workflow context
-        stage_dir: Directory of the current stage (calculation or optimization)
+        stage_dir: Directory of the current stage (optimization or refinement)
         template_file: Path to the template input file
         
     Returns:
         bool: True if any structures were processed, False otherwise
     """
+    verbose = context.verbose_level >= 1
+    
     # Determine similarity directory (check context or default)
     sim_dir = getattr(context, 'similarity_dir', None)
     
     if not sim_dir:
-        # For optimization stages, check for similarity_2, similarity_3, etc.
-        # For calculation stages, use similarity
-        if 'optimization' in stage_dir.lower():
-            # Check for similarity_2 first (most common for first optimization)
+        # For refinement stages, check for similarity_2, similarity_3, etc.
+        # For optimization stages, use similarity
+        if 'refinement' in stage_dir.lower():
+            # Check for similarity_2 first (most common for first refinement)
             if os.path.exists('similarity_2'):
                 sim_dir = 'similarity_2'
             elif os.path.exists('similarity_3'):
@@ -10049,12 +11821,22 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     if not os.path.exists(sim_dir):
         return False
         
-    need_recalc_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
+    need_reopt_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
+    critical_non_conv_dir = os.path.join(sim_dir, "skipped_structures", "critical_non_converged")
     
-    if not os.path.exists(need_recalc_dir):
+    # Check if either directory exists
+    has_need_recalc = os.path.exists(need_reopt_dir)
+    has_critical_nc = os.path.exists(critical_non_conv_dir)
+    
+    if not has_need_recalc and not has_critical_nc:
         return False
         
-    xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
+    # Collect XYZ files from both directories
+    xyz_files = []
+    if has_need_recalc:
+        xyz_files.extend(glob.glob(os.path.join(need_reopt_dir, "*.xyz")))
+    if has_critical_nc:
+        xyz_files.extend(glob.glob(os.path.join(critical_non_conv_dir, "*.xyz")))
     
     if not xyz_files:
         return False
@@ -10071,8 +11853,10 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     if not need_recalc_basenames:
         return False
-        
-    print(f"\nProcessing redo structures from: {need_recalc_dir}")
+    
+    # Determine display directory
+    display_dir = os.path.join(sim_dir, "skipped_structures")
+    print(f"\nProcessing redo structures from: {display_dir}")
     print(f"\nFound {len(need_recalc_basenames)} structure(s) to retry")
 
     processed_count = 0
@@ -10086,16 +11870,73 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         print(f"  Warning: Template file {template_file} not found. Cannot regenerate inputs.")
         return False
 
+    # Find launcher path for ORCA calculations (load early for version detection)
+    launcher_path = None
+    launcher_content = None
+    possible_launchers = [
+        os.path.join(stage_dir, 'launcher_orca.sh'),
+        os.path.join(stage_dir, 'launcher_ascec.sh'),
+        'launcher_orca.sh',
+        'launcher_ascec.sh',
+    ]
+    for lp in possible_launchers:
+        if os.path.exists(lp):
+            launcher_path = lp
+            try:
+                with open(lp, 'r') as f:
+                    launcher_content = f.read()
+            except Exception:
+                pass
+            break
+
+    # Parse rescue method from template (for structures with 2+ imaginary frequencies)
+    rescue_method, rescue_use_numfreq = parse_rescue_method(template_content, launcher_content=launcher_content)
+    
+    # Extract charge and multiplicity from template
+    charge_val = 0
+    mult_val = 1
+    xyz_match = re.search(r'\*\s*(?:xyz|xyzfile)\s+(-?\d+)\s+(\d+)', template_content, re.IGNORECASE)
+    if xyz_match:
+        charge_val = int(xyz_match.group(1))
+        mult_val = int(xyz_match.group(2))
+    
+    # Extract nprocs from template (ORCA or Gaussian format)
+    nprocs_val = 1  # default to 1 if not found
+    # ORCA format: nprocs N
+    nprocs_match = re.search(r'nprocs\s+(\d+)', template_content, re.IGNORECASE)
+    if nprocs_match:
+        nprocs_val = int(nprocs_match.group(1))
+    else:
+        # Gaussian format: %NProcShared=N
+        nprocs_match = re.search(r'%NProcShared\s*=\s*(\d+)', template_content, re.IGNORECASE)
+        if nprocs_match:
+            nprocs_val = int(nprocs_match.group(1))
+    
+    # Track structures needing rescue Hessian (2+ imaginary freqs)
+    rescue_hessian_tasks = []  # List of (basename, xyz_file, imag_count)
+
     for basename in need_recalc_basenames:
-        xyz_file = os.path.join(need_recalc_dir, f"{basename}.xyz")
+        # Find xyz_file in either need_recalculation or critical_non_converged
+        xyz_file: str = ""  # Will be set below
+        if has_need_recalc and os.path.exists(os.path.join(need_reopt_dir, f"{basename}.xyz")):
+            xyz_file = os.path.join(need_reopt_dir, f"{basename}.xyz")
+        elif has_critical_nc and os.path.exists(os.path.join(critical_non_conv_dir, f"{basename}.xyz")):
+            xyz_file = os.path.join(critical_non_conv_dir, f"{basename}.xyz")
         
+        # Skip if no xyz_file found (shouldn't happen since basenames come from xyz files)
+        if not xyz_file:
+            print(f"    {basename}: XYZ file not found, skipping")
+            continue
+        
+        # Check if this structure came from critical_non_converged (non-converged optimization)
+        is_critical_non_converged = critical_non_conv_dir in xyz_file
 
         
         # Possible subdirectory names where .out files may be located
         # Include both standard directories AND the basename itself (where ORCA/Gaussian creates output)
         subdirs_to_check = [basename, 'orca_out', 'gaussian_out', 'completed', 'failed', 'skipped']
         
-        # Also add shortened versions of basename (e.g., "motif_01" for "motif_01_opt")
+        # Also add shortened versions of basename (e.g., "motif_01" for "motif_01"_ref")
         # ORCA often creates subdirectories without the suffix
         if '_opt' in basename:
             subdirs_to_check.insert(0, basename.replace('_opt', ''))
@@ -10105,9 +11946,12 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         # Find .out file for this structure
         out_file = None
         
-        # Search in need_recalc_dir first (where similarity script copies them)
-        if os.path.exists(os.path.join(need_recalc_dir, f"{basename}.out")):
-            out_file = os.path.join(need_recalc_dir, f"{basename}.out")
+        # Search in critical_non_converged first (if applicable)
+        if has_critical_nc and os.path.exists(os.path.join(critical_non_conv_dir, f"{basename}.out")):
+            out_file = os.path.join(critical_non_conv_dir, f"{basename}.out")
+        # Search in need_reopt_dir
+        elif has_need_recalc and os.path.exists(os.path.join(need_reopt_dir, f"{basename}.out")):
+            out_file = os.path.join(need_reopt_dir, f"{basename}.out")
         # Search in root
         elif os.path.exists(os.path.join(stage_dir, f"{basename}.out")):
             out_file = os.path.join(stage_dir, f"{basename}.out")
@@ -10158,31 +12002,158 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                     print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (displacement failed)")
             
             elif imag_count >= 2:
-                # Multiple imaginary: extract final geometry
-                xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                # Multiple imaginary: displace along the highest (most negative) imaginary mode
+                xyz_lines = displace_along_imaginary_mode(out_file, os.path.dirname(out_file), use_highest_mode=True)
                 if xyz_lines:
-                    new_geometry = xyz_lines[2:]  # Skip first 2 lines
-                    print(f"    {basename}: {imag_count} imaginary freqs, using final geometry ✓")
+                    try:
+                        natoms = int(xyz_lines[0].strip())
+                        if len(xyz_lines) >= natoms + 2:
+                            new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                            print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
+                        else:
+                            print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (malformed XYZ)")
+                    except (ValueError, IndexError):
+                        print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (invalid XYZ format)")
                 else:
-                    print(f"    {basename}: {imag_count} imaginary freqs, using final geometry ✗ (extraction failed)")
+                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (displacement failed)")
             else:
-                # No imaginary - use XYZ from similarity
-                print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
-                if os.path.exists(xyz_file):
-                    with open(xyz_file, 'r') as f:
-                        new_geometry = f.readlines()[2:]
-                    print(f" ✓")
+                # No imaginary frequencies - check if non-converged (max iterations reached)
+                conv_status = detect_convergence_status(out_file)
+                
+                if conv_status['status'] == 'not_converged' and rescue_method and launcher_path:
+                    # Non-converged structure - use final geometry with rescue Hessian
+                    xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                    if xyz_lines:
+                        new_geometry = xyz_lines[2:]  # Skip first 2 lines
+                        
+                        # Save geometry to temporary XYZ for rescue calculation
+                        rescue_xyz_path = os.path.join(stage_dir, f"{basename}_rescue_geom.xyz")
+                        try:
+                            with open(rescue_xyz_path, 'w') as f:
+                                natoms = len([line for line in new_geometry if line.strip()])
+                                f.write(f"{natoms}\n")
+                                f.write(f"{basename} geometry for rescue Hessian\n")
+                                for line in new_geometry:
+                                    if line.strip():
+                                        f.write(line if line.endswith('\n') else line + '\n')
+                            
+                            # Run rescue Hessian calculation
+                            hess_file = run_rescue_hessian_calculation(
+                                rescue_xyz_path, rescue_method, launcher_path,
+                                charge=charge_val, multiplicity=mult_val, nprocs=nprocs_val,
+                                output_basename=basename,  # Use original basename
+                                use_numfreq=rescue_use_numfreq
+                            )
+                            
+                            if hess_file and os.path.exists(hess_file):
+                                rescue_hessian_tasks.append((basename, hess_file))
+                                if verbose:
+                                    print(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
+                            else:
+                                if verbose:
+                                    print(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
+                            
+                            # Cleanup temporary XYZ
+                            if os.path.exists(rescue_xyz_path):
+                                os.remove(rescue_xyz_path)
+                        except Exception as e:
+                            if verbose:
+                                print(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
+                    else:
+                        # Fallback to similarity XYZ
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        if os.path.exists(xyz_file):
+                            with open(xyz_file, 'r') as f:
+                                new_geometry = f.readlines()[2:]
+                            if verbose:
+                                print(f" ✓")
+                        else:
+                            if verbose:
+                                print(f" ✗ (extraction failed)")
+                elif conv_status['status'] == 'not_converged':
+                    # Non-converged but no rescue method - use final geometry
+                    xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                    if xyz_lines:
+                        new_geometry = xyz_lines[2:]
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using final geometry ✓")
+                    else:
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        if os.path.exists(xyz_file):
+                            with open(xyz_file, 'r') as f:
+                                new_geometry = f.readlines()[2:]
+                            if verbose:
+                                print(f" ✓")
+                        else:
+                            if verbose:
+                                print(f" ✗")
                 else:
-                    print(f" ✗ (similarity XYZ not found)")
+                    # Converged with no imaginary freqs - use similarity XYZ
+                    if verbose:
+                        print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
+                    if os.path.exists(xyz_file):
+                        with open(xyz_file, 'r') as f:
+                            new_geometry = f.readlines()[2:]
+                        if verbose:
+                            print(f" ✓")
+                    else:
+                        if verbose:
+                            print(f" ✗ (similarity XYZ not found)")
         else:
-            # No .out file found - use XYZ from similarity
-            print(f"    {basename}: No .out file, using similarity XYZ", end='')
-            if os.path.exists(xyz_file):
+            # No .out file found - check if from critical_non_converged (needs rescue hessian)
+            if is_critical_non_converged and xyz_file and os.path.exists(xyz_file):
+                # Structure from critical_non_converged - use XYZ with rescue Hessian
                 with open(xyz_file, 'r') as f:
                     new_geometry = f.readlines()[2:]
-                print(f" ✓")
+                
+                if rescue_method and launcher_path:
+                    # Run rescue Hessian calculation
+                    rescue_xyz_path = os.path.join(stage_dir, f"{basename}_rescue_geom.xyz")
+                    try:
+                        with open(rescue_xyz_path, 'w') as f:
+                            natoms = len([line for line in new_geometry if line.strip()])
+                            f.write(f"{natoms}\n")
+                            f.write(f"{basename} geometry for rescue Hessian\n")
+                            for line in new_geometry:
+                                if line.strip():
+                                    f.write(line if line.endswith('\n') else line + '\n')
+                        
+                        hess_file = run_rescue_hessian_calculation(
+                            rescue_xyz_path, rescue_method, launcher_path,
+                            charge=charge_val, multiplicity=mult_val, nprocs=nprocs_val,
+                            output_basename=basename,
+                            use_numfreq=rescue_use_numfreq
+                        )
+                        
+                        if hess_file and os.path.exists(hess_file):
+                            rescue_hessian_tasks.append((basename, hess_file))
+                            if verbose:
+                                print(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
+                        else:
+                            if verbose:
+                                print(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
+                        
+                        if os.path.exists(rescue_xyz_path):
+                            os.remove(rescue_xyz_path)
+                    except Exception as e:
+                        if verbose:
+                            print(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
+                else:
+                    if verbose:
+                        print(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
+            elif xyz_file and os.path.exists(xyz_file):
+                # Regular case - just use XYZ from similarity
+                if verbose:
+                    print(f"    {basename}: No .out file, using similarity XYZ", end='')
+                with open(xyz_file, 'r') as f:
+                    new_geometry = f.readlines()[2:]
+                if verbose:
+                    print(f" ✓")
             else:
-                print(f" ✗ (similarity XYZ not found)")
+                if verbose:
+                    print(f"    {basename}: No .out file, similarity XYZ not found ✗")
         
         # Regenerate input file with new geometry
         if new_geometry:
@@ -10246,7 +12217,8 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                     processed_count += 1
                     processed_basenames.append(basename)
                 except Exception as e:
-                    print(f"\n    Warning: Could not update {basename}: {e}")
+                    if verbose:
+                        print(f"\n    Warning: Could not update {basename}: {e}")
             else:
                 # Original file doesn't exist - create new from template
                 # Parse XYZ lines into atom fields (symbol, x, y, z)
@@ -10269,7 +12241,44 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                     processed_basenames.append(basename)
     
     if processed_count > 0:
-        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        if verbose:
+            print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        
+        # Enable Hessian restart for structures with rescue Hessians computed
+        if rescue_hessian_tasks:
+            if verbose:
+                print(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
+            for task_basename, hess_file in rescue_hessian_tasks:
+                # Find the input file path
+                template_lower = template_file.lower().strip()
+                if template_lower.endswith('.inp'):
+                    input_ext = '.inp'
+                else:
+                    input_ext = '.com' if template_lower.endswith('.com') else '.gjf'
+                
+                # Determine where input file will run from (subdirectory takes precedence)
+                subdir_path = os.path.join(stage_dir, task_basename)
+                if os.path.isdir(subdir_path):
+                    # Calculation runs from subdirectory
+                    input_path = os.path.join(subdir_path, f"{task_basename}{input_ext}")
+                    hess_dest = os.path.join(subdir_path, os.path.basename(hess_file))
+                else:
+                    # Calculation runs from stage_dir root
+                    input_path = os.path.join(stage_dir, f"{task_basename}{input_ext}")
+                    hess_dest = os.path.join(stage_dir, os.path.basename(hess_file))
+                
+                if os.path.exists(input_path):
+                    # Copy Hessian file to same directory as input file
+                    same_file = os.path.exists(hess_dest) and os.path.samefile(hess_file, hess_dest)
+                    if not same_file and os.path.exists(hess_file):
+                        shutil.copy2(hess_file, hess_dest)
+                    
+                    if enable_hessian_restart(input_path, hess_dest):
+                        if verbose:
+                            print(f"    {task_basename}: Hessian restart enabled ✓")
+                    else:
+                        if verbose:
+                            print(f"    {task_basename}: Hessian restart failed ✗")
         
         # Store recalculated basenames in context for similarity cache update
         context.recalculated_files = processed_basenames
@@ -10277,12 +12286,13 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         # RENAME (not delete) output files for structures needing recalculation
         # This preserves the old .out file in case the new calculation fails
         # We can then extract geometry from the backup on next redo attempt
-        print(f"  Backing up old output files for structures needing recalculation")
+        if verbose:
+            print(f"  Backing up old output files for structures needing recalculation")
         for basename in processed_basenames:
             # Build list of subdirectories to search, including shortened basename variants
             subdirs_to_search = ['orca_out', 'gaussian_out', 'completed', basename]
             
-            # Add shortened versions for common patterns (e.g., "motif_01" for "motif_01_opt")
+            # Add shortened versions for common patterns (e.g., "motif_01" for "motif_01"_ref")
             if '_opt' in basename:
                 subdirs_to_search.insert(0, basename.replace('_opt', ''))
             elif '_calc' in basename:
@@ -10323,16 +12333,18 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                             pass
     
     return processed_count > 0
-def process_optimization_redo(context: WorkflowContext, stage_dir: str, template_file: str) -> bool:
+def process_refinement_redo(context: WorkflowContext, stage_dir: str, template_file: str) -> bool:
     """
-    Specialized redo processing for optimization stage.
-    Handles the specific directory structure of optimization/similarity interactions.
+    Specialized redo processing for refinement stage.
+    Handles the specific directory structure of refinement/similarity interactions.
     """
+    verbose = context.verbose_level >= 1
+    
     # 1. Determine Similarity Directory
-    # For optimization, we look for the similarity folder that THIS optimization feeds into.
+    # For refinement, we look for the similarity folder that THIS refinement feeds into.
     # Usually similarity_2, similarity_3, etc.
-    # Use opt_sim_folder (the dedicated variable for optimization outputs)
-    sim_dir = getattr(context, 'opt_sim_folder', None)
+    # Use ref_sim_folder (the dedicated variable for refinement outputs)
+    sim_dir = getattr(context, 'ref_sim_folder', None)
     
     if not sim_dir:
         # Try to guess based on existence
@@ -10346,14 +12358,15 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
             return False
     
     # CRITICAL: If sim_dir includes orca_out_X subdirectory, strip it
-    # organize step sets context.opt_sim_folder to "similarity_2/orca_out_5_1"
+    # organize step sets context.ref_sim_folder to "similarity_2/orca_out_5_1"
     # but skipped_structures is at "similarity_2/skipped_structures/"
     if '/' in sim_dir and ('orca_out_' in sim_dir or 'gaussian_out_' in sim_dir):
         sim_dir = sim_dir.split('/')[0]
     
     # 2. Locate need_recalculation directory and optionally clustered_with_minima
-    need_recalc_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
+    need_reopt_dir = os.path.join(sim_dir, "skipped_structures", "need_recalculation")
     clustered_dir = os.path.join(sim_dir, "skipped_structures", "clustered_with_minima")
+    critical_non_conv_dir = os.path.join(sim_dir, "skipped_structures", "critical_non_converged")
     
     # Check threshold mode from context
     # --critical: only use need_recalculation (structures with imaginary freqs)
@@ -10364,11 +12377,17 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     xyz_files = []
     
     # Always include critical structures (need_recalculation) - these have imaginary frequencies
-    if os.path.exists(need_recalc_dir):
-        need_recalc_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
+    if os.path.exists(need_reopt_dir):
+        need_recalc_files = glob.glob(os.path.join(need_reopt_dir, "*.xyz"))
         # Filter out combined files
         need_recalc_files = [f for f in need_recalc_files if "combined" not in os.path.basename(f).lower()]
         xyz_files.extend(need_recalc_files)
+    
+    # Always include critical non-converged structures (these need rescue hessian)
+    if os.path.exists(critical_non_conv_dir):
+        critical_nc_files = glob.glob(os.path.join(critical_non_conv_dir, "*.xyz"))
+        critical_nc_files = [f for f in critical_nc_files if "combined" not in os.path.basename(f).lower()]
+        xyz_files.extend(critical_nc_files)
     
     # Only include clustered_with_minima if --skipped threshold is used
     # These are structures that clustered with existing minima (skipped but not critical)
@@ -10384,9 +12403,11 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     xyz_files = sorted(xyz_files, key=lambda x: natural_sort_key(os.path.basename(x)))
         
     # Determine which directory to display based on what we found
-    display_dir = need_recalc_dir if os.path.exists(need_recalc_dir) else clustered_dir
-    if os.path.exists(need_recalc_dir) and os.path.exists(clustered_dir):
-        display_dir = os.path.dirname(need_recalc_dir)  # Show parent "skipped_structures"
+    display_dir = need_reopt_dir if os.path.exists(need_reopt_dir) else clustered_dir
+    if os.path.exists(need_reopt_dir) and os.path.exists(clustered_dir):
+        display_dir = os.path.dirname(need_reopt_dir)  # Show parent "skipped_structures"
+    if os.path.exists(critical_non_conv_dir):
+        display_dir = os.path.dirname(need_reopt_dir)  # Show parent "skipped_structures"
     
     print(f"\nProcessing redo structures from: {display_dir}")
     print(f"Found {len(xyz_files)} structure(s) to retry")
@@ -10402,38 +12423,86 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
         
     with open(template_file, 'r') as f:
         template_content = f.read()
+    
+    # Find launcher path for ORCA calculations (load early for version detection)
+    launcher_path = None
+    launcher_content = None
+    possible_launchers = [
+        os.path.join(stage_dir, 'launcher_orca.sh'),
+        os.path.join(stage_dir, 'launcher_ascec.sh'),
+        'launcher_orca.sh',
+        'launcher_ascec.sh',
+    ]
+    for lp in possible_launchers:
+        if os.path.exists(lp):
+            launcher_path = lp
+            try:
+                with open(lp, 'r') as f:
+                    launcher_content = f.read()
+            except Exception:
+                pass
+            break
+
+    # Parse rescue method from template (for structures with 2+ imaginary frequencies)
+    rescue_method, rescue_use_numfreq = parse_rescue_method(template_content, launcher_content=launcher_content)
+    
+    # Extract charge and multiplicity from template
+    charge_val = 0
+    mult_val = 1
+    xyz_match = re.search(r'\*\s*(?:xyz|xyzfile)\s+(-?\d+)\s+(\d+)', template_content, re.IGNORECASE)
+    if xyz_match:
+        charge_val = int(xyz_match.group(1))
+        mult_val = int(xyz_match.group(2))
+    
+    # Extract nprocs from template (ORCA or Gaussian format)
+    nprocs_val = 1  # default to 1 if not found
+    # ORCA format: nprocs N
+    nprocs_match = re.search(r'nprocs\s+(\d+)', template_content, re.IGNORECASE)
+    if nprocs_match:
+        nprocs_val = int(nprocs_match.group(1))
+    else:
+        # Gaussian format: %NProcShared=N
+        nprocs_match = re.search(r'%NProcShared\s*=\s*(\d+)', template_content, re.IGNORECASE)
+        if nprocs_match:
+            nprocs_val = int(nprocs_match.group(1))
+    
+    # Track structures needing rescue Hessian (2+ imaginary freqs)
+    rescue_hessian_tasks = []  # List of (basename, hess_file)
         
     for xyz_file in xyz_files:
         basename = os.path.splitext(os.path.basename(xyz_file))[0]
         
+        # Check if this structure came from critical_non_converged (non-converged optimization)
+        is_critical_non_converged = os.path.exists(critical_non_conv_dir) and critical_non_conv_dir in xyz_file
+        
         # 4a. Find the previous output file (to check imaginary freqs and extract geometry)
         # Optimization outputs are tricky. They could be in:
-        # - optimization/umotif_XX_opt.out (root)
-        # - optimization/umotif_XX_opt/umotif_XX_opt.out (subdir)
-        # - similarity_2/orca_out_X/umotif_XX_opt.out (moved there)
-        # - need_recalc_dir/umotif_XX_opt.out (copied there by similarity script)
+        # - refinement/umotif_XX_ref.out (root)
+        # - refinement/umotif_XX_ref/umotif_XX_ref.out (subdir)
+        # - similarity_2/orca_out_X/umotif_XX_ref.out (moved there)
+        # - need_reopt_dir/umotif_XX_ref.out (copied there by similarity script)
         
         out_file = None
         
-        # Priority 1: Check optimization directory (subdirs) - THIS IS THE REAL FILE WE NEED TO BACKUP
+        # Priority 1: Check refinement directory (subdirs) - THIS IS THE REAL FILE WE NEED TO BACKUP
         # Check exact basename subdir
         check_path = os.path.join(stage_dir, basename, f"{basename}.out")
         if os.path.exists(check_path):
             out_file = check_path
         else:
-            # Check subdir (motif_01 for motif_01_opt)
+            # Check subdir (motif_01 for motif_01_ref)
             short_name = basename.replace('_opt', '').replace('_calc', '')
             check_path = os.path.join(stage_dir, short_name, f"{basename}.out")
             if os.path.exists(check_path):
                 out_file = check_path
                     
-        # Priority 2: Check optimization root
+        # Priority 2: Check refinement root
         if not out_file:
             check_path = os.path.join(stage_dir, f"{basename}.out")
             if os.path.exists(check_path):
                 out_file = check_path
         
-        # Priority 3: Check similarity output folders (if not found in optimization yet)
+        # Priority 3: Check similarity output folders (if not found in refinement yet)
         if not out_file and os.path.exists(sim_dir):
             for item in os.listdir(sim_dir):
                 if item.startswith('orca_out_') or item.startswith('gaussian_out_') or item.startswith('calc_out_'):
@@ -10442,11 +12511,15 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                         out_file = check_path
                         break
         
-        # Priority 4: Check need_recalc_dir (similarity script copy - ONLY for reading geometry)
+        # Priority 4: Check need_reopt_dir or critical_non_converged (similarity script copy - ONLY for reading geometry)
         if not out_file:
-            check_path = os.path.join(need_recalc_dir, f"{basename}.out")
+            check_path = os.path.join(need_reopt_dir, f"{basename}.out")
             if os.path.exists(check_path):
                 out_file = check_path
+            elif os.path.exists(critical_non_conv_dir):
+                check_path = os.path.join(critical_non_conv_dir, f"{basename}.out")
+                if os.path.exists(check_path):
+                    out_file = check_path
             
         # 4b. Determine new geometry
         new_geometry = None
@@ -10461,17 +12534,119 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                     new_geometry = xyz_lines[2:]
                     print(f"    {basename}: 1 imaginary freq, displacing along mode \u2713")
             elif imag_count >= 2:
-                # Use final geometry
-                xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                # Multiple imaginary: displace along the highest (most negative) imaginary mode
+                xyz_lines = displace_along_imaginary_mode(out_file, os.path.dirname(out_file), use_highest_mode=True)
                 if xyz_lines and len(xyz_lines) > 2:
                     new_geometry = xyz_lines[2:]
-                    print(f"    {basename}: {imag_count} imaginary freqs, using final geometry \u2713")
+                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
+                else:
+                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗")
             else:
-                # No imaginary? Use XYZ from similarity
-                print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
+                # No imaginary frequencies - check if non-converged (max iterations reached)
+                conv_status = detect_convergence_status(out_file)
+                
+                if conv_status['status'] == 'not_converged' and rescue_method and launcher_path:
+                    # Non-converged structure - use final geometry with rescue Hessian
+                    xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                    if xyz_lines and len(xyz_lines) > 2:
+                        new_geometry = xyz_lines[2:]
+                        
+                        # Save geometry to temporary XYZ for rescue calculation
+                        rescue_xyz_path = os.path.join(stage_dir, f"{basename}_rescue_geom.xyz")
+                        try:
+                            with open(rescue_xyz_path, 'w') as f:
+                                natoms = len([line for line in new_geometry if line.strip()])
+                                f.write(f"{natoms}\n")
+                                f.write(f"{basename} geometry for rescue Hessian\n")
+                                for line in new_geometry:
+                                    if line.strip():
+                                        f.write(line if line.endswith('\n') else line + '\n')
+                            
+                            # Run rescue Hessian calculation
+                            hess_file = run_rescue_hessian_calculation(
+                                rescue_xyz_path, rescue_method, launcher_path,
+                                charge=charge_val, multiplicity=mult_val, nprocs=nprocs_val,
+                                output_basename=basename,  # Use original basename
+                                use_numfreq=rescue_use_numfreq
+                            )
+                            
+                            if hess_file and os.path.exists(hess_file):
+                                rescue_hessian_tasks.append((basename, hess_file))
+                                if verbose:
+                                    print(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
+                            else:
+                                if verbose:
+                                    print(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
+                            
+                            # Cleanup temporary XYZ
+                            if os.path.exists(rescue_xyz_path):
+                                os.remove(rescue_xyz_path)
+                        except Exception as e:
+                            if verbose:
+                                print(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
+                    else:
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                elif conv_status['status'] == 'not_converged':
+                    # Non-converged but no rescue method - use final geometry
+                    xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
+                    if xyz_lines and len(xyz_lines) > 2:
+                        new_geometry = xyz_lines[2:]
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using final geometry ✓")
+                    else:
+                        if verbose:
+                            print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                else:
+                    # Converged with no imaginary freqs - use similarity XYZ
+                    if verbose:
+                        print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
         else:
-            # No .out file found - use XYZ from similarity
-            print(f"    {basename}: No .out file, using similarity XYZ", end='')
+            # No .out file found - check if from critical_non_converged (needs rescue hessian)
+            if is_critical_non_converged and os.path.exists(xyz_file):
+                # Structure from critical_non_converged - use XYZ with rescue Hessian
+                with open(xyz_file, 'r') as f:
+                    new_geometry = f.readlines()[2:]
+                
+                if rescue_method and launcher_path:
+                    # Run rescue Hessian calculation
+                    rescue_xyz_path = os.path.join(stage_dir, f"{basename}_rescue_geom.xyz")
+                    try:
+                        with open(rescue_xyz_path, 'w') as f:
+                            natoms = len([line for line in new_geometry if line.strip()])
+                            f.write(f"{natoms}\n")
+                            f.write(f"{basename} geometry for rescue Hessian\n")
+                            for line in new_geometry:
+                                if line.strip():
+                                    f.write(line if line.endswith('\n') else line + '\n')
+                        
+                        hess_file = run_rescue_hessian_calculation(
+                            rescue_xyz_path, rescue_method, launcher_path,
+                            charge=charge_val, multiplicity=mult_val, nprocs=nprocs_val,
+                            output_basename=basename,
+                            use_numfreq=rescue_use_numfreq
+                        )
+                        
+                        if hess_file and os.path.exists(hess_file):
+                            rescue_hessian_tasks.append((basename, hess_file))
+                            if verbose:
+                                print(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
+                        else:
+                            if verbose:
+                                print(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
+                        
+                        if os.path.exists(rescue_xyz_path):
+                            os.remove(rescue_xyz_path)
+                    except Exception as e:
+                        if verbose:
+                            print(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
+                else:
+                    if verbose:
+                        print(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
+            else:
+                # Regular case - just use XYZ from similarity
+                if verbose:
+                    print(f"    {basename}: No .out file, using similarity XYZ", end='')
         
         # Fallback to XYZ file
         if not new_geometry:
@@ -10479,7 +12654,8 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                 new_geometry = f.readlines()[2:]
             imag_count = 0  # Initialize
             if out_file is None or imag_count == 0:
-                print(f" \u2713")
+                if verbose:
+                    print(f" \u2713")
                 
         # 4c. Generate Input File
         if new_geometry:
@@ -10517,7 +12693,7 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                 processed_count += 1
                 processed_basenames.append(basename)
                 
-                # 4d. Backup old output file (CRITICAL for optimization to re-run)
+                # 4d. Backup old output file (CRITICAL for refinement to re-run)
                 # We must move the old .out file so the workflow sees it as "not done"
                 # Only keep first backup - don't create incrementing backups
                 if out_file and os.path.exists(out_file):
@@ -10529,27 +12705,68 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                         os.remove(out_file)
                     
     if processed_count > 0:
-        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        if verbose:
+            print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        
+        # Enable Hessian restart for structures with rescue Hessians computed
+        if rescue_hessian_tasks:
+            if verbose:
+                print(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
+            for task_basename, hess_file in rescue_hessian_tasks:
+                # Find the input file path
+                template_lower = template_file.lower().strip()
+                if template_lower.endswith('.inp'):
+                    input_ext = '.inp'
+                else:
+                    input_ext = '.com' if template_lower.endswith('.com') else '.gjf'
+                
+                # Determine where input file will run from (subdirectory takes precedence)
+                subdir_path = os.path.join(stage_dir, task_basename)
+                if os.path.isdir(subdir_path):
+                    # Calculation runs from subdirectory
+                    input_path = os.path.join(subdir_path, f"{task_basename}{input_ext}")
+                    hess_dest = os.path.join(subdir_path, os.path.basename(hess_file))
+                else:
+                    # Calculation runs from stage_dir root
+                    input_path = os.path.join(stage_dir, f"{task_basename}{input_ext}")
+                    hess_dest = os.path.join(stage_dir, os.path.basename(hess_file))
+                
+                if os.path.exists(input_path):
+                    # Copy Hessian file to same directory as input file
+                    same_file = os.path.exists(hess_dest) and os.path.samefile(hess_file, hess_dest)
+                    if not same_file and os.path.exists(hess_file):
+                        shutil.copy2(hess_file, hess_dest)
+                    
+                    if enable_hessian_restart(input_path, hess_dest):
+                        if verbose:
+                            print(f"    {task_basename}: Hessian restart enabled ✓")
+                    else:
+                        if verbose:
+                            print(f"    {task_basename}: Hessian restart failed ✗")
+        
         # Sort for natural ordering (motif_01, motif_02, etc.)
         context.recalculated_files = sorted(processed_basenames, key=natural_sort_key)
     
     return processed_count > 0
 
-def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
-    """Execute calculation stage with automatic retry logic."""
+def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
+    """Execute optimization stage with automatic retry logic."""
     # Store context globally for access in helper functions
     sys._current_workflow_context = context  # type: ignore[attr-defined]
     
+    verbose = context.verbose_level >= 1
+    
     args = stage['args']
     
-    # Parse flags
-    max_critical = 10     # default: 0% critical structures allowed
-    max_skipped = 30      # default: 100% skipped structures allowed (no limit)
-    max_stage_redos = 0   # default: no stage redos (--redo: redo entire calc+similarity)
-    max_calc_retries = 5  # default: 5 retries per calculation (--retry: retry individual calcs)
+    # Parse flags - defaults for when flags are not explicitly provided
+    max_critical = 0      # default: 0% critical structures allowed (strict)
+    max_skipped = None    # Not set by default (only --critical is used unless --skipped specified)
+    max_stage_redos = 3   # default: 3 stage redos (--redo: redo entire calc+similarity)
+    # Note: --retry removed; launch failures auto-retry up to 10 times (hardcoded)
     auto_select = 'combined'  # Workflow mode defaults to combining files (like -c flag)
     template_file = None
     launcher_file = None
+    template_name = None  # For embedded template lookup
     
     i = 0
     while i < len(args):
@@ -10561,16 +12778,6 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             max_skipped = float(arg.split('=')[1])
         elif arg.startswith('--redo='):
             max_stage_redos = int(arg.split('=')[1])
-        elif arg.startswith('--retry'):
-            # --retry=N: retry each calc up to N times
-            # --retry (no number): retry until all succeed (unlimited)
-            if '=' in arg:
-                max_calc_retries = int(arg.split('=')[1])
-            else:
-                max_calc_retries = 999999  # Effectively unlimited
-        elif arg.startswith('--attempt='):
-            # Deprecated alias for --retry
-            max_calc_retries = int(arg.split('=')[1])
         elif arg.startswith('--auto-select='):
             auto_select = arg.split('=')[1]
         elif arg == '-a':
@@ -10587,47 +12794,57 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             template_file = arg
         elif arg.endswith('.sh') and launcher_file is None:
             launcher_file = arg
+        elif not arg.startswith('-') and template_name is None:
+            # Might be a template name (from embedded templates)
+            template_name = arg
         
         i += 1
     
+    # If no template file found, check for embedded template by name
+    if not template_file and template_name:
+        embedded_templates = getattr(context, 'embedded_templates', {})
+        if template_name in embedded_templates:
+            template_file = embedded_templates[template_name]
+    
     if not template_file:
-        print("Error: No template file specified for calculation stage")
+        print("Error: No template file specified for optimization stage")
+        print("  Expected: template.inp file OR embedded template name")
+        print("  Embedded templates available:", list(getattr(context, 'embedded_templates', {}).keys()) or "none")
         return 1
     
     context.max_tries = max_stage_redos  # For compatibility with existing code
-    context.max_attempts_per_calc = max_calc_retries  # Store for this stage
     
     # Process redo structures at the START of the stage (if need_recalculation exists)
     # This ensures that when the workflow restarts this stage after a similarity failure,
     # we immediately regenerate inputs and delete old outputs before checking completion
-    calc_dir = getattr(context, 'calculation_dir', 'calculation')
-    if not calc_dir:  # Handle empty string
-        calc_dir = 'calculation'
-    if os.path.exists(calc_dir):
-        redo_result = process_redo_structures(context, calc_dir, template_file)
+    opt_dir = getattr(context, 'optimization_dir', 'optimization')
+    if not opt_dir:  # Handle empty string
+        opt_dir = 'optimization'
+    if os.path.exists(opt_dir):
+        redo_result = process_redo_structures(context, opt_dir, template_file)
     
     
     # Check if we're resuming and calculation directory already exists
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
     cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
     
-    # Get the current stage key from context (e.g., "calculation_2" for first calc at position 2)
+    # Get the current stage key from context (e.g., "optimization_2" for first calc at position 2)
     stage_key = getattr(context, 'current_stage_key', '')
     
     # Get completed calculations from cache
     completed_calcs = cache.get('stages', {}).get(stage_key, {}).get('result', {}).get('completed_files', [])
-    calc_dir_exists = os.path.exists("calculation")
+    opt_dir_exists = os.path.exists("optimization")
     
     # If resuming (cache exists + calc stage was started before), reuse existing directory  
     # This works even if no calculations completed yet (e.g., interrupted during first calc)
     stage_was_started = stage_key in cache.get('stages', {})
     
     # Determine if this is a fresh start or resume
-    calc_dir = getattr(context, 'calculation_dir', None)
-    if calc_dir_exists and stage_was_started:
+    opt_dir = getattr(context, 'optimization_dir', None)
+    if opt_dir_exists and stage_was_started:
         # Use absolute path from context if available, otherwise use relative path
-        if not calc_dir:
-            calc_dir = "calculation"
+        if not opt_dir:
+            opt_dir = "optimization"
         
         # Check if redo structures exist (files scheduled for recalculation)
         redo_files = set()
@@ -10639,13 +12856,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         actual_completed = []
         
         # 1. Check calculation directory subfolders
-        if os.path.exists(calc_dir):
-            for item in os.listdir(calc_dir):
-                item_path = os.path.join(calc_dir, item)
+        if os.path.exists(opt_dir):
+            for item in os.listdir(opt_dir):
+                item_path = os.path.join(opt_dir, item)
                 if os.path.isdir(item_path) and not item.startswith('_'):  # Skip _run_ directories
                     # Skip if this file is marked for redo
-                    # Check both "item" AND "item_opt"/"item_calc" against redo_files
-                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    # Check both "item" AND "item_ref"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_ref", f"{item}_calc"]
                     if any(variant in redo_files for variant in redo_variants):
                         continue
                         
@@ -10658,12 +12875,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             
             # 1b. Check for flat files in calculation directory (e.g. opt_conf_1.out)
             # This handles the case where calculations are not in subdirectories
-            for item in os.listdir(calc_dir):
+            for item in os.listdir(opt_dir):
                 if item.endswith('.out') or item.endswith('.log'):
                     basename = os.path.splitext(item)[0]
                     # Skip if already found in subdir or marked for redo
                     if basename not in actual_completed and basename not in redo_files:
-                        out_file = os.path.join(calc_dir, item)
+                        out_file = os.path.join(opt_dir, item)
                         # Verify completion (OPI-aware for ORCA 6.1+)
                         if item.endswith('.out'):
                             if check_orca_terminated_normally_opi(out_file):
@@ -10726,14 +12943,14 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         # CRITICAL: If we found NO completed files but input_files is very small,
         # this might be a redo scenario where all other files are already done
         # Count ALL subdirectories in calculation/ as potential completed files
-        if len(completed_calcs) == 0 and calc_dir_exists:
-            for item in os.listdir(calc_dir):
-                item_path = os.path.join(calc_dir, item)
+        if len(completed_calcs) == 0 and opt_dir_exists:
+            for item in os.listdir(opt_dir):
+                item_path = os.path.join(opt_dir, item)
                 if os.path.isdir(item_path) and not item.startswith('_'):
                     # Even if no .out file, if the subdirectory exists, a calc was attempted
                     # Check for .out.backup (means it's being redone)
-                    # Check both "item" AND "item_opt"/"item_calc" against redo_files
-                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    # Check both "item" AND "item_ref"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_ref", f"{item}_calc"]
                     is_redo = any(variant in redo_files for variant in redo_variants)
                     if not is_redo and item not in actual_completed:
                         # Count any subdirectory as a potential completed calc for total count
@@ -10746,14 +12963,14 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
 
         
         if completed_calcs:
-            print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
+            print(f"\nResuming: Using existing optimization directory ({len(completed_calcs)} files already completed)\n")
         else:
-            print(f"\nResuming: Using existing calculation directory\n")
+            print(f"\nResuming: Using existing optimization directory\n")
         
         # Clean up ORCA intermediate files at root level (they should not be there)
         excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
-        for item in os.listdir(calc_dir):
-            item_path = os.path.join(calc_dir, item)
+        for item in os.listdir(opt_dir):
+            item_path = os.path.join(opt_dir, item)
             if os.path.isfile(item_path) and any(pattern in item for pattern in excluded_patterns):
                 try:
                     os.remove(item_path)
@@ -10761,7 +12978,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     pass
         
         # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
-        for old_inp in glob.glob(os.path.join(calc_dir, "*.inp")) + glob.glob(os.path.join(calc_dir, "*.com")):
+        for old_inp in glob.glob(os.path.join(opt_dir, "*.inp")) + glob.glob(os.path.join(opt_dir, "*.com")):
             # Skip ORCA intermediate files (already handled above)
             if any(pattern in old_inp for pattern in excluded_patterns):
                 continue
@@ -10773,48 +12990,93 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             if basename in redo_files:
                 continue
                 
-            subdir = os.path.join(calc_dir, basename)
+            subdir = os.path.join(opt_dir, basename)
             if os.path.isdir(subdir):
                 os.remove(old_inp)
     else:
-        # Run calculation system creation with auto_select (in workflow mode)
-        status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="calculation", workflow_mode=True)
+        # Handle launcher: if not provided, auto-detect ORCA and create launcher
+        if launcher_file:
+            if not os.path.exists(launcher_file):
+                print(f"Warning: Launcher script not found: {launcher_file}")
+                print("  Attempting to auto-detect ORCA installation...")
+                launcher_file = None
+        
+        # Track existing calculation directories before running calculate_input_files
+        existing_opt_dirs = set(d for d in os.listdir('.') if d.startswith('optimization') and os.path.isdir(d))
+        
+        # Get QM alias from context (read from input.in line 9)
+        qm_alias = getattr(context, 'qm_alias', 'orca')
+        
+        auto_launcher_created = False
+        auto_launcher_content = ""
+        if not launcher_file:
+            # Try to auto-create launcher in a temp location first (don't interfere with directory naming)
+            import tempfile
+            with tempfile.TemporaryDirectory() as tmpdir:
+                auto_launcher_tmp = create_auto_launcher(tmpdir, "orca", qm_alias)
+                if auto_launcher_tmp:
+                    # Read the launcher content to pass it later
+                    with open(auto_launcher_tmp, 'r') as f:
+                        auto_launcher_content = f.read()
+                    auto_launcher_created = True
+        
+        # Run optimization system creation with auto_select (in workflow mode)
+        status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="optimization", workflow_mode=True)
         # Don't print result message in workflow mode - output is already shown
         
-        # Find the calculation directory that was just created
-        calc_dir = "calculation" if os.path.exists("calculation") else None
+        # Find the calculation directory that was just created (may be calculation, calculation_2, etc.)
+        current_opt_dirs = set(d for d in os.listdir('.') if d.startswith('optimization') and os.path.isdir(d))
+        new_opt_dirs = current_opt_dirs - existing_opt_dirs
+        if new_opt_dirs:
+            # Use the newly created directory
+            opt_dir = sorted(new_opt_dirs)[-1]  # Get the highest numbered one
+        elif "optimization" in current_opt_dirs:
+            opt_dir = "optimization"
+        else:
+            opt_dir = None
+        
+        # If we auto-created a launcher, copy it to the actual calculation directory
+        if auto_launcher_created and opt_dir and os.path.exists(opt_dir):
+            launcher_dest = os.path.join(opt_dir, "launcher_orca.sh")
+            if not os.path.exists(launcher_dest):
+                with open(launcher_dest, 'w') as f:
+                    f.write(auto_launcher_content)
+                os.chmod(launcher_dest, 0o755)
+                if verbose:
+                    print(f"  Created auto-generated launcher: launcher_orca.sh")
     
-    if calc_dir and os.path.exists(calc_dir):
-        context.calculation_dir = calc_dir
+    if opt_dir and os.path.exists(opt_dir):
+        context.optimization_dir = opt_dir
         
         # Find and execute the launcher script
-        launcher_script = os.path.join(calc_dir, "launcher_orca.sh")
+        launcher_script = os.path.join(opt_dir, "launcher_orca.sh")
         if not os.path.exists(launcher_script):
-            launcher_script = os.path.join(calc_dir, "launcher_gaussian.sh")
+            launcher_script = os.path.join(opt_dir, "launcher_gaussian.sh")
         if not os.path.exists(launcher_script):
-            launcher_script = os.path.join(calc_dir, "launcher.sh")
+            launcher_script = os.path.join(opt_dir, "launcher.sh")
         
         if os.path.exists(launcher_script):
-            print(f"\nExecuting calculations...\n")
+            if verbose:
+                print(f"\nExecuting calculations...\n")
             
-            # Helper function to filter out ORCA intermediate files
+            # Helper function to filter out ORCA intermediate files and rescue inputs
             def is_valid_input_file(filename):
-                """Check if file is a valid input file (not an ORCA intermediate file)"""
+                """Check if file is a valid input file (not an ORCA intermediate or rescue file)"""
                 if not filename.endswith(('.inp', '.com', '.gjf')):
                     return False
-                # Exclude ORCA intermediate files
-                excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
+                # Exclude ORCA intermediate files and rescue inputs (already processed)
+                excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.', '_rescue.']
                 return not any(pattern in filename for pattern in excluded_patterns)
             
             # Get list of input files to process
             # Check if files are at root level or in subdirectories (after sort command)
-            input_files = sorted([f for f in os.listdir(calc_dir) if is_valid_input_file(f)], key=natural_sort_key)
+            input_files = sorted([f for f in os.listdir(opt_dir) if is_valid_input_file(f)], key=natural_sort_key)
             
             if not input_files:
                 # No input files at root - check if they're in subdirectories (sorted)
                 # Look for subdirectories with input files
-                for item in os.listdir(calc_dir):
-                    item_path = os.path.join(calc_dir, item)
+                for item in os.listdir(opt_dir):
+                    item_path = os.path.join(opt_dir, item)
                     if os.path.isdir(item_path):
                         subdir_files = [f for f in os.listdir(item_path) if is_valid_input_file(f)]
                         if subdir_files:
@@ -10831,12 +13093,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 qm_program = 'orca'  # Default
             
             # Get exclusions from cache (already loaded earlier)
-            # Use appropriate key based on which calculation stage this is
-            calc_num = getattr(context, 'calc_stage_number', 1)
+            # Use appropriate key based on which optimization stage this is
+            calc_num = getattr(context, 'opt_stage_number', 1)
             if calc_num == 1:
-                excluded_numbers = cache.get('excluded_calculations', [])
+                excluded_numbers = cache.get('excluded_optimizations', [])
             else:
-                excluded_numbers = cache.get('excluded_calculations_2', [])
+                excluded_numbers = cache.get('excluded_optimizations_2', [])
             
             # Apply exclusion filtering to completed_calcs and input_files
             completed_calcs = [f for f in completed_calcs if not match_exclusion(f, excluded_numbers)]
@@ -10862,10 +13124,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             # Store initial completed count (before loop may modify completed_calcs)
             initial_completed_count = len(completed_calcs)
             
-            if completed_calcs:
+            if completed_calcs and not _IS_BACKGROUND_MODE and verbose:
                 print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
             
-            if excluded_numbers:
+            if excluded_numbers and not _IS_BACKGROUND_MODE and verbose:
                 print(f"Exclusions active: {excluded_numbers}")
                 print()
             
@@ -10881,10 +13143,11 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 num_completed = 0  # Track only newly completed in this run
                 num_failed = 0
                 failed_calculations = []  # Track failed input files
-                # Get max attempts from context (set by --attempt flag, default 5)
-                max_attempts = getattr(context, 'max_attempts_per_calc', 5)
-                max_direct_retries = max_attempts  # Direct retries with same input
-                max_geometry_retries = max_attempts  # Retries with extracted geometry
+                # Hardcoded: retry launch failures up to 10 times
+                max_launch_retries = 10
+                # Time threshold for detecting launch failure (seconds)
+                # If calculation exits within this time, it's considered a launch failure
+                launch_failure_threshold = 5.0
                 
                 for idx, input_file in enumerate(input_files):
                     # Skip excluded calculations
@@ -10895,8 +13158,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # Handle both root-level and subdirectory files
                     basename = os.path.splitext(input_file)[0]
                     output_file = basename + ('.out' if qm_program == 'orca' else '.log')
-                    input_path = os.path.join(calc_dir, input_file)
-                    output_path = os.path.join(calc_dir, output_file)
+                    input_path = os.path.join(opt_dir, input_file)
+                    output_path = os.path.join(opt_dir, output_file)
                     
                     # Skip if output already exists AND is successfully completed
                     # This handles redo scenarios where failed .out files were deleted
@@ -10919,156 +13182,52 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     # For display, use just the filename
                     display_name = os.path.basename(input_file)
                     
-                    # Create MASTER BACKUP of original input
-                    # This will be used to reset when geometry extraction fails/is stuck
-                    backup_input = input_path + '.master_backup'
-                    if not os.path.exists(backup_input):
-                        shutil.copy(input_path, backup_input)
+                    # Update progress in concise mode (before starting calculation)
+                    calc_progress = initial_completed_count + num_completed + 1
+                    if hasattr(context, 'update_progress') and not verbose:
+                        context.update_progress(f"{calc_progress}/{num_inputs} ...")
                     
-                    print(f"  Running: {display_name}...", end='', flush=True)
+                    if verbose:
+                        print(f"  Running: {display_name}...", end='', flush=True)
                     
                     # ═══════════════════════════════════════════════════════════
-                    # UNIFIED ALTERNATING RETRY STRATEGY
+                    # LAUNCH FAILURE RETRY STRATEGY
                     # ═══════════════════════════════════════════════════════════
-                    # Each iteration: Try to extract geometry
-                    #  - If extracted AND different → Use it
-                    #  - If failed OR same → Reset to original
-                    # Keeps retrying forever with --retry until success
+                    # Only retry if the calculation fails to launch (instant crash).
+                    # If the calculation starts normally (runs for a reasonable time),
+                    # we don't retry regardless of exit code - let redo mode handle it.
                     # ═══════════════════════════════════════════════════════════
-                    
-                    import re
-                    import hashlib
                     
                     success = False
-                    previous_geometry_hash = None
-                    attempt_counter = 0
+                    launch_attempt = 0
+                    calculation_started = False  # True once calculation runs past threshold
                     
-                    while attempt_counter < max_attempts:
-                        attempt_counter += 1
+                    while launch_attempt < max_launch_retries and not calculation_started:
+                        launch_attempt += 1
                         
-                        # ═══ STEP 1: DECIDE STRATEGY (Reset vs Resume) ═══
+                        # Update display for retries
+                        if launch_attempt > 1 and verbose:
+                            print(f"\r  Running: {display_name}... ↻ (launch attempt {launch_attempt})\033[K", end='', flush=True)
                         
-                        valid_extraction = False
-                        xyz_lines = None
+                        # ═══ STEP 1: CLEAN OUTPUT FILES ═══
                         
-                        # Only try extraction if output exists from previous run
-                        if os.path.exists(output_path):
-                            # Priority 1: Try .xyz file (ORCA generates this)
-                            xyz_file = os.path.join(calc_dir, basename + ".xyz")
-                            if os.path.exists(xyz_file):
-                                try:
-                                    with open(xyz_file, 'r', encoding='utf-8', errors='replace') as f:
-                                        lines = f.readlines()
-                                        if len(lines) > 2 and len(lines[2].split()) >= 4:
-                                            xyz_lines = lines
-                                except:
-                                    pass
-                            
-                            # Priority 2: Fallback - scrape output file
-                            if not xyz_lines:
-                                xyz_lines = extract_final_geometry(output_path, calc_dir)
-                        
-                        # Check if extracted geometry is "new" (different from previous)
-                        if xyz_lines:
-                            # Create hash of coordinates to detect loops
-                            geom_str = "".join(xyz_lines[2:])
-                            current_hash = hashlib.md5(geom_str.encode()).hexdigest()
-                            
-                            if current_hash != previous_geometry_hash:
-                                # New geometry! We can use it
-                                valid_extraction = True
-                                previous_geometry_hash = current_hash
-                            else:
-                                # Geometry is identical to previous attempt - STUCK!
-                                valid_extraction = False
-                        
-                        # ═══ STEP 2: PREPARE INPUT ═══
-                        
-                        if valid_extraction:
-                            # Strategy: UPDATE GEOMETRY
-                            # We have new coordinates, update the input file
-                            status_msg = f"↻ (attempt {attempt_counter}: updating geometry)"
-                            
-                            # Load TEMPLATE (original input) for clean format
-                            with open(backup_input, 'r', encoding='utf-8', errors='replace') as f:
-                                input_content = f.read()
-                            
-                            if qm_program == 'orca':
-                                # Find * xyz line and replace coordinates
-                                match = re.search(r'\*\s+xyz\s+[-+]?\d+\s+\d+\s*\n(.*?)\*', input_content, re.DOTALL)
-                                if match:
-                                    new_coords = ''.join(xyz_lines[2:]) if xyz_lines else ''
-                                    new_input = input_content[:match.start(1)] + new_coords + input_content[match.end(1):]
-                                    with open(input_path, 'w') as f:
-                                        f.write(new_input)
-                                else:
-                                    # Could not find coordinate block - reset strategy
-                                    valid_extraction = False
-                            else:
-                                # Gaussian format
-                                lines = input_content.split('\n')
-                                charge_mult_idx = None
-                                for i, line in enumerate(lines):
-                                    if re.match(r'^\s*[-+]?\d+\s+\d+\s*$', line):
-                                        charge_mult_idx = i
-                                        break
-                                
-                                if charge_mult_idx is not None:
-                                    # Replace geometry (skip first 2 lines of XYZ)
-                                    new_coords = [l.strip() for l in xyz_lines[2:] if l.strip()] if xyz_lines else []
-                                    # Find end of old geometry (blank line)
-                                    geom_end_idx = charge_mult_idx + 1
-                                    while geom_end_idx < len(lines) and lines[geom_end_idx].strip():
-                                        geom_end_idx += 1
-                                    
-                                    # Reconstruct input
-                                    new_lines = lines[:charge_mult_idx+1] + new_coords + lines[geom_end_idx:]
-                                    with open(input_path, 'w') as f:
-                                        f.write('\n'.join(new_lines))
-                                else:
-                                    # Could not find charge/mult line - reset strategy
-                                    valid_extraction = False
-                        
-                        if not valid_extraction:
-                            # Strategy: RESET TO ORIGINAL
-                            # Extraction failed OR we're stuck in a loop
-                            # Restore original input and try again from scratch
-                            status_msg = f"↻ (attempt {attempt_counter}: resetting to original)"
-                            shutil.copy(backup_input, input_path)
-                            previous_geometry_hash = None  # Reset hash memory
-                            
-                            # IMPORTANT: Delete old output files to avoid confusion
-                            if os.path.exists(output_path):
-                                os.remove(output_path)
-                            xyz_file = os.path.join(calc_dir, basename + ".xyz")
-                            if os.path.exists(xyz_file):
-                                os.remove(xyz_file)
-                        
-                        # Update display (only show status for retries, not first attempt)
-                        if attempt_counter > 1:
-                            status_msg = ''  # Initialize
-                            print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
-                        
-                        # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
-                        
-                        # Determine if input is in subdirectory
+                        # Determine working directory
                         if '/' in input_file or '\\' in input_file:
                             # File is in subdirectory (e.g., "opt_conf_1/opt_conf_1.inp")
                             calc_subdir = os.path.dirname(input_file)
-                            calc_working_dir = os.path.join(calc_dir, calc_subdir)
-                            # Adjust file names to be relative to subdirectory
+                            calc_working_dir = os.path.join(opt_dir, calc_subdir)
                             input_file_relative = os.path.basename(input_file)
                             output_file_relative = os.path.basename(output_file)
+                            script_basename = os.path.splitext(os.path.basename(input_file))[0]
                         else:
-                            # File is at root level
-                            calc_working_dir = calc_dir
+                            calc_working_dir = opt_dir
                             input_file_relative = input_file
                             output_file_relative = output_file
+                            script_basename = basename
                         
-                        # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
-                        # This prevents old files from interfering with the new calculation
+                        # Remove ALL auxiliary/output files for clean run (except input files)
                         for item in os.listdir(calc_working_dir):
-                            if item.startswith(basename) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
+                            if item.startswith(script_basename) and not item.endswith(('.inp', '.com', '.gjf')):
                                 item_path = os.path.join(calc_working_dir, item)
                                 if os.path.isfile(item_path):
                                     try:
@@ -11076,54 +13235,58 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                     except:
                                         pass
                         
-                        # Create run script IN THE WORKING DIRECTORY
-                        temp_script = os.path.join(calc_working_dir, f'_run_{basename}.sh')
+                        # ═══ STEP 2: RUN CALCULATION ═══
+                        
+                        temp_script = os.path.join(calc_working_dir, f'_run_{script_basename}.sh')
                         with open(temp_script, 'w') as f:
                             f.write(launcher_content.split('###')[0])  # Environment setup
                             f.write("\n\n")
                             if qm_program == 'orca':
                                 f.write(f"# Set unique scratch directory for this ORCA process\n")
-                                f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename}_$$\"\n")
+                                f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{script_basename}_$$\"\n")
                                 f.write(f"mkdir -p \"$TMPDIR\"\n")
                                 f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                                # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
                                 orca_root_var = extract_orca_root_from_launcher(launcher_content)
                                 if orca_root_var:
                                     f.write(f"${{{orca_root_var}}}/orca {input_file_relative} > {output_file_relative}\n")
                                 else:
-                                    # Fall back to PATH lookup if no ORCA root variable found
                                     f.write(f"orca {input_file_relative} > {output_file_relative}\n")
                             elif qm_program == 'gaussian':
-                                # Use GAUSS_ROOT (generic, works with G09 or G16)
                                 f.write(f"$GAUSS_ROOT/g16 {input_file_relative}\n")
                         
                         os.chmod(temp_script, 0o755)
                         
-                        # Execute calculation from the working directory (subdirectory or root)
                         script_name = os.path.basename(temp_script)
+                        
+                        # Measure execution time to detect launch failures
+                        start_time = time.time()
                         result = subprocess.run(
                             ['bash', script_name],
                             cwd=calc_working_dir,
                             capture_output=True,
                             text=True
                         )
+                        elapsed_time = time.time() - start_time
                         
-                        # Cleanup
+                        # If calculation ran past the threshold, it started normally
+                        # Don't retry even if it failed - redo mode will handle it
+                        if elapsed_time > launch_failure_threshold:
+                            calculation_started = True
+                        
+                        # Cleanup temp script
                         if os.path.exists(temp_script):
                             os.remove(temp_script)
                         if qm_program == 'orca':
-                            # Clean up temp directories in the actual working directory
-                            for tmp_dir in glob.glob(os.path.join(calc_working_dir, f'.orca_tmp_{basename}_*')):
+                            for tmp_dir in glob.glob(os.path.join(calc_working_dir, f'.orca_tmp_{script_basename}_*')):
                                 try:
                                     shutil.rmtree(tmp_dir)
                                 except:
                                     pass
                         
-                        # ═══ STEP 4: CHECK SUCCESS ═══
+                        # ═══ STEP 3: CHECK SUCCESS ═══
                         
                         if os.path.exists(output_path):
                             try:
-                                # Check for normal termination (OPI-aware for ORCA 6.1+)
                                 if qm_program == 'orca':
                                     normal_term = check_orca_terminated_normally_opi(output_path)
                                 else:
@@ -11133,23 +13296,19 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 
                                 if normal_term:
                                     # SUCCESS!
-                                    if attempt_counter > 1:
-                                        print(f"\r  Running: {display_name}... ✓ (Attempt {attempt_counter})\033[K")
-                                    else:
-                                        print(f"\r  Running: {display_name}... ✓\033[K")
+                                    if verbose:
+                                        if launch_attempt > 1:
+                                            print(f"\r  Running: {display_name}... ✓ (launch attempt {launch_attempt})\033[K")
+                                        else:
+                                            print(f"\r  Running: {display_name}... ✓\033[K")
                                     num_completed += 1
                                     success = True
                                     
-                                    # Remove backup
-                                    if os.path.exists(backup_input):
-                                        os.remove(backup_input)
-                                    
                                     # Update cache
                                     completed_calcs.append(input_file)
-                                    # Also add basename to track total
                                     basename_only = os.path.splitext(os.path.basename(input_file))[0]
                                     all_input_basenames.add(basename_only)
-                                    stage_key = getattr(context, 'current_stage_key', 'calculation')
+                                    stage_key = getattr(context, 'current_stage_key', 'optimization')
                                     update_protocol_cache(stage_key, 'in_progress',
                                                         result={'completed_files': completed_calcs,
                                                                'total_files': num_inputs,
@@ -11159,31 +13318,25 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                             except:
                                 pass
                         
-                        # If we reach here, calculation failed
-                        # Loop continues - next iteration will try to extract geometry
-                        # If that fails/is stuck, it will reset to original
+                        # If calculation started but failed, don't retry - exit loop
+                        # Only continue loop if it was a launch failure
+                        if calculation_started:
+                            break
                     
-                    # If loop exits without success (max_attempts reached)
+                    # If loop exits without success
                     if not success:
-                        # Check if in infinite retry mode (--retry without number sets to 999999)
-                        if max_attempts >= 999999:
-                            # Infinite retry mode - this should never happen as loop should continue
-                            # But if it does (e.g., user interrupted), don't mark as failed
-                            print(f"\r  Running: {display_name}... ⚠ (interrupted)\033[K")
-                        else:
-                            # Limited retries - max attempts reached
-                            if max_attempts > 1:
-                                print(f"\r  Running: {display_name}... ✗ (failed after {attempt_counter} attempts)\033[K")
+                        if verbose:
+                            if calculation_started:
+                                # Calculation started but didn't complete normally - don't retry
+                                # This will be handled by redo mode if needed
+                                print(f"\r  Running: {display_name}... ✗ (no normal termination)\033[K")
+                            elif launch_attempt >= max_launch_retries:
+                                # Launch failed after all retries
+                                print(f"\r  Running: {display_name}... ✗ (launch failed after {launch_attempt} attempts)\033[K")
                             else:
                                 print(f"\r  Running: {display_name}... ✗\033[K")
-                            num_failed += 1
-                            failed_calculations.append(input_file)
-                        
-                        # Restore original input for manual inspection
-                        if os.path.exists(backup_input):
-                            shutil.copy(backup_input, input_path)
-                            os.remove(backup_input)
-                        
+                        num_failed += 1
+                        failed_calculations.append(input_file)
                 
                 # Print status (not "results" - that's redundant)
                 # Recalculate num_inputs from the updated set to reflect newly completed calculations
@@ -11196,13 +13349,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 print(f"\nStatus: {total_completed}/{num_inputs} calculations completed")
                 
                 # Store for protocol summary (use total)
-                context.calc_completed = total_completed
-                context.calc_total = num_inputs
+                context.opt_completed = total_completed
+                context.opt_total = num_inputs
                 
                 # Handle failed calculations
                 if failed_calculations:
                     print(f"Failed calculations: {len(failed_calculations)}/{num_inputs}")
-                    print(f"Failed files: {', '.join(sorted(failed_calculations, key=natural_sort_key))}")
                 
                 # Use total_completed for status checks (includes resumed + new)
                 if total_completed == 0:
@@ -11231,7 +13383,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                          if f.startswith("similarity") and os.path.isdir(os.path.join(parent_dir, f))]
                             if sim_folders:
                                 sim_folder = sim_folders[0]
-                                context.calc_sim_folder = sim_folder
+                                context.opt_sim_folder = sim_folder
                                 # Set pending for next similarity stage
                                 context.pending_similarity_folder = sim_folder
                         else:
@@ -11240,13 +13392,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 for folder in os.listdir("good_structures"):
                                     src_folder = os.path.join("good_structures", folder)
                                     if os.path.isdir(src_folder):
-                                        dest_folder = os.path.join(calc_dir, folder)
+                                        dest_folder = os.path.join(opt_dir, folder)
                                         if not os.path.exists(dest_folder):
                                             shutil.copytree(src_folder, dest_folder)
                                 # Clean up good_structures folder
                                 shutil.rmtree("good_structures")
                             
-                            os.chdir(calc_dir)
+                            os.chdir(opt_dir)
                             
                             # Group files by base names into subfolders (silent in workflow)
                             import io
@@ -11276,7 +13428,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                         match = re.search(r'to\s+(similarity[^\s]*)', line)
                                         if match:
                                             sim_folder = match.group(1)
-                                            context.calc_sim_folder = sim_folder
+                                            context.opt_sim_folder = sim_folder
                                             # Also set as pending for next similarity stage
                                             sim_base = sim_folder.split('/')[0] if '/' in sim_folder else sim_folder
                                             context.pending_similarity_folder = sim_base
@@ -11293,14 +13445,17 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 print("✗ Error: Calculations timed out after 2 hours")
                 return 1
             except Exception as e:
-                print(f"✗ Error running calculations: {e}")
+                if not _IS_BACKGROUND_MODE:
+                    print(f"✗ Error running calculations: {e}")
                 return 1
         else:
-            print("✗ Error: No launcher script found, cannot execute calculations")
+            if not _IS_BACKGROUND_MODE:
+                print("✗ Error: No launcher script found, cannot execute calculations")
             return 1
             
     else:
-        print(f"Warning: Calculation directory not found")
+        if not _IS_BACKGROUND_MODE:
+            print(f"Warning: Optimization directory not found")
         return 1
     
     # Clean up retry_input folder if it exists
@@ -11313,7 +13468,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     """
     Execute similarity analysis stage.
     Runs from the similarity/ folder which contains orca_out_N/ subfolders.
-    Supports both similarity/ (first run) and similarity_2/ (after optimization).
+    Supports both similarity/ (first run) and similarity_2/ (after refinement).
     """
     # Determine which similarity folder to use dynamically based on the most recent stage
     # Priority: use the most recently set similarity folder (from calc or opt that just ran)
@@ -11325,17 +13480,17 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         # Clear it after use so it doesn't affect next stage
         context.pending_similarity_folder = None
     
-    # Fallback: check what calc_sim_folder or opt_sim_folder were set
+    # Fallback: check what opt_sim_folder or ref_sim_folder were set
     if not similarity_base:
-        # If opt_sim_folder is more recent (set after calc_sim_folder), prefer it
-        if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-            opt_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
+        # If ref_sim_folder is more recent (set after opt_sim_folder), prefer it
+        if hasattr(context, 'ref_sim_folder') and context.ref_sim_folder:
+            opt_base = context.ref_sim_folder.split('/')[0] if '/' in context.ref_sim_folder else context.ref_sim_folder
             if os.path.exists(opt_base):
                 similarity_base = opt_base
         
-        # Otherwise use calc_sim_folder
-        if not similarity_base and hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
-            calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+        # Otherwise use opt_sim_folder
+        if not similarity_base and hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+            calc_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
             if os.path.exists(calc_base):
                 similarity_base = calc_base
     
@@ -11431,7 +13586,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     # No need to specify motif prefix - similarity script auto-detects from filenames:
     # conf_* files → creates motifs_*/ folder (after calculation)
     # motif_* files → creates motifs_*/ folder (first similarity)
-    # umotif_* files → creates umotifs_*/ folder (after optimization)
+    # umotif_* files → creates umotifs_*/ folder (after refinement)
     
     # If this is a redo and we have a list of recalculated files, pass them for incremental update
     if hasattr(context, 'recalculated_files') and context.recalculated_files:
@@ -11476,13 +13631,15 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         add_blank_before = [
             'H-bond group',
             'Processed ',
-            'Creating '
+            'Creating ',
+            ',   Critical:'  # Summary line "Redundant: X,   Critical: Y"
         ]
         
         # Lines that should have blank line AFTER them
         add_blank_after = [
             'Data extraction complete. Proceeding to clustering.',
             'Motifs created:',
+            ',   Critical:',  # Summary line "Redundant: X,   Critical: Y"
             'Clustering summary saved to'
         ]
         
@@ -11549,29 +13706,36 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         
         # Check if files were saved to need_recalculation directory
         # This happens when structures with imaginary frequencies need to be recalculated
-        need_recalc_dir = os.path.join(similarity_base, "skipped_structures", "need_recalculation")
+        need_reopt_dir = os.path.join(similarity_base, "skipped_structures", "need_recalculation")
         clustered_with_minima_dir = os.path.join(similarity_base, "skipped_structures", "clustered_with_minima")
+        critical_non_conv_dir = os.path.join(similarity_base, "skipped_structures", "critical_non_converged")
         
         recalc_basenames = []
         
-        # Always include critical structures (need_recalculation)
-        if os.path.exists(need_recalc_dir):
-            xyz_files = glob.glob(os.path.join(need_recalc_dir, "*.xyz"))
+        # Always include critical structures (need_recalculation - imaginary frequencies)
+        if os.path.exists(need_reopt_dir):
+            xyz_files = glob.glob(os.path.join(need_reopt_dir, "*.xyz"))
             if xyz_files:
                 # Extract basenames (without .xyz extension)
                 recalc_basenames.extend([os.path.splitext(os.path.basename(f))[0] for f in xyz_files])
         
+        # Always include critical non-converged structures (need rescue hessian)
+        if os.path.exists(critical_non_conv_dir):
+            xyz_files = glob.glob(os.path.join(critical_non_conv_dir, "*.xyz"))
+            if xyz_files:
+                recalc_basenames.extend([os.path.splitext(os.path.basename(f))[0] for f in xyz_files])
+        
         # If user wants all structures to be true minima (--skipped=0), also include clustered_with_minima
-        # Check if this is optimization stage with --skipped=0 threshold
+        # Check if this is refinement stage with --skipped=0 threshold
         if os.path.exists(clustered_with_minima_dir):
-            # Check if we're in an optimization context with skipped threshold = 0
+            # Check if we're in an refinement context with skipped threshold = 0
             # This would be stored in context from the stage arguments
             include_clustered = False
             
-            # For optimization stage, check if skipped threshold is 0
+            # For refinement stage, check if skipped threshold is 0
             current_stage = getattr(context, 'current_stage', None)
             if current_stage:
-                if current_stage.get('type') == 'optimization':  # type: ignore[union-attr]
+                if current_stage.get('type') == 'refinement':  # type: ignore[union-attr]
                     args = current_stage.get('args', [])  # type: ignore[union-attr]
                     for arg in args:
                         if arg.startswith('--skipped='):
@@ -11587,7 +13751,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                     recalc_basenames.extend([os.path.splitext(os.path.basename(f))[0] for f in xyz_files])
         
         if recalc_basenames:
-            # Store in context for the optimization stage to use
+            # Store in context for the refinement stage to use
             context.recalculated_files = recalc_basenames
         
         # Store similarity directory for context
@@ -11599,7 +13763,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 update_list_file = ""  # Initialize
                 os.remove(update_list_file)
                 # NOTE: Do NOT clear context.recalculated_files here!
-                # The optimization stage redo needs this list to know which files to regenerate
+                # The refinement stage redo needs this list to know which files to regenerate
             except:
                 pass
         
@@ -11621,18 +13785,21 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         print(f"Error running similarity analysis: {e}")
         return 1
 
-def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
-    """Execute optimization stage (for motifs from similarity clustering)."""
-    # Very similar to calculation stage, but uses motifs from similarity analysis
+def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
+    """Execute refinement stage (for motifs from similarity clustering)."""
+    # Very similar to optimization stage, but uses motifs from similarity analysis
     
     # Store context globally for helper functions
     sys._current_workflow_context = context  # type: ignore[attr-defined]
     
-    # Parse arguments
-    max_stage_redos = 1  # --redo: redo entire opt+similarity
-    max_critical = None
+    # Verbose mode flag for this stage
+    verbose = context.verbose_level >= 1
+    
+    # Parse arguments - defaults for when flags are not explicitly provided
+    max_stage_redos = 3   # --redo: redo entire opt+similarity
+    max_critical = 0      # default: 0% critical structures allowed (strict)
     max_skipped = None
-    max_opt_retries = 5  # --retry: retry individual optimizations (default: 5)
+    # Note: --retry removed; launch failures auto-retry up to 10 times (hardcoded)
     
     args = stage.get('args', [])
     template_inp = stage.get('template_inp')
@@ -11645,52 +13812,68 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
             max_skipped = float(arg.split('=')[1])
-        elif arg.startswith('--retry'):
-            # --retry=N: retry each opt up to N times
-            # --retry (no number): retry until all succeed (unlimited)
-            if '=' in arg:
-                max_opt_retries = int(arg.split('=')[1])
-            else:
-                max_opt_retries = 999999  # Effectively unlimited
-        elif arg.startswith('--attempt='):
-            # Deprecated alias for --retry
-            max_opt_retries = int(arg.split('=')[1])
-    
-    # Store in context for this stage
-    context.max_attempts_per_calc = max_opt_retries
     
     # Store threshold mode in context for redo logic
     # --critical: only retry structures with imaginary freqs (need_recalculation)
     # --skipped: retry all skipped structures (need_recalculation + clustered_with_minima)
     context.use_skipped_threshold = (max_skipped is not None)
     
-    if not template_inp or not launcher_sh:
-        print("Error: Optimization requires template input and launcher script")
+    # If template_inp is a name (not a file path), look up in embedded templates
+    if template_inp and not template_inp.endswith(('.inp', '.com', '.gjf')):
+        embedded_templates = getattr(context, 'embedded_templates', {})
+        if template_inp in embedded_templates:
+            template_inp = embedded_templates[template_inp]
+    
+    if not template_inp:
+        print("Error: Refinement requires template input file")
+        print("  Expected: template.inp file OR embedded template name")
+        print("  Embedded templates available:", list(getattr(context, 'embedded_templates', {}).keys()) or "none")
         return 1
     
-    # Convert to absolute paths
+    # Convert template to absolute path
     template_inp = os.path.abspath(template_inp)
-    launcher_sh = os.path.abspath(launcher_sh)
     
     if not os.path.exists(template_inp):
         print(f"Error: Template file not found: {template_inp}")
         return 1
-    if not os.path.exists(launcher_sh):
-        print(f"Error: Launcher script not found: {launcher_sh}")
-        return 1
+    
+    # Handle launcher: if not provided, auto-detect ORCA and create launcher
+    if launcher_sh:
+        launcher_sh = os.path.abspath(launcher_sh)
+        if not os.path.exists(launcher_sh):
+            print(f"Warning: Launcher script not found: {launcher_sh}")
+            print("  Attempting to auto-detect ORCA installation...")
+            launcher_sh = None
+    
+    # Get QM alias from context (read from input.in line 9)
+    qm_alias = getattr(context, 'qm_alias', 'orca')
+    
+    if not launcher_sh:
+        # Try to auto-create launcher
+        opt_dir = "refinement"
+        if not os.path.exists(opt_dir):
+            os.makedirs(opt_dir, exist_ok=True)
+        auto_launcher = create_auto_launcher(opt_dir, "orca", qm_alias)
+        if auto_launcher:
+            launcher_sh = auto_launcher
+            if verbose:
+                print(f"  Created auto-generated launcher: {os.path.basename(auto_launcher)}")
+        else:
+            print("Error: No launcher script provided and could not auto-detect ORCA")
+            return 1
     
     # CRITICAL: Optimization needs to READ motifs from calculation's similarity folder
-    # The calculation stage created motifs in similarity/motifs_XX/ (or umotifs in similarity_N/)
+    # The optimization stage created motifs in similarity/motifs_XX/ (or umotifs in similarity_N/)
     # Optimization will READ from similarity/ and WRITE outputs to similarity_2/ (or next numbered)
-    # The subsequent similarity will create umotifs_YY/ (since input came from optimization)
+    # The subsequent similarity will create umotifs_YY/ (since input came from refinement)
     
     # Step 1: Find where the MOTIFS are (from calculation's similarity stage)
     motifs_source_folder = None
     
-    # Check if calculation stage set a similarity folder
-    if hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
+    # Check if optimization stage set a similarity folder
+    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
         # Extract base folder (e.g., "similarity" from "similarity/orca_out_10")
-        calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+        calc_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
         motifs_source_folder = calc_base
     else:
         # Fallback: search for existing similarity folders with motifs
@@ -11721,20 +13904,20 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         motif_dirs = umotif_dirs
     elif not motif_dirs:
         print(f"Warning: No motif/umotif directories found in {motifs_source_folder}/")
-        print("  Skipping optimization stage")
+        print("  Skipping refinement stage")
         return 0
     
     # Use the most recent motifs directory
     motif_dirs.sort()
     motif_dir = motif_dirs[-1]
     
-    # Step 3: Determine where optimization OUTPUTS will go
+    # Step 3: Determine where refinement OUTPUTS will go
     # This is typically the next similarity folder (similarity_2, similarity_3, etc.)
     # CRITICAL: Only reuse context.similarity_dir if it's from THIS stage's redo loop
-    # Don't use the calculation stage's similarity_dir!
-    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-        # Already calculated for this optimization stage - use it
-        used_sim_folder = context.opt_sim_folder
+    # Don't use the optimization stage's similarity_dir!
+    if hasattr(context, 'ref_sim_folder') and context.ref_sim_folder:
+        # Already calculated for this refinement stage - use it
+        used_sim_folder = context.ref_sim_folder
     else:
         # Calculate next folder for outputs based on where motifs came from
         if motifs_source_folder == "similarity":
@@ -11748,16 +13931,16 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             else:
                 used_sim_folder = "similarity_2"
     
-    # Store in opt_sim_folder (optimization's dedicated variable)
-    context.opt_sim_folder = used_sim_folder
+    # Store in ref_sim_folder (refinement's dedicated variable)
+    context.ref_sim_folder = used_sim_folder
     # Also update similarity_dir so the similarity stage knows where to look
     context.similarity_dir = used_sim_folder
     
     # Store motifs source in context
-    context.opt_motifs_source = motif_dir
+    context.ref_motifs_source = motif_dir
     
-    # CRITICAL: When resuming optimization stage (with -i flag), clean the OUTPUT similarity folder
-    # This must happen BEFORE process_optimization_redo() checks for skipped_structures
+    # CRITICAL: When resuming refinement stage (with -i flag), clean the OUTPUT similarity folder
+    # This must happen BEFORE process_refinement_redo() checks for skipped_structures
     # This ensures we don't reuse stale skipped_structures from previous similarity runs
     # Only delete the OUTPUT folder (used_sim_folder), NOT the INPUT folder (motifs_source_folder)
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
@@ -11786,21 +13969,21 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     # Process redo structures at the START of the stage (if need_recalculation exists)
     # This ensures that when the workflow restarts this stage after a similarity failure,
     # we immediately regenerate inputs and delete old outputs before checking completion
-    opt_dir = getattr(context, 'optimization_dir', 'optimization')
+    opt_dir = getattr(context, 'refinement_dir', 'refinement')
     if not opt_dir:  # Handle empty string
-        opt_dir = 'optimization'
+        opt_dir = 'refinement'
     
-    # Only process redo if optimization directory exists
-    # process_optimization_redo will check for skipped_structures internally and return False if none
+    # Only process redo if refinement directory exists
+    # process_refinement_redo will check for skipped_structures internally and return False if none
     if os.path.exists(opt_dir):
-        redo_result = process_optimization_redo(context, opt_dir, template_inp)
+        redo_result = process_refinement_redo(context, opt_dir, template_inp)
         
         # If no redo structures found, clear recalculated_files
         if not redo_result and hasattr(context, 'recalculated_files'):
             context.recalculated_files = None
         
         # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
-        # This matches execute_calculation_stage logic to prevent duplicates
+        # This matches execute_optimization_stage logic to prevent duplicates
         # Note: Do NOT clean redo files here - they need to be run first!
         # Cleanup happens AFTER sorting when files are moved to subdirectories
         if not redo_result:
@@ -11831,8 +14014,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         print("Warning: No motif/umotif files found in motifs directory")
         return 0
     
-    # Create optimization directory (or reuse if resuming)
-    opt_dir = "optimization"
+    # Create refinement directory (or reuse if resuming)
+    opt_dir = "refinement"
     
     # Check if we're resuming - if so, reuse existing directory
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
@@ -11863,9 +14046,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     if os.path.exists(opt_dir) and has_content and (stage_was_started or is_redo):
         # Resuming or Redo - reuse existing directory
         if is_redo:
-            print("Resuming: Using existing optimization directory (Redo Mode)\n")
+            print("Resuming: Using existing refinement directory (Redo Mode)\n")
         else:
-            print("Resuming: Using existing optimization directory\n")
+            print("Resuming: Using existing refinement directory\n")
     else:
         # Not resuming or empty directory - create fresh directory
         if os.path.exists(opt_dir):
@@ -11906,9 +14089,9 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Process each XYZ file and create input files
         all_input_files = []
         for xyz_file in all_xyz_files:
-            # Call _process_xyz_file_for_opt with the correct parameters
+            # Call _process_xyz_file_for_ref with the correct parameters
             xyz_file_data = (xyz_file, template_content, opt_dir, qm_program, input_ext)
-            result_files, message = _process_xyz_file_for_opt(xyz_file_data)
+            result_files, message = _process_xyz_file_for_ref(xyz_file_data)
             all_input_files.extend(result_files)
         
         if not all_input_files:
@@ -11919,7 +14102,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     else:
         # Redo/Resume mode: reuse existing input files
         # process_redo_structures handles updating failed ones in redo mode
-        # Get list of input files from optimization directory
+        # Get list of input files from refinement directory
         all_input_files = []
         
         # Prefer subdirectory files over root files (they may have been organized)
@@ -11936,7 +14119,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             all_input_files.extend(root_inputs)
         
         if not all_input_files:
-            print("Error: No existing input files found in optimization directory")
+            print("Error: No existing input files found in refinement directory")
             return 1
     
     # Create launcher script if provided
@@ -11989,36 +14172,36 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         os.chmod(launcher_path, 0o755)
         print(f"Created launcher script: {launcher_path}")
     
-    # Execute the optimization calculations
-    if os.path.exists("optimization/launcher_orca.sh") or os.path.exists("optimization/launcher_gaussian.sh"):
-        print(f"\nExecuting optimization calculations...")
+    # Execute the refinement calculations
+    if os.path.exists("refinement/launcher_orca.sh") or os.path.exists("refinement/launcher_gaussian.sh"):
+        print(f"\nExecuting refinement calculations...")
         
         # Determine launcher name and QM program
-        if os.path.exists("optimization/launcher_orca.sh"):
-            launcher_path = "optimization/launcher_orca.sh"
+        if os.path.exists("refinement/launcher_orca.sh"):
+            launcher_path = "refinement/launcher_orca.sh"
             qm_program = 'orca'
         else:
-            launcher_path = "optimization/launcher_gaussian.sh"
+            launcher_path = "refinement/launcher_gaussian.sh"
             qm_program = 'gaussian'
         
         # Get list of input files to process
         # First check at root level
-        # Filter out ORCA intermediate files (.scfgrad.inp, .scfp.inp, etc.)
+        # Filter out ORCA intermediate files (.scfgrad.inp, .scfp.inp, etc.) and rescue inputs
         def is_valid_input_file(filename):
-            """Check if file is a valid input file (not an ORCA intermediate file)"""
+            """Check if file is a valid input file (not an ORCA intermediate or rescue file)"""
             if not filename.endswith(('.inp', '.com', '.gjf')):
                 return False
-            # Exclude ORCA intermediate files
-            excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
+            # Exclude ORCA intermediate files and rescue inputs (already processed)
+            excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.', '_rescue.']
             return not any(pattern in filename for pattern in excluded_patterns)
         
-        input_files = sorted([f for f in os.listdir("optimization") if is_valid_input_file(f)], key=natural_sort_key)
+        input_files = sorted([f for f in os.listdir("refinement") if is_valid_input_file(f)], key=natural_sort_key)
         
         # If no files at root and sort command was used, check subdirectories
         if not input_files:
-            subdirs = [d for d in os.listdir("optimization") if os.path.isdir(os.path.join("optimization", d))]
+            subdirs = [d for d in os.listdir("refinement") if os.path.isdir(os.path.join("refinement", d))]
             for subdir in sorted(subdirs, key=natural_sort_key):
-                subdir_path = os.path.join("optimization", subdir)
+                subdir_path = os.path.join("refinement", subdir)
                 subdir_files = [os.path.join(subdir, f) for f in os.listdir(subdir_path) if is_valid_input_file(f)]
                 input_files.extend(sorted(subdir_files, key=natural_sort_key))
         
@@ -12026,7 +14209,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
         cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
         
-        # Get the current stage key from context (e.g., "optimization_4")
+        # Get the current stage key from context (e.g., "refinement_4")
         stage_key = getattr(context, 'current_stage_key', '')
         
         # Check if redo structures exist (files scheduled for recalculation)
@@ -12037,23 +14220,23 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Scan ALL subdirectories for completed calculations (check for .out files)
         # Files with only .out.backup are being redone and should NOT be counted as completed
         actual_completed = []
-        opt_dir = "optimization"
+        opt_dir = "refinement"
         
-        # 1. Check optimization directory subfolders
+        # 1. Check refinement directory subfolders
         if os.path.exists(opt_dir):
             for item in os.listdir(opt_dir):
                 item_path = os.path.join(opt_dir, item)
                 if os.path.isdir(item_path):
                     # Skip if this file is marked for redo
-                    # CRITICAL: redo_files contains basenames with _opt suffix (e.g., "umotif_01_opt")
+                    # CRITICAL: redo_files contains basenames with _opt suffix (e.g., "umotif_01"_ref")
                     # but item is the directory name (e.g., "umotif_01")
-                    # So we need to check both "item" AND "item_opt"/"item_calc" against redo_files
-                    redo_variants = [item, f"{item}_opt", f"{item}_calc"]
+                    # So we need to check both "item" AND "item_ref"/"item_calc" against redo_files
+                    redo_variants = [item, f"{item}_ref", f"{item}_calc"]
                     if any(variant in redo_files for variant in redo_variants):
                         continue
                     
                     # Check if this subdirectory has a completed calculation
-                    # Try different naming patterns: umotif_01/umotif_01.out or umotif_01/umotif_01_opt.out
+                    # Try different naming patterns: umotif_01/umotif_01.out or umotif_01/umotif_01_ref.out
                     possible_names = [f"{item}.out", f"{item}_opt.out", f"{item}_calc.out"]
                     out_file = None
                     for name in possible_names:
@@ -12067,11 +14250,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         if check_orca_terminated_normally_opi(out_file):
                             # Store with _opt suffix for consistency
                             if '_opt' not in item and '_calc' not in item:
-                                actual_completed.append(f"{item}_opt")
+                                actual_completed.append(f"{item}_ref")
                             else:
                                 actual_completed.append(item)
             
-            # 1b. Check for flat files in optimization directory
+            # 1b. Check for flat files in refinement directory
             for item in os.listdir(opt_dir):
                 if item.endswith('.out') or item.endswith('.log'):
                     basename = os.path.splitext(item)[0]
@@ -12093,23 +14276,23 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         
         # 2. Check similarity_X/orca_out_* folders (files moved there after sorting)
         # This is CRITICAL for showing correct counts when resuming
-        # IMPORTANT: Only check the optimization's OWN similarity folder, not all similarity folders
-        # (to avoid counting calculation results from similarity/ as optimization results)
+        # IMPORTANT: Only check the refinement's OWN similarity folder, not all similarity folders
+        # (to avoid counting optimization results from similarity/ as refinement results)
         parent_dir = os.getcwd()
         
-        # Determine which similarity folder belongs to THIS optimization stage
-        opt_sim_folder = getattr(context, 'opt_sim_folder', None)
+        # Determine which similarity folder belongs to THIS refinement stage
+        ref_sim_folder = getattr(context, 'ref_sim_folder', None)
         
         # CRITICAL: Strip orca_out_X suffix if present
-        # organize step may set opt_sim_folder to "similarity_2/orca_out_5"
+        # organize step may set ref_sim_folder to "similarity_2/orca_out_5"
         # but we need just "similarity_2" to scan for orca_out subdirectories
-        if opt_sim_folder and '/' in opt_sim_folder:
-            opt_sim_folder = opt_sim_folder.split('/')[0]
+        if ref_sim_folder and '/' in ref_sim_folder:
+            ref_sim_folder = ref_sim_folder.split('/')[0]
         
-        if not opt_sim_folder:
+        if not ref_sim_folder:
             # Calculate the expected folder based on motifs source
-            if hasattr(context, 'opt_motifs_source'):
-                motifs_source = context.opt_motifs_source
+            if hasattr(context, 'ref_motifs_source'):
+                motifs_source = context.ref_motifs_source
                 # Extract base folder (e.g., "similarity" from "similarity/motifs_03/")
                 if '/' in motifs_source:
                     calc_base = motifs_source.split('/')[0]
@@ -12118,21 +14301,21 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # Optimization outputs go to the NEXT similarity folder
                 if calc_base == "similarity":
-                    opt_sim_folder = "similarity_2"
+                    ref_sim_folder = "similarity_2"
                 else:
                     # Extract number and increment
                     match = re.search(r'similarity_(\d+)', calc_base)
                     if match:
                         next_num = int(match.group(1)) + 1
-                        opt_sim_folder = f"similarity_{next_num}"
+                        ref_sim_folder = f"similarity_{next_num}"
                     else:
-                        opt_sim_folder = "similarity_2"
+                        ref_sim_folder = "similarity_2"
         
-        # Only check the optimization's designated similarity folder
-        if opt_sim_folder and os.path.isdir(opt_sim_folder):
-            for subitem in os.listdir(opt_sim_folder):
+        # Only check the refinement's designated similarity folder
+        if ref_sim_folder and os.path.isdir(ref_sim_folder):
+            for subitem in os.listdir(ref_sim_folder):
                 if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_') or subitem.startswith('calc_out_'):
-                    out_dir = os.path.join(opt_sim_folder, subitem)
+                    out_dir = os.path.join(ref_sim_folder, subitem)
                     if os.path.isdir(out_dir):
                         for f in os.listdir(out_dir):
                             if f.endswith('.out') or f.endswith('.log'):
@@ -12155,19 +14338,19 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Update completed_opts to match reality
         completed_opts = actual_completed
         
-        excluded_numbers = cache.get('excluded_optimizations', [])
+        excluded_numbers = cache.get('excluded_refinements', [])
         
         # Apply exclusion filtering to completed_opts
         completed_opts = [f for f in completed_opts if not match_exclusion(f, excluded_numbers)]
         
         # Count total inputs (including those already completed and cached)
-        # This should be the TOTAL expected optimizations, not just new ones
+        # This should be the TOTAL expected refinements, not just new ones
         all_input_basenames = set()
         
-        # Add basenames from input files (pending optimizations)
+        # Add basenames from input files (pending refinements)
         for f in input_files:
             if not match_exclusion(f, excluded_numbers):
-                # Handle both simple filenames and paths like "motif_01/motif_01_opt.inp"
+                # Handle both simple filenames and paths like "motif_01/motif_01_ref.inp"
                 basename = os.path.splitext(os.path.basename(f))[0]
                 all_input_basenames.add(basename)
         
@@ -12181,10 +14364,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Store initial completed count (before loop may modify completed_opts)
         initial_completed_count = len(completed_opts)
         
-        if completed_opts:
-            print(f"Resuming: {len(completed_opts)}/{num_inputs} optimizations already completed")
+        if completed_opts and not _IS_BACKGROUND_MODE and verbose:
+            print(f"Resuming: {len(completed_opts)}/{num_inputs} refinements already completed")
         
-        if excluded_numbers:
+        if excluded_numbers and not _IS_BACKGROUND_MODE and verbose:
             print(f"Exclusions active: {excluded_numbers}")
             print()
         
@@ -12195,16 +14378,16 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Run calculations one by one, checking for normal termination with retry
         num_completed = 0  # Track only newly completed in this run
         num_failed = 0
-        failed_optimizations = []  # Track failed input files
-        # Get max attempts from context (set by --attempt flag, default 5)
-        max_attempts = getattr(context, 'max_attempts_per_calc', 5)
-        max_direct_retries = max_attempts  # Direct retries with same input
-        max_geometry_retries = max_attempts  # Retries with extracted geometry
+        failed_refinements = []  # Track failed input files
+        # Hardcoded: retry launch failures up to 10 times
+        max_launch_retries = 10
+        # Time threshold for detecting launch failure (seconds)
+        launch_failure_threshold = 5.0
         
         for input_file in input_files:
             basename = os.path.splitext(input_file)[0]
             
-            # Skip excluded optimizations UNLESS this file is being redone
+            # Skip excluded refinements UNLESS this file is being redone
             # In redo mode, recalculated_files should be processed even if previously excluded
             if match_exclusion(input_file, excluded_numbers):
                 # Check if this file is in the redo list
@@ -12217,8 +14400,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     continue
             
             output_file = basename + ('.out' if qm_program == 'orca' else '.log')
-            input_path = os.path.join("optimization", input_file)
-            output_path = os.path.join("optimization", output_file)
+            input_path = os.path.join("refinement", input_file)
+            output_path = os.path.join("refinement", output_file)
             
             # Skip if output already exists AND is successfully completed
             # This handles redo scenarios where failed .out files were deleted
@@ -12229,21 +14412,21 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 output_exists = True
             else:
                 # Check subdirectory (if files were sorted)
-                # E.g. optimization/motif_01_opt/motif_01_opt.out
-                subdir_path = os.path.join("optimization", basename, output_file)
+                # E.g. refinement/motif_01_ref/motif_01_ref.out
+                subdir_path = os.path.join("refinement", basename, output_file)
                 if os.path.exists(subdir_path):
                     output_path = subdir_path
                     output_exists = True
                 else:
                     # Also check shortened basename subdirectory
-                    # E.g. optimization/motif_01/motif_01_opt.out
+                    # E.g. refinement/motif_01/motif_01_ref.out
                     short_basename = basename
                     if '_opt' in basename:
                         short_basename = basename.replace('_opt', '')
                     elif '_calc' in basename:
                         short_basename = basename.replace('_calc', '')
                     
-                    subdir_path = os.path.join("optimization", short_basename, output_file)
+                    subdir_path = os.path.join("refinement", short_basename, output_file)
                     if os.path.exists(subdir_path):
                         output_path = subdir_path
                         output_exists = True
@@ -12263,168 +14446,52 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             # Extract display name (basename only) for cleaner output
             display_name = os.path.basename(input_file)
             
-            # Define backup path (will be created only when needed for retries)
-            backup_input = input_path + '.master_backup'
+            # Update progress in concise mode (before starting refinement)
+            ref_progress = initial_completed_count + num_completed + 1
+            if hasattr(context, 'update_progress') and not verbose:
+                context.update_progress(f"{ref_progress}/{num_inputs} ...")
             
-            print(f"  Running: {display_name}...", end='', flush=True)
+            if verbose:
+                print(f"  Running: {display_name}...", end='', flush=True)
             
             # ═══════════════════════════════════════════════════════════
-            # UNIFIED ALTERNATING RETRY STRATEGY
+            # LAUNCH FAILURE RETRY STRATEGY
             # ═══════════════════════════════════════════════════════════
-            # Each iteration: Try to extract geometry
-            #  - If extracted AND different → Use it
-            #  - If failed OR same → Reset to original
-            # Keeps retrying forever with --retry until success
+            # Only retry if the calculation fails to launch (instant crash).
+            # If the calculation starts normally (runs for a reasonable time),
+            # we don't retry regardless of exit code - let redo mode handle it.
             # ═══════════════════════════════════════════════════════════
-            
-            import hashlib
             
             success = False
-            previous_geometry_hash = None
-            attempt_counter = 0
+            launch_attempt = 0
+            calculation_started = False  # True once calculation runs past threshold
             
-            while attempt_counter < max_attempts:
-                attempt_counter += 1
+            while launch_attempt < max_launch_retries and not calculation_started:
+                launch_attempt += 1
                 
-                # ═══ STEP 1: DECIDE STRATEGY (Reset vs Resume) ═══
+                # Update display for retries
+                if launch_attempt > 1 and verbose:
+                    print(f"\r  Running: {display_name}... ↻ (launch attempt {launch_attempt})\033[K", end='', flush=True)
                 
-                valid_extraction = False
-                xyz_lines = None
+                # ═══ STEP 1: CLEAN OUTPUT FILES ═══
                 
-                # Only try extraction if output exists from previous run
-                if os.path.exists(output_path):
-                    # Priority 1: Try .xyz file (ORCA generates this)
-                    xyz_file = os.path.join("optimization", basename + ".xyz")
-                    if os.path.exists(xyz_file):
-                        try:
-                            with open(xyz_file, 'r', encoding='utf-8', errors='replace') as f:
-                                lines = f.readlines()
-                                if len(lines) > 2 and len(lines[2].split()) >= 4:
-                                    xyz_lines = lines
-                        except:
-                            pass
-                    
-                    # Priority 2: Fallback - scrape output file
-                    if not xyz_lines:
-                        xyz_lines = extract_final_geometry(output_path, "optimization")
-                
-                # Check if extracted geometry is "new" (different from previous)
-                if xyz_lines:
-                    # Create hash of coordinates to detect loops
-                    geom_str = "".join(xyz_lines[2:])
-                    current_hash = hashlib.md5(geom_str.encode()).hexdigest()
-                    
-                    if current_hash != previous_geometry_hash:
-                        # New geometry! We can use it
-                        valid_extraction = True
-                        previous_geometry_hash = current_hash
-                    else:
-                        # Geometry is identical to previous attempt - STUCK!
-                        valid_extraction = False
-                
-                # ═══ STEP 2: PREPARE INPUT ═══
-                
-                if valid_extraction:
-                    # Strategy: UPDATE GEOMETRY
-                    # We have new coordinates, update the input file
-                    status_msg = f"↻ (attempt {attempt_counter}: updating geometry)"
-                    
-                    # Create backup on first geometry extraction (if not exists)
-                    if not os.path.exists(backup_input):
-                        shutil.copy(input_path, backup_input)
-                    
-                    # Load TEMPLATE (original input) for clean format
-                    with open(backup_input, 'r', encoding='utf-8', errors='replace') as f:
-                        input_content = f.read()
-                    
-                    if qm_program == 'orca':
-                        # Find * xyz line and replace coordinates
-                        match = re.search(r'\*\s+xyz\s+[-+]?\d+\s+\d+\s*\n(.*?)\*', input_content, re.DOTALL)
-                        if match:
-                            new_coords = ''.join(xyz_lines[2:]) if xyz_lines else ''
-                            new_input = input_content[:match.start(1)] + new_coords + input_content[match.end(1):]
-                            with open(input_path, 'w') as f:
-                                f.write(new_input)
-                        else:
-                            # Could not find coordinate block - reset strategy
-                            valid_extraction = False
-                    else:
-                        # Gaussian format
-                        lines = input_content.split('\n')
-                        charge_mult_idx = None
-                        for i, line in enumerate(lines):
-                            if re.match(r'^\s*[-+]?\d+\s+\d+\s*$', line):
-                                charge_mult_idx = i
-                                break
-                        
-                        if charge_mult_idx is not None:
-                            # Replace geometry (skip first 2 lines of XYZ)
-                            new_coords = [l.strip() for l in xyz_lines[2:] if l.strip()] if xyz_lines else []
-                            # Find end of old geometry (blank line)
-                            geom_end_idx = charge_mult_idx + 1
-                            while geom_end_idx < len(lines) and lines[geom_end_idx].strip():
-                                geom_end_idx += 1
-                            
-                            # Reconstruct input
-                            new_lines = lines[:charge_mult_idx+1] + new_coords + lines[geom_end_idx:]
-                            with open(input_path, 'w') as f:
-                                f.write('\n'.join(new_lines))
-                        else:
-                            # Could not find charge/mult line - reset strategy
-                            valid_extraction = False
-                
-                if not valid_extraction:
-                    # Strategy: RESET TO ORIGINAL
-                    # Extraction failed OR we're stuck in a loop
-                    # Restore original input and try again from scratch
-                    status_msg = f"↻ (attempt {attempt_counter}: resetting to original)"
-                    
-                    # Create backup if it doesn't exist (shouldn't happen, but be safe)
-                    if not os.path.exists(backup_input):
-                        if os.path.exists(input_path):
-                            shutil.copy(input_path, backup_input)
-                    
-                    if os.path.exists(backup_input):
-                        shutil.copy(backup_input, input_path)
-                    
-                    previous_geometry_hash = None  # Reset hash memory
-                    
-                    # IMPORTANT: Delete old output files to avoid confusion
-                    if os.path.exists(output_path):
-                        os.remove(output_path)
-                    xyz_file = os.path.join("optimization", basename + ".xyz")
-                    if os.path.exists(xyz_file):
-                        os.remove(xyz_file)
-                
-                # Update display (only show status for retries, not first attempt)
-                if attempt_counter > 1:
-                    status_msg = ''  # Initialize
-                    print(f"\r  Running: {display_name}... {status_msg}\033[K", end='', flush=True)
-                
-                # ═══ STEP 3: CLEAN & RUN CALCULATION ═══
-                
-                # Determine if input is in subdirectory
+                # Determine working directory
                 if '/' in input_file or '\\' in input_file:
-                    # File is in subdirectory (e.g., "motif_01/motif_01_opt.inp")
                     opt_subdir = os.path.dirname(input_file)
-                    opt_working_dir = os.path.join("optimization", opt_subdir)
-                    # Adjust file names to be relative to subdirectory
+                    opt_working_dir = os.path.join("refinement", opt_subdir)
                     input_file_relative = os.path.basename(input_file)
                     output_file_relative = os.path.basename(output_file)
                 else:
-                    # File is at root level
-                    opt_working_dir = "optimization"
+                    opt_working_dir = "refinement"
                     input_file_relative = input_file
                     output_file_relative = output_file
                 
-                # Get just the filename without path for temp script naming
                 input_filename = os.path.basename(input_file)
                 basename_only = os.path.splitext(input_filename)[0]
                 
-                # Remove ALL auxiliary files for clean run (except .inp and .master_backup)
-                # This prevents old files from interfering with the new calculation
+                # Remove ALL auxiliary/output files for clean run (except input files)
                 for item in os.listdir(opt_working_dir):
-                    if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf', '.master_backup')):
+                    if item.startswith(basename_only) and not item.endswith(('.inp', '.com', '.gjf')):
                         item_path = os.path.join(opt_working_dir, item)
                         if os.path.isfile(item_path):
                             try:
@@ -12432,7 +14499,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             except:
                                 pass
                 
-                # Create run script IN THE WORKING DIRECTORY
+                # ═══ STEP 2: RUN CALCULATION ═══
+                
                 temp_script = os.path.join(opt_working_dir, f'_run_{basename_only}.sh')
                 with open(temp_script, 'w') as f:
                     f.write(launcher_content.split('###')[0])  # Environment setup
@@ -12442,44 +14510,47 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         f.write(f"export TMPDIR=\"$(pwd)/.orca_tmp_{basename_only}_$$\"\n")
                         f.write(f"mkdir -p \"$TMPDIR\"\n")
                         f.write(f"trap 'rm -rf \"$TMPDIR\"' EXIT\n\n")
-                        # Execute ORCA with full path (required for parallel runs in ORCA 6.1+)
                         orca_root_var = extract_orca_root_from_launcher(launcher_content)
                         if orca_root_var:
                             f.write(f"${{{orca_root_var}}}/orca {input_file_relative} > {output_file_relative}\n")
                         else:
-                            # Fall back to PATH lookup if no ORCA root variable found
                             f.write(f"orca {input_file_relative} > {output_file_relative}\n")
                     elif qm_program == 'gaussian':
-                        # Use GAUSS_ROOT (generic, works with G09 or G16)
                         f.write(f"$GAUSS_ROOT/g16 {input_file_relative}\n")
                 
                 os.chmod(temp_script, 0o755)
                 
-                # Execute calculation from the working directory (subdirectory or root)
                 script_name = os.path.basename(temp_script)
+                
+                # Measure execution time to detect launch failures
+                start_time = time.time()
                 result = subprocess.run(
                     ['bash', script_name],
                     cwd=opt_working_dir,
                     capture_output=True,
                     text=True
                 )
+                elapsed_time = time.time() - start_time
                 
-                # Cleanup
+                # If calculation ran past the threshold, it started normally
+                # Don't retry even if it failed - redo mode will handle it
+                if elapsed_time > launch_failure_threshold:
+                    calculation_started = True
+                
+                # Cleanup temp script
                 if os.path.exists(temp_script):
                     os.remove(temp_script)
                 if qm_program == 'orca':
-                    # Clean up temp directories in the actual working directory
                     for tmp_dir in glob.glob(os.path.join(opt_working_dir, f'.orca_tmp_{basename_only}_*')):
                         try:
                             shutil.rmtree(tmp_dir)
                         except:
                             pass
                 
-                # ═══ STEP 4: CHECK SUCCESS ═══
+                # ═══ STEP 3: CHECK SUCCESS ═══
                 
                 if os.path.exists(output_path):
                     try:
-                        # Check for normal termination (OPI-aware for ORCA 6.1+)
                         if qm_program == 'orca':
                             normal_term = check_orca_terminated_normally_opi(output_path)
                         else:
@@ -12489,24 +14560,20 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         
                         if normal_term:
                             # SUCCESS!
-                            if attempt_counter > 1:
-                                print(f"\r  Running: {display_name}... ✓ (Attempt {attempt_counter})\033[K")
-                            else:
-                                print(f"\r  Running: {display_name}... ✓\033[K")
+                            if verbose:
+                                if launch_attempt > 1:
+                                    print(f"\r  Running: {display_name}... ✓ (launch attempt {launch_attempt})\033[K")
+                                else:
+                                    print(f"\r  Running: {display_name}... ✓\033[K")
                             num_completed += 1
                             success = True
-                            
-                            # Remove backup
-                            if os.path.exists(backup_input):
-                                os.remove(backup_input)
                             
                             # Update cache - avoid duplicates during redo
                             if input_file not in completed_opts:
                                 completed_opts.append(input_file)
-                            # Also add basename to track total
                             basename_only = os.path.splitext(os.path.basename(input_file))[0]
                             all_input_basenames.add(basename_only)
-                            stage_key = getattr(context, 'current_stage_key', 'optimization')
+                            stage_key = getattr(context, 'current_stage_key', 'refinement')
                             update_protocol_cache(stage_key, 'in_progress',
                                                 result={'completed_files': completed_opts,
                                                        'total_files': num_inputs,
@@ -12516,68 +14583,65 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     except:
                         pass
                 
-                # If we reach here, calculation failed
-                # Loop continues - next iteration will try to extract geometry
-                # If that fails/is stuck, it will reset to original
+                # If calculation started but failed, don't retry - exit loop
+                # Only continue loop if it was a launch failure
+                if calculation_started:
+                    break
             
-            # If loop exits without success (max_attempts reached)
-            # If loop exits without success (max_attempts reached)
+            # If loop exits without success
             if not success:
-                # Check if in infinite retry mode (--retry without number sets to 999999)
-                if max_attempts >= 999999:
-                    # Infinite retry mode - this should never happen as loop should continue
-                    # But if it does (e.g., user interrupted), don't mark as failed
-                    print(f"\r  Running: {display_name}... ⚠ (interrupted)\033[K")
-                else:
-                    # Limited retries - max attempts reached
-                    print(f"\r  Running: {display_name}... ✗\033[K")
-                    num_failed += 1
-                    failed_optimizations.append(input_file)
-                
-                # Restore original input for manual inspection
-                if os.path.exists(backup_input):
-                    shutil.copy(backup_input, input_path)
-                    os.remove(backup_input)
-            
+                if verbose:
+                    if calculation_started:
+                        # Calculation started but didn't complete normally - don't retry
+                        # This will be handled by redo mode if needed
+                        print(f"\r  Running: {display_name}... ✗ (no normal termination)\033[K")
+                    elif launch_attempt >= max_launch_retries:
+                        # Launch failed after all retries
+                        print(f"\r  Running: {display_name}... ✗ (launch failed after {launch_attempt} attempts)\033[K")
+                    else:
+                        print(f"\r  Running: {display_name}... ✗\033[K")
+                num_failed += 1
+                failed_refinements.append(input_file)
         
         # Print status
-        # Recalculate num_inputs from the updated set to reflect newly completed optimizations
+        # Recalculate num_inputs from the updated set to reflect newly completed refinements
         num_inputs = len(all_input_basenames)
         # Total completed = initial completed + newly completed in this run
         total_completed = initial_completed_count + num_completed
         # Ensure we don't show more completed than total inputs (can happen if files are removed)
         if total_completed > num_inputs:
             total_completed = num_inputs
-        print(f"\nStatus: {total_completed}/{num_inputs} optimizations completed")
+        if verbose:
+            print(f"\nStatus: {total_completed}/{num_inputs} refinements completed")
         
         # Store for protocol summary (use total)
-        context.opt_completed = total_completed
-        context.opt_total = num_inputs
+        context.ref_completed = total_completed
+        context.ref_total = num_inputs
         
         # Clean up old failed files if they exist and all succeeded
-        if not failed_optimizations:
-            for old_file in ["optimization/failed_opt.txt", "optimization/launcher_failed.sh"]:
+        if not failed_refinements:
+            for old_file in ["refinement/failed_ref.txt", "refinement/launcher_failed.sh"]:
                 if os.path.exists(old_file):
                     try:
                         os.remove(old_file)
                     except Exception:
                         pass
         
-        # Handle failed optimizations
-        if failed_optimizations:
-            print(f"Failed optimizations: {len(failed_optimizations)}/{num_inputs}")
+        # Handle failed refinements
+        if failed_refinements:
+            print(f"Failed refinements: {len(failed_refinements)}/{num_inputs}")
             
             # Write failed_opt.txt
-            failed_list_file = os.path.join("optimization", "failed_opt.txt")
+            failed_list_file = os.path.join("refinement", "failed_opt.txt")
             with open(failed_list_file, 'w') as f:
-                f.write(f"# Failed optimizations: {len(failed_optimizations)}/{num_inputs}\n")
+                f.write(f"# Failed refinements: {len(failed_refinements)}/{num_inputs}\n")
                 f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-                for failed_file in sorted(failed_optimizations, key=natural_sort_key):
+                for failed_file in sorted(failed_refinements, key=natural_sort_key):
                     f.write(f"{failed_file}\n")
             
-            print(f"Failed optimizations list written to: {failed_list_file}")
+            print(f"Failed refinements list written to: {failed_list_file}")
         
-        # Organize files if any optimizations are completed (new or already done)
+        # Organize files if any refinements are completed (new or already done)
         if total_completed > 0:
             if num_completed > 0:
                 print("\n\nOptimization calculations completed")
@@ -12588,10 +14652,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             # Organize results - run full sort/organize for both redo and normal mode
             saved_cwd = os.getcwd()
             try:
-                # Determine similarity folder - use opt_sim_folder (set earlier in this function)
-                if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                    # Use the folder determined at the start of execute_optimization_stage
-                    sim_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
+                # Determine similarity folder - use ref_sim_folder (set earlier in this function)
+                if hasattr(context, 'ref_sim_folder') and context.ref_sim_folder:
+                    # Use the folder determined at the start of execute_refinement_stage
+                    sim_base = context.ref_sim_folder.split('/')[0] if '/' in context.ref_sim_folder else context.ref_sim_folder
                 else:
                     # Calculate next similarity folder
                     root_dir = os.getcwd()
@@ -12608,11 +14672,11 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     
                     context.similarity_dir = sim_base
                 
-                os.chdir("optimization")
+                os.chdir("refinement")
                 
                 # Get exclusions from cache to filter output files
                 cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
-                excluded_numbers = cache.get('excluded_optimizations', [])
+                excluded_numbers = cache.get('excluded_refinements', [])
                 
                 # Group files by base names into subfolders (silent in workflow)
                 import io
@@ -12676,14 +14740,14 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             match = re.search(r'to\s+(similarity[^\s]*)', line)
                             if match:
                                 sim_folder = match.group(1)
-                                context.opt_sim_folder = sim_folder
+                                context.ref_sim_folder = sim_folder
                                 # Also set as pending for next similarity stage
                                 sim_base = sim_folder.split('/')[0] if '/' in sim_folder else sim_folder
                                 context.pending_similarity_folder = sim_base
                             break
                 
                 # Note: File update messages are now handled within collect_out_files_with_tracking
-                # No need to print them again here (unlike calculation stage where we copy manually)
+                # No need to print them again here (unlike optimization stage where we copy manually)
                 
                 # Clean up orphaned root input files after sorting
                 # Files should now be in subdirectories, so root copies are duplicates
@@ -12707,7 +14771,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             print("✗ No output files found")
             return 1
     else:
-        print("Warning: No launcher script found in optimization/")
+        print("Warning: No launcher script found in refinement/")
         return 1
     
     return 0
@@ -12718,6 +14782,39 @@ def main_ascec_integrated():
     import re as _re_module
     glob = _glob_module
     re = _re_module
+    
+    # DETECT BACKGROUND MODE IMMEDIATELY - before any output
+    # Check both: 1) is stdout a terminal, 2) is this process in background
+    global _IS_BACKGROUND_MODE
+    _IS_BACKGROUND_MODE = False
+    
+    # First check: is stdout connected to a terminal?
+    if not sys.stdout.isatty():
+        _IS_BACKGROUND_MODE = True
+    else:
+        # Second check: is process running in background? (process group != foreground group)
+        try:
+            if os.getpgrp() != os.tcgetpgrp(sys.stdout.fileno()):
+                _IS_BACKGROUND_MODE = True
+        except (OSError, AttributeError):
+            # tcgetpgrp may fail if no controlling terminal - that's background
+            pass
+    
+    # Helper to print only in foreground mode
+    def _bgprint(*args, **kwargs):
+        """Print only if not in background mode."""
+        if not _IS_BACKGROUND_MODE:
+            print(*args, **kwargs)
+    
+    # Helper to get verbose level from command line args (used before full argparse)
+    def _get_verbose_level_from_argv():
+        if '-v3' in sys.argv:
+            return 3
+        elif '-v2' in sys.argv:
+            return 2
+        elif '-v' in sys.argv:
+            return 1
+        return 0
     
     # CHECK FOR VERSION COMMAND (early check before other processing)
     if len(sys.argv) >= 2 and sys.argv[1] in ["--version", "-V", "version"]:
@@ -12735,7 +14832,7 @@ def main_ascec_integrated():
         if not existing_caches:
             print(f"Error: No active protocol found")
             print(f"No protocol_*.pkl cache files found in current directory")
-            print("This command is used to exclude calculations from a paused protocol.")
+            print("This command is used to exclude optimizations from a paused protocol.")
             sys.exit(1)
         
         # Find cache that matches this protocol file
@@ -12767,8 +14864,8 @@ def main_ascec_integrated():
             print("=" * 60)
             
             # Show excluded files for calculation
-            calc_excluded = cache.get('excluded_calculations', [])
-            calc2_excluded = cache.get('excluded_calculations_2', [])
+            calc_excluded = cache.get('excluded_optimizations', [])
+            calc2_excluded = cache.get('excluded_optimizations_2', [])
             if calc_excluded:
                 print(f"\nExcluded calculations (1st stage): {calc_excluded}")
             else:
@@ -12779,21 +14876,21 @@ def main_ascec_integrated():
             else:
                 print("No calculations (2nd stage) excluded")
             
-            # Show excluded files for optimization
-            opt_excluded = cache.get('excluded_optimizations', [])
+            # Show excluded files for refinement
+            opt_excluded = cache.get('excluded_refinements', [])
             if opt_excluded:
-                print(f"Excluded optimizations: {opt_excluded}")
+                print(f"Excluded refinements: {opt_excluded}")
             else:
-                print("No optimizations excluded")
+                print("No refinements excluded")
             
             print("\nUsage:")
-            print(f"  ascec04 {protocol_file} exclude calc <pattern>    - Exclude 1st calculation files")
-            print(f"  ascec04 {protocol_file} exclude calc2 <pattern>   - Exclude 2nd calculation files")
-            print(f"  ascec04 {protocol_file} exclude opt <pattern>     - Exclude optimization files")
+            print(f"  ascec04 {protocol_file} exclude opt <pattern>    - Exclude 1st optimization files")
+            print(f"  ascec04 {protocol_file} exclude opt2 <pattern>   - Exclude 2nd optimization files")
+            print(f"  ascec04 {protocol_file} exclude ref <pattern>     - Exclude refinement files")
             print(f"  ascec04 {protocol_file} exclude clear             - Clear all exclusions")
-            print(f"  ascec04 {protocol_file} exclude calc clear        - Clear calc exclusions only")
-            print(f"  ascec04 {protocol_file} exclude calc2 clear       - Clear calc2 exclusions only")
-            print(f"  ascec04 {protocol_file} exclude opt clear         - Clear opt exclusions only")
+            print(f"  ascec04 {protocol_file} exclude opt clear        - Clear opt exclusions only")
+            print(f"  ascec04 {protocol_file} exclude opt2 clear       - Clear opt2 exclusions only")
+            print(f"  ascec04 {protocol_file} exclude ref clear         - Clear ref exclusions only")
             print("\nPattern examples:")
             print("  2               -> Exclude conf_2 (for calc) or motif_02 (for opt)")
             print("  2,5-9           -> Exclude 2, 5, 6, 7, 8, 9")
@@ -12810,41 +14907,41 @@ def main_ascec_integrated():
         
         if stage_type == "clear":
             # Clear all exclusions
-            cache['excluded_calculations'] = []
-            cache['excluded_calculations_2'] = []
             cache['excluded_optimizations'] = []
+            cache['excluded_optimizations_2'] = []
+            cache['excluded_refinements'] = []
             save_protocol_cache(cache, cache_file)
             print("✓ All exclusions cleared")
             sys.exit(0)
         
-        if stage_type not in ['calc', 'calc2', 'opt']:
-            print(f"Error: Invalid stage type '{stage_type}'. Use 'calc', 'calc2', or 'opt'")
+        if stage_type not in ['opt', 'opt2', 'ref']:
+            print(f"Error: Invalid stage type '{stage_type}'. Use 'opt', 'opt2', or 'ref'")
             sys.exit(1)
         
         if len(sys.argv) < 5:
             print("Error: Missing exclusion pattern or 'clear' command")
             print("Examples:")
-            print(f"  ascec04 {protocol_file} exclude calc 3")
-            print(f"  ascec04 {protocol_file} exclude calc2 4-5")
-            print(f"  ascec04 {protocol_file} exclude opt 03-15")
-            print(f"  ascec04 {protocol_file} exclude calc clear   # Clear calc exclusions")
-            print(f"  ascec04 {protocol_file} exclude opt clear    # Clear opt exclusions")
+            print(f"  ascec04 {protocol_file} exclude opt 3")
+            print(f"  ascec04 {protocol_file} exclude opt2 4-5")
+            print(f"  ascec04 {protocol_file} exclude ref 03-15")
+            print(f"  ascec04 {protocol_file} exclude opt clear   # Clear opt exclusions")
+            print(f"  ascec04 {protocol_file} exclude ref clear    # Clear ref exclusions")
             sys.exit(1)
         
         pattern = sys.argv[4]
         
         # Check for stage-specific clear
         if pattern.lower() == 'clear':
-            if stage_type == 'calc':
-                cache['excluded_calculations'] = []
+            if stage_type == 'opt':
+                cache['excluded_optimizations'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for calc (1st stage)")
             elif stage_type == 'calc2':
-                cache['excluded_calculations_2'] = []
+                cache['excluded_optimizations_2'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for calc2 (2nd stage)")
             else:  # opt
-                cache['excluded_optimizations'] = []
+                cache['excluded_refinements'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for opt")
             sys.exit(0)
@@ -12852,26 +14949,26 @@ def main_ascec_integrated():
         try:
             excluded_numbers = parse_exclusion_pattern(pattern)
             
-            if stage_type == 'calc':
-                key = 'excluded_calculations'
+            if stage_type == 'opt':
+                key = 'excluded_optimizations'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
                 print(f"✓ Excluded calculations (1st stage) matching: {excluded_numbers}")
                 print(f"  Total excluded: {cache[key]}")
             elif stage_type == 'calc2':
-                key = 'excluded_calculations_2'
+                key = 'excluded_optimizations_2'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
                 print(f"✓ Excluded calculations (2nd stage) matching: {excluded_numbers}")
                 print(f"  Total excluded: {cache[key]}")
             else:  # opt
-                key = 'excluded_optimizations'
+                key = 'excluded_refinements'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
-                print(f"✓ Excluded optimizations matching: {excluded_numbers}")
+                print(f"✓ Excluded refinements matching: {excluded_numbers}")
                 print(f"  Total excluded: {cache[key]}")
             
             save_protocol_cache(cache, cache_file)
@@ -12888,10 +14985,10 @@ def main_ascec_integrated():
     # Syntax: ascec04 input.in protocol [stage]
     # Examples: 
     #   ascec04 input.in protocol          # Run full protocol
-    #   ascec04 input.in protocol calc     # Restart calculation stage
-    #   ascec04 input.in protocol calc1    # Restart first calc stage
-    #   ascec04 input.in protocol calc2    # Restart second calc stage
-    #   ascec04 input.in protocol opt      # Restart optimization stage
+    #   ascec04 input.in protocol opt     # Restart optimization stage
+    #   ascec04 input.in protocol opt1    # Restart first opt stage
+    #   ascec04 input.in protocol opt2    # Restart second opt stage
+    #   ascec04 input.in protocol ref      # Restart refinement stage
     if len(sys.argv) >= 3 and sys.argv[2].lower() == "protocol":
         input_file = sys.argv[1]
         restart_stage = None
@@ -12917,18 +15014,17 @@ def main_ascec_integrated():
             print("Error: No protocol found in input file")
             print("\nExpected format in input file:")
             print(".in,")
-            print("r1 --retry=5 --box10,")
-            print("calc -c --redo=3 --retry=10 ../preopt_input.inp ../launcher_orca.sh,")
+            print("r1 --box10,")
+            print("calc -c --redo=3 ../preopt_input.inp ../launcher_orca.sh,")
             print("similarity --th=2")
             print("\nFlag meanings:")
-            print("  --retry=N: Retry each individual calculation up to N times")
-            print("  --retry: Retry until all calculations succeed (unlimited)")
             print("  --redo=N: Redo entire stage (calc+similarity) up to N times")
+            print("\nNote: Launch failures are automatically retried up to 10 times.")
             print("\nStage restart:")
-            print("  ascec04 input.in protocol calc   - Restart calculation stage (deletes files)")
-            print("  ascec04 input.in protocol calc1  - Restart first calc stage")
-            print("  ascec04 input.in protocol calc2  - Restart second calc stage")
-            print("  ascec04 input.in protocol opt    - Restart optimization stage")
+            print("  ascec04 input.in protocol opt   - Restart optimization stage (deletes files)")
+            print("  ascec04 input.in protocol opt1  - Restart first opt stage")
+            print("  ascec04 input.in protocol opt2  - Restart second opt stage")
+            print("  ascec04 input.in protocol ref    - Restart refinement stage")
             print("  ascec04 input.in protocol 2 -i   - Mark stage 2 as incomplete (keeps files)")
             print("\nThe -i flag marks a stage as incomplete without deleting files,")
             print("allowing the workflow to continue from where it left off.")
@@ -13013,8 +15109,8 @@ def main_ascec_integrated():
                                        key=lambda k: int(k.split('_')[1]))
                 
                 # Build a map of stage types for user guidance
-                calc_stages = [k for k in all_stage_keys if k.startswith('calculation_')]
                 opt_stages = [k for k in all_stage_keys if k.startswith('optimization_')]
+                ref_stages = [k for k in all_stage_keys if k.startswith('refinement_')]
                 
                 # Find matching stage(s) to restart by stage number
                 stages_to_restart = []
@@ -13029,60 +15125,60 @@ def main_ascec_integrated():
                             stages_to_restart.append(stage_key)
                 except ValueError:
                     # Not a number - try to match by stage name (calc, calc1, calc2, opt, opt1, opt2)
-                    if restart_stage in ['calc', 'calc1']:
-                        # Find first calculation stage
-                        if calc_stages:
-                            stages_to_restart.append(calc_stages[0])
-                    elif restart_stage == 'calc2':
-                        # Find second calculation stage
-                        if len(calc_stages) >= 2:
-                            stages_to_restart.append(calc_stages[1])
-                        elif len(calc_stages) == 1:
-                            print(f"\nError: Only one calculation stage exists: {calc_stages[0]}")
-                            print(f"There is no 'calc2' stage in this protocol")
-                            sys.exit(1)
-                        else:
-                            print(f"\nError: No calculation stages found in cache")
-                            sys.exit(1)
-                    elif restart_stage.startswith('calc') and len(restart_stage) > 4:
-                        # Handle calc3, calc4, etc.
-                        try:
-                            calc_idx = int(restart_stage[4:]) - 1
-                            if 0 <= calc_idx < len(calc_stages):
-                                stages_to_restart.append(calc_stages[calc_idx])
-                            else:
-                                print(f"\nError: {restart_stage} not found")
-                                print(f"There are {len(calc_stages)} calculation stage(s): {', '.join(calc_stages)}")
-                                sys.exit(1)
-                        except ValueError:
-                            pass
-                    elif restart_stage in ['opt', 'opt1']:
+                    if restart_stage in ['opt', 'opt1']:
                         # Find first optimization stage
                         if opt_stages:
                             stages_to_restart.append(opt_stages[0])
-                        else:
-                            print(f"\nError: No optimization stages found in cache")
-                            sys.exit(1)
                     elif restart_stage == 'opt2':
                         # Find second optimization stage
                         if len(opt_stages) >= 2:
                             stages_to_restart.append(opt_stages[1])
                         elif len(opt_stages) == 1:
                             print(f"\nError: Only one optimization stage exists: {opt_stages[0]}")
-                            print(f"There is no 'opt2' stage in this protocol")
+                            print(f"There is no 'calc2' stage in this protocol")
                             sys.exit(1)
                         else:
                             print(f"\nError: No optimization stages found in cache")
                             sys.exit(1)
-                    elif restart_stage.startswith('opt') and len(restart_stage) > 3:
-                        # Handle opt3, opt4, etc.
+                    elif restart_stage.startswith('opt') and len(restart_stage) > 4:
+                        # Handle calc3, calc4, etc.
                         try:
-                            opt_idx = int(restart_stage[3:]) - 1
-                            if 0 <= opt_idx < len(opt_stages):
-                                stages_to_restart.append(opt_stages[opt_idx])
+                            calc_idx = int(restart_stage[4:]) - 1
+                            if 0 <= calc_idx < len(opt_stages):
+                                stages_to_restart.append(opt_stages[calc_idx])
                             else:
                                 print(f"\nError: {restart_stage} not found")
                                 print(f"There are {len(opt_stages)} optimization stage(s): {', '.join(opt_stages)}")
+                                sys.exit(1)
+                        except ValueError:
+                            pass
+                    elif restart_stage in ['ref', 'ref1']:
+                        # Find first refinement stage
+                        if ref_stages:
+                            stages_to_restart.append(ref_stages[0])
+                        else:
+                            print(f"\nError: No refinement stages found in cache")
+                            sys.exit(1)
+                    elif restart_stage == 'opt2':
+                        # Find second refinement stage
+                        if len(ref_stages) >= 2:
+                            stages_to_restart.append(ref_stages[1])
+                        elif len(ref_stages) == 1:
+                            print(f"\nError: Only one refinement stage exists: {ref_stages[0]}")
+                            print(f"There is no 'opt2' stage in this protocol")
+                            sys.exit(1)
+                        else:
+                            print(f"\nError: No refinement stages found in cache")
+                            sys.exit(1)
+                    elif restart_stage.startswith('ref') and len(restart_stage) > 3:
+                        # Handle opt3, opt4, etc.
+                        try:
+                            opt_idx = int(restart_stage[3:]) - 1
+                            if 0 <= opt_idx < len(ref_stages):
+                                stages_to_restart.append(ref_stages[opt_idx])
+                            else:
+                                print(f"\nError: {restart_stage} not found")
+                                print(f"There are {len(ref_stages)} refinement stage(s): {', '.join(ref_stages)}")
                                 sys.exit(1)
                         except ValueError:
                             pass
@@ -13103,32 +15199,32 @@ def main_ascec_integrated():
                         
                         # Delete directories based on stage type
                         # Map of directories to delete based on restart stage
-                        if 'calculation' in [k.split('_')[0] for k in stages_to_restart]:
-                            # Restarting calculation: delete calculation/, similarity/, optimization/
-                            for dir_name in ['calculation', 'similarity', 'optimization']:
+                        if 'optimization' in [k.split('_')[0] for k in stages_to_restart]:
+                            # Restarting calculation: delete calculation/, similarity/, refinement/
+                            for dir_name in ['optimization', 'similarity', 'refinement']:
                                 if os.path.exists(dir_name):
                                     print(f"     Removing {dir_name}/")
                                     shutil.rmtree(dir_name)
                             # Also remove numbered variants
-                            for pattern in ['calculation_*', 'similarity_*', 'optimization_*']:
+                            for pattern in ['optimization_*', 'similarity_*', 'refinement_*']:
                                 for dir_path in glob.glob(pattern):
                                     if os.path.isdir(dir_path):
                                         print(f"     Removing {dir_path}/")
                                         shutil.rmtree(dir_path)
                         
-                        elif 'optimization' in [k.split('_')[0] for k in stages_to_restart]:
-                            # Restarting optimization: delete optimization/ and later similarity/
-                            for dir_name in ['optimization']:
+                        elif 'refinement' in [k.split('_')[0] for k in stages_to_restart]:
+                            # Restarting refinement: delete refinement/ and later similarity/
+                            for dir_name in ['refinement']:
                                 if os.path.exists(dir_name):
                                     print(f"     Removing {dir_name}/")
                                     shutil.rmtree(dir_name)
                             # Also remove numbered variants
-                            for pattern in ['optimization_*']:
+                            for pattern in ['refinement_*']:
                                 for dir_path in glob.glob(pattern):
                                     if os.path.isdir(dir_path):
                                         print(f"     Removing {dir_path}/")
                                         shutil.rmtree(dir_path)
-                            # Remove similarity folders that come after optimization
+                            # Remove similarity folders that come after refinement
                             similarity_dirs = sorted(glob.glob('similarity*'))
                             for sim_dir in similarity_dirs:
                                 if os.path.isdir(sim_dir):
@@ -13170,16 +15266,6 @@ def main_ascec_integrated():
                         stage_num = stage_key.split('_')[1]
                         print(f"  [{stage_num}] {stage_type}")
                     
-                    # Show calculation-specific guidance
-                    if calc_stages:
-                        print(f"\nCalculation stages ({len(calc_stages)} total):")
-                        for i, calc_stage in enumerate(calc_stages, 1):
-                            stage_num = calc_stage.split('_')[1]
-                            if i == 1:
-                                print(f"  calc or calc1 -> stage {stage_num}")
-                            else:
-                                print(f"  calc{i} -> stage {stage_num}")
-                    
                     # Show optimization-specific guidance
                     if opt_stages:
                         print(f"\nOptimization stages ({len(opt_stages)} total):")
@@ -13190,18 +15276,34 @@ def main_ascec_integrated():
                             else:
                                 print(f"  opt{i} -> stage {stage_num}")
                     
+                    # Show refinement-specific guidance
+                    if ref_stages:
+                        print(f"\nRefinement stages ({len(ref_stages)} total):")
+                        for i, ref_stage in enumerate(ref_stages, 1):
+                            stage_num = ref_stage.split('_')[1]
+                            if i == 1:
+                                print(f"  ref or ref1 -> stage {stage_num}")
+                            else:
+                                print(f"  ref{i} -> stage {stage_num}")
+                    
                     print(f"\nUsage:")
                     print(f"  ascec04 {input_file} protocol <stage_number>")
-                    print(f"  ascec04 {input_file} protocol calc   (or calc1, calc2, etc.)")
-                    print(f"  ascec04 {input_file} protocol opt    (or opt1, opt2, etc.)")
+                    print(f"  ascec04 {input_file} protocol opt   (or opt1, opt2, etc.)")
+                    print(f"  ascec04 {input_file} protocol ref   (or ref1, ref2, etc.)")
                     sys.exit(1)
             else:
                 print(f"\nError: No protocol cache found for {input_file}")
                 print("Run the protocol first before trying to restart a stage")
                 sys.exit(1)
         
+        # Extract embedded templates
+        embedded_templates = extract_embedded_templates(input_file)
+        
         # Execute workflow with caching enabled
-        result = execute_workflow_stages(input_file, stages, use_cache=True, protocol_text=protocol_text)
+        result = execute_workflow_stages(input_file, stages, use_cache=True, 
+                                        protocol_text=protocol_text,
+                                        verbose_level=_get_verbose_level_from_argv(),
+                                        embedded_templates=embedded_templates)
         sys.exit(result)
     
     # CHECK FOR WORKFLOW MODE (',' or 'then' separator-based commands)
@@ -13231,8 +15333,13 @@ def main_ascec_integrated():
             print("   or: ascec04 input.in then r3 then calc template.inp launcher.sh then similarity --th=2")
             sys.exit(1)
         
+        # Extract embedded templates
+        embedded_templates = extract_embedded_templates(input_file)
+        
         # Execute workflow
-        result = execute_workflow_stages(input_file, stages)
+        result = execute_workflow_stages(input_file, stages, 
+                                        verbose_level=_get_verbose_level_from_argv(),
+                                        embedded_templates=embedded_templates)
         sys.exit(result)
     
     # STANDARD SINGLE-COMMAND MODE (backward compatibility)
@@ -13248,14 +15355,14 @@ def main_ascec_integrated():
 
 COMMANDS:
   Sampling:
-    input.in [options]          Single annealing simulation
-    input.in rN                 N replicated runs (e.g., r3 = 3 replicas)
-    input.in rN --boxP          N replicas with P%% box packing density
-    input.in box                Analyze simulation box requirements
+    input.asc [options]          Single annealing simulation (also .in)
+    input.asc rN                 N replicated runs (e.g., r3 = 3 replicas)
+    input.asc rN --boxP          N replicas with P%% box packing density
+    input.asc box                Analyze simulation box requirements
   
   Analysis:
-    calc TEMPLATE LAUNCHER      Generate quantum chemistry inputs from results
-    opt TEMPLATE LAUNCHER       Generate optimization inputs from motifs
+    opt TEMPLATE LAUNCHER       Generate optimization inputs from results
+    ref TEMPLATE LAUNCHER       Generate refinement inputs from motifs
     sort [--nosum|--justsum]    Organize outputs and generate summary reports
     simil [OPTIONS]             Clustering analysis (see: ascec simil --help)
   
@@ -13264,45 +15371,92 @@ COMMANDS:
     merge [result]              Interactively combine XYZ structure files
     update TEMPLATE [PATTERN]   Update existing inputs with new template
     launcher                    Consolidate launcher scripts
-    input.in protocol [N]       Execute automated multi-stage workflow
-    input.in exclude [STAGE] [PATTERN]  Exclude structures from paused protocol
+    input.asc protocol [N]      Execute multi-stage workflow (explicit)
+    input.asc exclude [STAGE] [PATTERN]  Exclude structures from paused protocol
+
+  NOTE: If the input file contains a protocol block, workflow mode is
+        auto-activated when running: ascec input.asc
 
 WORKFLOW:
   Typical manual workflow:
-    1. ascec input.in box       → validate simulation parameters
-    2. ascec input.in r3        → perform 3 replicated samplings
-    3. ascec calc T.inp L.sh    → generate QM input files
-    4. [Execute quantum calculations externally]
+    1. ascec input.asc box      → validate simulation parameters
+    2. ascec input.asc r3       → perform 3 replicated samplings
+    3. ascec opt T.inp L.sh     → generate QM optimization input files
+    4. [Execute quantum optimizations externally]
     5. ascec sort               → organize results and generate summaries
     6. ascec simil --th=0.9     → cluster structures by similarity
 
-  Automated workflow:
-    ascec input.in protocol     → executes all stages automatically
+  Automated workflow (embedded protocol in .asc file):
+    ascec input.asc             → auto-detects protocol and executes all stages
+    ascec input.asc protocol    → explicit protocol execution
 
   Resuming the protocol:
     The system maintains a cache file to track progress. If interrupted,
     resume from the last successful stage:
-      ascec input.in protocol
+      ascec input.asc            → auto-resumes from cache
+      ascec input.asc protocol   → explicit resume
 
     Resume from a specific stage (e.g., stage 2):
-      ascec input.in protocol 2       → resume from stage 2
-      ascec input.in protocol 2 -i    → resume interactively
+      ascec input.asc protocol 2       → resume from stage 2
+      ascec input.asc protocol 2 -i    → resume interactively
 
     Pipeline stages:
-      1. Annealing → 2. Calculation → 3. Similarity → 4. Optimization → 5. Similarity(2)
+      1. Annealing → 2. Optimization → 3. Similarity → 4. Refinement → 5. Similarity(2) = PES Results
 
   Excluding problematic structures:
     For resumable protocols, exclude structures that cause errors:
-      ascec input.in exclude              → view current exclusions
-      ascec input.in exclude calc 5,10-15 → exclude 1st calc stage
-      ascec input.in exclude opt 1,5,9    → exclude optimizations
-      ascec input.in exclude clear        → clear all exclusions
-      ascec input.in exclude calc clear   → clear calc exclusions only
-    Then resume: ascec input.in protocol
+      ascec input.asc exclude              → view current exclusions
+      ascec input.asc exclude opt 5,10-15  → exclude 1st optimization stage
+      ascec input.asc exclude ref 1,5,9    → exclude refinements
+      ascec input.asc exclude clear        → clear all exclusions
+      ascec input.asc exclude opt clear    → clear optimization exclusions only
+    Then resume: ascec input.asc
+
+PROTOCOL FLAGS (optional):
+  These flags modify stage behavior. Defaults shown in [brackets].
+
+  Optimization/Refinement stages:
+    --critical=N    Max %% of "critical" structures (imaginary freqs) [0]
+    --redo=N        Max stage redos (recalc all failed structures) [3]
+    --skipped=N     Max %% of skipped structures (use instead of --critical)
+
+  Launch failure handling:
+    Calculations that fail to start (instant crashes) are automatically
+    retried up to 10 times. Once a calculation starts running normally,
+    it will not be retried regardless of exit code.
+
+  Example protocol with custom flags:
+    opt template.inp launcher.sh , similarity --th=0.9 , \\
+    ref --critical=5 template.inp launcher.sh
+
+  Launcher file is OPTIONAL:
+    If omitted, ASCEC auto-detects ORCA from PATH and generates a launcher.
+    Example: opt template.inp , similarity --th=0.9
+
+TEMPLATE DIRECTIVES:
+  Add these comments to your ORCA template (.inp) for rescue hessian behavior:
+
+  #rescue(METHOD)       Specify method for rescue Hessian calculation
+  #rescue(METHOD,num)   Use NumFreq instead of Freq for Hessian
+
+  Default rescue method: HF-3c with Freq
+  
+  If template uses xTB method (e.g., ! Native-GFN2-xTB Opt), the same
+  method is reused for rescue with NumFreq automatically.
+
+  Examples:
+    #rescue(B97-3c)         Use B97-3c with Freq
+    #rescue(GFN2-xTB,num)   Use GFN2-xTB with NumFreq
+    #rescue(HF-3c)          Explicit HF-3c (same as default)
+
+  xTB methods are auto-converted for ORCA version:
+    ORCA 6.1+: Uses Native-GFN2-xTB, Native-GFN-xTB
+    ORCA 5.x:  Uses GFN2-xTB, GFN-xTB (requires external xtb)
 
 OPTIONS:
-  -v, --v          Verbose output (print every 10 Monte Carlo cycles)
-  --va             Very verbose (print every cycle)
+  -v               Enable verbose output (show workflow progress details)
+  -v2              Enable extra verbose output (every 10 Monte Carlo cycles)
+  -v3              Enable maximum verbose output (every cycle)
   --standard       Use standard Metropolis acceptance criterion
   --nobox          Disable generation of box-visualization XYZ files
   --nosum          Skip summary file generation in sort command
@@ -13310,11 +15464,17 @@ OPTIONS:
   -V, --version    Display version information and exit
 
 EXAMPLES:
-  ascec w6.in r5                      Perform 5 replicated water hexamer runs
+  ascec w6.asc r5                     Perform 5 replicated water hexamer runs
+  ascec w6.asc                        Auto-run protocol (if embedded in file)
   ascec diagram --scaled              Generate auto-scaled energy diagrams
-  ascec calc opt.inp launcher.sh      Create inputs with launcher script
+  ascec opt preopt.inp launcher.sh    Create optimization inputs with launcher
   ascec sort                          Organize results with summary
   ascec simil --th=0.95 --rmsd=0.5    Cluster with 0.95 th similarity + RMSD
+
+FILE FORMAT:
+  .asc is the recommended extension for ASCEC input files.
+  .in is still supported for backward compatibility.
+  When a protocol block is present, workflow mode is auto-activated.
 
 REFERENCE:
   For comprehensive documentation including theoretical background,
@@ -13329,15 +15489,17 @@ MORE INFORMATION:
   Support:    Química Física Teórica - Universidad de Antioquia
 """)
     parser.add_argument("command", metavar="COMMAND", 
-                       help="Input file or command (calc, sort, simil, diagram, etc.)")
+                       help="Input file or command (opt, sort, simil, diagram, etc.)")
     parser.add_argument("arg1", nargs='?', default=None, metavar="ARG1",
                        help="Command-specific argument (e.g., template file, mode)")
     parser.add_argument("arg2", nargs='?', default=None, metavar="ARG2",
                        help="Additional command-specific argument")
-    parser.add_argument("-v", "--v", action="store_true", 
-                       help="Enable verbose output (every 10 Monte Carlo cycles)")
-    parser.add_argument("--va", action="store_true", 
-                       help="Enable very verbose output (every cycle)")
+    parser.add_argument("-v", action="store_true", 
+                       help="Enable verbose output (show workflow progress details)")
+    parser.add_argument("-v2", action="store_true", 
+                       help="Enable extra verbose output (every 10 Monte Carlo cycles)")
+    parser.add_argument("-v3", action="store_true", 
+                       help="Enable maximum verbose output (every cycle)")
     parser.add_argument("--standard", action="store_true", 
                        help="Use standard Metropolis criterion instead of modified")
     
@@ -13366,6 +15528,11 @@ MORE INFORMATION:
     # Check if help is requested
     if args.command.lower() in ["help", "commands"]:
         parser.print_help()
+        return
+    
+    # Check if status command is requested
+    if args.command.lower() == "status":
+        execute_status_command()
         return
     
     # Check if similarity analysis mode is requested
@@ -13400,20 +15567,6 @@ MORE INFORMATION:
         execute_box_analysis(input_file)
         return
     
-    # Check if calculation mode is requested
-    if args.command.lower() == "calc":
-        if not args.arg1:
-            print("Error: calc command requires a template file.")
-            print("Usage: python ascec-v04.py calc template_file [launcher_template]")
-            print("Example: python ascec-v04.py calc example_input.inp launcher_orca.sh")
-            print("         python ascec-v04.py calc example_input.inp  # Creates inputs only")
-            sys.exit(1)
-        
-        result = create_simple_calculation_system(args.arg1, args.arg2)
-        if result:
-            print(result)
-        return
-
     # Check if optimization mode is requested
     if args.command.lower() == "opt":
         if not args.arg1:
@@ -13423,7 +15576,21 @@ MORE INFORMATION:
             print("         python ascec-v04.py opt example_input.inp  # Creates inputs only")
             sys.exit(1)
         
-        result = create_optimization_system(args.arg1, args.arg2)
+        result = create_simple_optimization_system(args.arg1, args.arg2)
+        if result:
+            print(result)
+        return
+
+    # Check if refinement mode is requested
+    if args.command.lower() == "ref":
+        if not args.arg1:
+            print("Error: ref command requires a template file.")
+            print("Usage: python ascec-v04.py ref template_file [launcher_template]")
+            print("Example: python ascec-v04.py ref example_input.inp launcher_orca.sh")
+            print("         python ascec-v04.py ref example_input.inp  # Creates inputs only")
+            sys.exit(1)
+        
+        result = create_refinement_system(args.arg1, args.arg2)
         if result:
             print(result)
         return
@@ -13465,7 +15632,7 @@ MORE INFORMATION:
         print("Cleaning up temporary folders...")
         
         # Legacy _tmp_ folders (no longer created, but might exist from old runs)
-        temp_calc_folders = glob.glob("calculation_tmp_*")
+        temp_calc_folders = glob.glob("optimization_tmp_*")
         temp_sim_folders = glob.glob("similarity_tmp_*")
         
         # Current temporary folders
@@ -13474,9 +15641,9 @@ MORE INFORMATION:
         
         all_temp = temp_calc_folders + temp_sim_folders + retry_input + good_structures
         
-        # Refactored optimization redo logic:
+        # Refactored refinement redo logic:
         # Instead of creating _tmp_ folders, we now unsort existing folders.
-        # This means the "optimization redo block" is effectively removed,
+        # This means the "refinement redo block" is effectively removed,
         # and the cleanup now just handles the remaining temporary folders.
         # The "similarity spacing" fix is applied here as a general print spacing.
         
@@ -13567,16 +15734,50 @@ MORE INFORMATION:
                 
             except ValueError as e:
                 print(f"Error: Invalid replication argument '{replication}'. {e}")
-                print("Usage: python ascec-v04.py input_file.in r<number> [--box<percentage>]")
-                print("Example: python ascec-v04.py example.in r3")
-                print("Example: python ascec-v04.py example.in r3 --box10  # Use 10% packing")
+                print("Usage: python ascec-v04.py input_file.asc r<number> [--box<percentage>]")
+                print("Example: python ascec-v04.py example.asc r3")
+                print("Example: python ascec-v04.py example.asc r3 --box10  # Use 10% packing")
                 sys.exit(1)
         else:
             print(f"Error: Invalid replication format '{replication}'.")
-            print("Usage: python ascec-v04.py input_file.in r<number> [--box<percentage>]")
-            print("Example: python ascec-v04.py example.in r3")
-            print("Example: python ascec-v04.py example.in r3 --box10  # Use 10% packing")
+            print("Usage: python ascec-v04.py input_file.asc r<number> [--box<percentage>]")
+            print("Example: python ascec-v04.py example.asc r3")
+            print("Example: python ascec-v04.py example.asc r3 --box10  # Use 10% packing")
             sys.exit(1)
+
+    # AUTO-DETECT PROTOCOL MODE: If input file contains a protocol block, run workflow mode
+    # This allows running `ascec input.asc` without needing the `protocol` command
+    if replication is None:
+        protocol = extract_protocol_from_input(input_file)
+        if protocol is not None:
+            # Extract embedded templates (e.g., #orca input1) and write to files
+            embedded_templates = extract_embedded_templates(input_file)
+            
+            # Store original protocol text for summary
+            protocol_text = protocol.strip()
+            
+            # Replace .in or .in, placeholder with actual input filename
+            import re
+            protocol = re.sub(r'\.in,?', input_file + ',', protocol, count=1)
+            protocol = protocol.replace(',,', ',')
+            
+            # Parse protocol into arguments
+            protocol_args = shlex.split(protocol)
+            
+            # Parse workflow stages
+            stages = parse_workflow_stages(protocol_args[1:])
+            
+            if stages:
+                # Execute workflow with caching enabled
+                # Get verbose level from args if available, otherwise from argv
+                vlevel = _get_verbose_level_from_argv()
+                result = execute_workflow_stages(input_file, stages, use_cache=True, 
+                                                protocol_text=protocol_text,
+                                                verbose_level=vlevel,
+                                                embedded_templates=embedded_templates)
+                sys.exit(result)
+            else:
+                _bgprint("Warning: Protocol found but no valid stages. Running single annealing.")
 
     # Initialize file handles and paths to None to prevent UnboundLocalError
     out_file_handle = None 
@@ -13608,9 +15809,12 @@ MORE INFORMATION:
     _print_verbose("Starting ASCEC simulation...", 0, state)
     
     # Set verbosity level based on command line arguments
-    if args.va:
+    # level 0: minimal (no flag), level 1: -v, level 2: -v2, level 3: -v3
+    if getattr(args, 'v3', False):
+        state.verbosity_level = 3
+    elif getattr(args, 'v2', False):
         state.verbosity_level = 2
-    elif args.v:
+    elif getattr(args, 'v', False):
         state.verbosity_level = 1
     else:
         state.verbosity_level = 0 # Default minimal output
@@ -13934,12 +16138,12 @@ MORE INFORMATION:
                     elif state.quenching_routine == 2: # Geometric quenching
                         state.current_temp = max(state.current_temp * state.geom_temp_factor, 0.001)
 
-                # Always print the start of a new annealing step if not very verbose (level 0 or 1)
-                if state.verbosity_level <= 1:
+                # Always print the start of a new annealing step if not very verbose (level 0, 1, or 2)
+                if state.verbosity_level <= 2:
                     print(f"\nAnnealing Step {step_num + 1}/{total_annealing_steps} at Temperature: {state.current_temp:.2f} K", file=sys.stderr) # Modified print
                     sys.stderr.flush()
-                elif state.verbosity_level == 2: # For very verbose, print every step
-                     _print_verbose(f"\nAnnealing Step {step_num + 1}/{total_annealing_steps} at Temperature: {state.current_temp:.2f} K", 2, state) # Modified print
+                elif state.verbosity_level == 3: # For very verbose, print every step
+                     _print_verbose(f"\nAnnealing Step {step_num + 1}/{total_annealing_steps} at Temperature: {state.current_temp:.2f} K", 3, state) # Modified print
                 
                 # Keep a copy of the current accepted state before proposing a new move
                 # These are the *reference* states for the Metropolis criterion
@@ -13977,8 +16181,8 @@ MORE INFORMATION:
                     proposed_energy, jo_status = calculate_energy(state.rp, state.iznu, state, run_dir)
                     
                     # Verbose output for each cycle (using state.qm_call_count for global attempt number)
-                    if state.verbosity_level == 2 or (state.verbosity_level == 1 and state.qm_call_count % 10 == 0):
-                        _print_verbose(f"  Attempt {state.qm_call_count} (global), {qm_calls_made_this_temp_step} (step-local): T={state.current_temp:.2f} K", 1, state)
+                    if state.verbosity_level == 3 or (state.verbosity_level == 2 and state.qm_call_count % 10 == 0):
+                        _print_verbose(f"  Attempt {state.qm_call_count} (global), {qm_calls_made_this_temp_step} (step-local): T={state.current_temp:.2f} K", 2, state)
 
                     # Check if QM calculation failed
                     if jo_status == 0:
