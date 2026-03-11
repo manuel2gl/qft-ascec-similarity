@@ -433,7 +433,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
     """
     Detect hydrogen bonds based on distance and angle criteria.
     
-    Distance criterion: 1.2-2.7 Å between H and acceptor
+    Distance criterion: 1.2-3.2 Å between H and acceptor
     Angle criterion: D-H...A angle >= 30°
     
     Args:
@@ -453,7 +453,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         potential_donor_acceptor_z = {7, 8, 9}  # N, O, F
         hydrogen_atom_num = 1
         HB_min_dist_actual = 1.2  # Minimum H...A distance (Å)
-        HB_max_dist_actual = 2.7  # Maximum H...A distance (Å)
+        HB_max_dist_actual = 3.2  # Maximum H...A distance (Å)
         COVALENT_DH_SEARCH_DIST = 1.5  # D-H covalent bond search limit (Å)
         HB_min_angle_actual = 30.0  # Minimum D-H...A angle (degrees)
         HB_max_angle_actual = 180.0  # Maximum D-H...A angle (degrees)
@@ -479,7 +479,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
 
                 if d_atom_num in potential_donor_acceptor_z:
                     dist_dh = np.linalg.norm(coords[i_d] - coord_h)
-                    
+
                     if dist_dh < min_dist_dh:
                         min_dist_dh = dist_dh
                         donor_idx_for_h = i_d
@@ -551,9 +551,11 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
             'std_hbond_angle': None
         }
 
-        if filtered_hbonds_for_stats:
-            distances = [bond['H...A_distance'] for bond in filtered_hbonds_for_stats]
-            angles = [bond['D-H...A_angle'] for bond in filtered_hbonds_for_stats]
+        hbonds_for_geometry_stats = filtered_hbonds_for_stats if filtered_hbonds_for_stats else all_potential_hbonds_details
+
+        if hbonds_for_geometry_stats:
+            distances = [bond['H...A_distance'] for bond in hbonds_for_geometry_stats]
+            angles = [bond['D-H...A_angle'] for bond in hbonds_for_geometry_stats]
             
             extracted_props['average_hbond_distance'] = np.mean(distances)
             extracted_props['min_hbond_distance'] = np.min(distances)
@@ -568,7 +570,6 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         return extracted_props
 
     except Exception as e:
-
         return {
             'num_hydrogen_bonds': 0,
             'hbond_details': [],
@@ -705,6 +706,10 @@ def process_file_parallel_wrapper(file_path):
     """
     try:
         filename = os.path.basename(file_path)
+        # Avoid noisy parser fallback errors for empty output files.
+        if os.path.getsize(file_path) == 0:
+            print(f"  WARNING: {filename} is empty (0 bytes). Skipping.")
+            return (False, None, filename)
         extracted_props = extract_properties_from_logfile(file_path)
         if extracted_props:
             return (True, extracted_props, filename)  # Success
@@ -796,7 +801,6 @@ def extract_properties_with_cclib(logfile_path):
         'final_geometry_coords': None,
         'final_electronic_energy': None,
         'gibbs_free_energy': None,
-        'entropy': None, 
         'homo_energy': None,
         'lumo_energy': None,
         'homo_lumo_gap': None,
@@ -872,27 +876,16 @@ def extract_properties_with_cclib(logfile_path):
         # --- Conditional ELECTRONIC ENERGY EXTRACTION based on file type ---
         if file_extension == '.out':
             # ORCA .out specific parsing for Final Electronic Energy
-            # Iterate lines in reverse to find the last valid energy before OPTIMIZATION RUN DONE
+            # Take the last FINAL SINGLE POINT ENERGY in the file
+            # (for OptFreq jobs this is always the converged geometry's energy)
             temp_final_electronic_energy = None
-            optimization_done_found_in_reverse = False
             for line in reversed(lines):
-                if "*** OPTIMIZATION RUN DONE ***" in line:
-                    optimization_done_found_in_reverse = True
-                    continue
-
-                if "FINAL SINGLE POINT ENERGY" in line and not optimization_done_found_in_reverse:
+                if "FINAL SINGLE POINT ENERGY" in line:
                     try:
                         temp_final_electronic_energy = float(line.split()[-1])
                         break
                     except (ValueError, IndexError):
                         pass
-                elif "Electronic energy" in line and "..." in line and not optimization_done_found_in_reverse:
-                    if temp_final_electronic_energy is None:
-                        try:
-                            temp_final_electronic_energy = float(line.split()[-2])
-                            break
-                        except (ValueError, IndexError):
-                            pass
             extracted_props['final_electronic_energy'] = temp_final_electronic_energy
         elif file_extension == '.log':
             # Original .log file parsing (SCF Done)
@@ -926,26 +919,6 @@ def extract_properties_with_cclib(logfile_path):
                     try:
                         extracted_props['gibbs_free_energy'] = float(line.strip().split()[-1])
                     except ValueError:
-                        pass
-
-        # --- Conditional ENTROPY EXTRACTION based on file type ---
-        if file_extension == '.out':
-            # ORCA .out specific parsing for Entropy
-            for line in lines:
-                if "Total Entropy" in line:
-                    try:
-                        extracted_props['entropy'] = float(line.split()[-2])
-                        break
-                    except (ValueError, IndexError):
-                        pass
-        elif file_extension == '.log':
-            # Gaussian .log specific parsing for Entropy (usually part of thermochemistry)
-            # Iterate to capture the LAST Entropy
-            for line in lines:
-                if "Total Entropy" in line: # Common pattern for Gaussian
-                    try:
-                        extracted_props['entropy'] = float(line.split()[-2])
-                    except (ValueError, IndexError):
                         pass
 
         # --- Conditional DIPOLE MOMENT EXTRACTION based on file type ---
@@ -1024,6 +997,19 @@ def extract_properties_with_cclib(logfile_path):
                         break
                     except ValueError:
                         pass
+
+        if file_extension == '.out' and (
+            extracted_props['homo_energy'] is None or
+            extracted_props['lumo_energy'] is None or
+            extracted_props['homo_lumo_gap'] is None
+        ):
+            homo_energy, lumo_energy, homo_lumo_gap = extract_homo_lumo_from_orca_text(lines)
+            if extracted_props['homo_energy'] is None:
+                extracted_props['homo_energy'] = homo_energy
+            if extracted_props['lumo_energy'] is None:
+                extracted_props['lumo_energy'] = lumo_energy
+            if extracted_props['homo_lumo_gap'] is None:
+                extracted_props['homo_lumo_gap'] = homo_lumo_gap
 
         # --- Conditional ROTATIONAL CONSTANTS EXTRACTION based on file type ---
         # First, try cclib for all file types
@@ -1152,7 +1138,6 @@ def extract_properties_with_opi(logfile_path):
         'final_geometry_coords': None,
         'final_electronic_energy': None,
         'gibbs_free_energy': None,
-        'entropy': None, 
         'homo_energy': None,
         'lumo_energy': None,
         'homo_lumo_gap': None,
@@ -1317,22 +1302,14 @@ def extract_properties_with_opi(logfile_path):
                 extracted_props['num_atoms'] = natoms
         
         # --- Energy extraction from text ---
-        # FINAL SINGLE POINT ENERGY (last before "OPTIMIZATION RUN DONE" or last overall)
+        # FINAL SINGLE POINT ENERGY - take the last occurrence in the file
+        # (for OptFreq jobs this is always the converged geometry's energy)
         temp_final_energy = None
-        opt_done_found = False
         for line in reversed(lines):
-            if "*** OPTIMIZATION RUN DONE ***" in line:
-                opt_done_found = True
-            if "FINAL SINGLE POINT ENERGY" in line and not opt_done_found:
+            if "FINAL SINGLE POINT ENERGY" in line:
                 try:
                     parts = line.strip().split()
                     temp_final_energy = float(parts[-1])
-                    break
-                except (ValueError, IndexError):
-                    pass
-            elif "Electronic energy" in line and "..." in line and not opt_done_found:
-                try:
-                    temp_final_energy = float(line.split()[-1])
                     break
                 except (ValueError, IndexError):
                     pass
@@ -1344,18 +1321,6 @@ def extract_properties_with_opi(logfile_path):
                 try:
                     parts = line.strip().split()
                     extracted_props['gibbs_free_energy'] = float(parts[-2])
-                except (ValueError, IndexError):
-                    pass
-        
-        # --- Entropy from text ---
-        for line in lines:
-            if "Total Entropy" in line:
-                try:
-                    parts = line.strip().split()
-                    for i, p in enumerate(parts):
-                        if p == '...':
-                            extracted_props['entropy'] = float(parts[i+1])
-                            break
                 except (ValueError, IndexError):
                     pass
         
@@ -1372,6 +1337,14 @@ def extract_properties_with_opi(logfile_path):
                     pass
         if last_gap is not None:
             extracted_props['homo_lumo_gap'] = last_gap
+
+        homo_energy, lumo_energy, homo_lumo_gap = extract_homo_lumo_from_orca_text(lines)
+        if extracted_props['homo_energy'] is None:
+            extracted_props['homo_energy'] = homo_energy
+        if extracted_props['lumo_energy'] is None:
+            extracted_props['lumo_energy'] = lumo_energy
+        if extracted_props['homo_lumo_gap'] is None:
+            extracted_props['homo_lumo_gap'] = homo_lumo_gap
         
         # --- Dipole moment from text ---
         # Format: "Magnitude (Debye)      :      2.38138"
@@ -2192,32 +2165,18 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
 
     output_filename = os.path.join(dat_output_dir, f"{dat_file_prefix}.dat")
 
-    def should_print_feature(feature_key_in_data, user_friendly_name, weights_dict):
-        # Map internal data key to user-friendly name using FEATURE_MAPPING
-        # This is a reverse lookup, so iterate through FEATURE_MAPPING
-        mapped_user_friendly_name = None
-        for u_name, i_key in FEATURE_MAPPING.items():
-            # Special handling for rotational constants which are stored as an array
-            if user_friendly_name.startswith("rotational_constants") and i_key.startswith("rotational_constants"):
-                if user_friendly_name.endswith("_A") and i_key.endswith("_0"):
-                    mapped_user_friendly_name = u_name
-                    break
-                elif user_friendly_name.endswith("_B") and i_key.endswith("_1"):
-                    mapped_user_friendly_name = u_name
-                    break
-                elif user_friendly_name.endswith("_C") and i_key.endswith("_2"):
-                    mapped_user_friendly_name = u_name
-                    break
-            elif i_key == feature_key_in_data:
-                mapped_user_friendly_name = u_name
-                break
-        
-        if mapped_user_friendly_name is None:
-            if user_friendly_name in weights_dict and weights_dict[user_friendly_name] == 0.0:
-                return False
-            return True
-        
-        return weights_dict.get(mapped_user_friendly_name, 1.0) != 0.0
+    def write_deviation_line(file_obj, label, values):
+        valid_values = [value for value in values if value is not None]
+        if len(valid_values) != len(cluster_members_data) or not valid_values:
+            file_obj.write(f"  {label} %Dev: N/A\n")
+            return
+        file_obj.write(f"  {label} %Dev: {calculate_deviation_percentage(valid_values):.2f}%\n")
+
+    def write_scalar_descriptor_line(file_obj, label, value, formatter):
+        if value is None:
+            file_obj.write(f"        {label}: N/A\n")
+            return
+        file_obj.write(f"        {label}: {formatter(value)}\n")
 
 
     with open(output_filename, 'w', newline='\n') as f:
@@ -2288,62 +2247,41 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
         # 5. Deviation Analysis (ONLY for clusters with >1 configuration)
         if num_configurations > 1:
             f.write("\nDeviation Analysis (Max-Min / |Mean|):\n")
-            if should_print_feature('final_electronic_energy', 'electronic_energy', weights) and all(d['final_electronic_energy'] is not None for d in cluster_members_data):
-                all_electronic_energies = [d['final_electronic_energy'] for d in cluster_members_data if d['final_electronic_energy'] is not None]
-                if all_electronic_energies: f.write(f"  Electronic Energy (Hartree) %Dev: {calculate_deviation_percentage(all_electronic_energies):.2f}%\n")
-            
-            if should_print_feature('gibbs_free_energy', 'gibbs_free_energy', weights) and all(d['gibbs_free_energy'] is not None for d in cluster_members_data):
-                all_gibbs_energies = [d['gibbs_free_energy'] for d in cluster_members_data if d['gibbs_free_energy'] is not None]
-                if all_gibbs_energies: f.write(f"  Gibbs Free Energy (Hartree) %Dev: {calculate_deviation_percentage(all_gibbs_energies):.2f}%\n")
-            
-            if should_print_feature('entropy', 'entropy', weights) and all(d['entropy'] is not None for d in cluster_members_data):
-                all_entropy = [d['entropy'] for d in cluster_members_data if d['entropy'] is not None]
-                if all_entropy: f.write(f"  Entropy (J/(mol·K) or a.u.): {calculate_deviation_percentage(all_entropy):.2f}%\n")
-            
-            if should_print_feature('homo_energy', 'homo_energy', weights) and all(d['homo_energy'] is not None for d in cluster_members_data):
-                all_homo_energies = [d['homo_energy'] for d in cluster_members_data if d['homo_energy'] is not None]
-                if all_homo_energies: f.write(f"  HOMO Energy (eV) %Dev: {calculate_deviation_percentage(all_homo_energies):.2f}%\n")
-            
-            if should_print_feature('lumo_energy', 'lumo_energy', weights) and all(d['lumo_energy'] is not None for d in cluster_members_data):
-                all_lumo_energies = [d['lumo_energy'] for d in cluster_members_data if d['lumo_energy'] is not None]
-                if all_lumo_energies: f.write(f"  LUMO Energy (eV) %Dev: {calculate_deviation_percentage(all_lumo_energies):.2f}%\n")
-            
-            if should_print_feature('homo_lumo_gap', 'homo_lumo_gap', weights) and all(d['homo_lumo_gap'] is not None for d in cluster_members_data):
-                all_homo_lumo_gaps = [d['homo_lumo_gap'] for d in cluster_members_data if d['homo_lumo_gap'] is not None]
-                if all_homo_lumo_gaps: f.write(f"  HOMO-LUMO Gap (eV) %Dev: {calculate_deviation_percentage(all_homo_lumo_gaps):.2f}%\n")
-            
-            if should_print_feature('dipole_moment', 'dipole_moment', weights) and all(d['dipole_moment'] is not None for d in cluster_members_data):
-                all_dipole_moments = [d['dipole_moment'] for d in cluster_members_data if d['dipole_moment'] is not None]
-                if all_dipole_moments: f.write(f"  Dipole Moment (Debye) %Dev: {calculate_deviation_percentage(all_dipole_moments):.2f}%\n")
-            
-            if should_print_feature('radius_of_gyration', 'radius_of_gyration', weights) and all(d['radius_of_gyration'] is not None for d in cluster_members_data):
-                all_rg = [d['radius_of_gyration'] for d in cluster_members_data if d['radius_of_gyration'] is not None]
-                if all_rg: f.write(f"  Radius of Gyration (Å) %Dev: {calculate_deviation_percentage(all_rg):.2f}%\n")
-            
-            # Rotational constants need special handling because they are an array
-            all_rot_const_A = [d['rotational_constants'][0] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
-            all_rot_const_B = [d['rotational_constants'][1] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
-            all_rot_const_C = [d['rotational_constants'][2] for d in cluster_members_data if d['rotational_constants'] is not None and isinstance(d['rotational_constants'], np.ndarray) and len(d['rotational_constants']) == 3]
-
-            if should_print_feature('rotational_constants_0', 'rotational_constants_A', weights) and all_rot_const_A:
-                f.write(f"  Rotational Constant A (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_A):.2f}%\n")
-            if should_print_feature('rotational_constants_1', 'rotational_constants_B', weights) and all_rot_const_B:
-                f.write(f"  Rotational Constant B (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_B):.2f}%\n")
-            if should_print_feature('rotational_constants_2', 'rotational_constants_C', weights) and all_rot_const_C:
-                f.write(f"  Rotational Constant C (GHz) %Dev: {calculate_deviation_percentage(all_rot_const_C):.2f}%\n")
-            
-            if should_print_feature('first_vib_freq', 'first_vib_freq', weights) and all(d['first_vib_freq'] is not None for d in cluster_members_data):
-                all_first_vib_freqs = [d['first_vib_freq'] for d in cluster_members_data if d['first_vib_freq'] is not None]
-                if all_first_vib_freqs: f.write(f"  First Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_first_vib_freqs):.2f}%\n")
-            
-            if should_print_feature('last_vib_freq', 'last_vib_freq', weights) and all(d['last_vib_freq'] is not None for d in cluster_members_data):
-                all_last_vib_freqs = [d['last_vib_freq'] for d in cluster_members_data if d['last_vib_freq'] is not None]
-                if all_last_vib_freqs: f.write(f"  Last Vibrational Frequency (cm^-1) %Dev: {calculate_deviation_percentage(all_last_vib_freqs):.2f}%\n")
-            
-            # num_hydrogen_bonds is not a clustering feature, but a property. It should appear if not zero-weighted.
-            if should_print_feature('num_hydrogen_bonds', 'num_hydrogen_bonds', weights) and all(d['num_hydrogen_bonds'] is not None for d in cluster_members_data):
-                all_num_hbonds = [d['num_hydrogen_bonds'] for d in cluster_members_data if d['num_hydrogen_bonds'] is not None]
-                if all_num_hbonds: f.write(f"  Number of Hydrogen Bonds %Dev: {calculate_deviation_percentage(all_num_hbonds):.2f}%\n")
+            write_deviation_line(f, "Electronic Energy (Hartree)", [d.get('final_electronic_energy') for d in cluster_members_data])
+            write_deviation_line(f, "Gibbs Free Energy (Hartree)", [d.get('gibbs_free_energy') for d in cluster_members_data])
+            write_deviation_line(f, "HOMO Energy (eV)", [d.get('homo_energy') for d in cluster_members_data])
+            write_deviation_line(f, "LUMO Energy (eV)", [d.get('lumo_energy') for d in cluster_members_data])
+            write_deviation_line(f, "HOMO-LUMO Gap (eV)", [d.get('homo_lumo_gap') for d in cluster_members_data])
+            write_deviation_line(f, "Dipole Moment (Debye)", [d.get('dipole_moment') for d in cluster_members_data])
+            write_deviation_line(f, "Radius of Gyration (Å)", [d.get('radius_of_gyration') for d in cluster_members_data])
+            write_deviation_line(
+                f,
+                "Rotational Constant A (GHz)",
+                [
+                    d['rotational_constants'][0] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None
+                    for d in cluster_members_data
+                ]
+            )
+            write_deviation_line(
+                f,
+                "Rotational Constant B (GHz)",
+                [
+                    d['rotational_constants'][1] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None
+                    for d in cluster_members_data
+                ]
+            )
+            write_deviation_line(
+                f,
+                "Rotational Constant C (GHz)",
+                [
+                    d['rotational_constants'][2] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None
+                    for d in cluster_members_data
+                ]
+            )
+            write_deviation_line(f, "First Vibrational Frequency (cm^-1)", [d.get('first_vib_freq') for d in cluster_members_data])
+            write_deviation_line(f, "Last Vibrational Frequency (cm^-1)", [d.get('last_vib_freq') for d in cluster_members_data])
+            write_deviation_line(f, "Average H-Bond Distance (Å)", [d.get('average_hbond_distance') for d in cluster_members_data])
+            write_deviation_line(f, "Average H-Bond Angle (°)", [d.get('average_hbond_angle') for d in cluster_members_data])
             
             # Print clustering weights applied
             f.write("\nClustering Weights Applied:\n")
@@ -2351,7 +2289,6 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
             weight_display_order = [
                 ("electronic_energy", "Electronic Energy", "final_electronic_energy"),
                 ("gibbs_free_energy", "Gibbs Free Energy", "gibbs_free_energy"),
-                ("entropy", "Entropy", "entropy"),
                 ("homo_energy", "HOMO Energy", "homo_energy"),
                 ("lumo_energy", "LUMO Energy", "lumo_energy"),
                 ("homo_lumo_gap", "HOMO-LUMO Gap", "homo_lumo_gap"),
@@ -2363,28 +2300,12 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 ("first_vib_freq", "First Vibrational Frequency", "first_vib_freq"),
                 ("last_vib_freq", "Last Vibrational Frequency", "last_vib_freq"),
                 ("average_hbond_distance", "Average H-Bond Distance", "average_hbond_distance"),
-                ("average_hbond_angle", "Average H-Bond Angle", "average_hbond_angle"),
-                ("num_hydrogen_bonds", "Number of Hydrogen Bonds", "num_hydrogen_bonds")
+                ("average_hbond_angle", "Average H-Bond Angle", "average_hbond_angle")
             ]
             
-            weights_printed = False
             for feature_key, feature_display_name, data_key in weight_display_order:
-                # Check if this feature has data in the cluster
-                has_data = False
-                if data_key == "rotational_constants":
-                    has_data = any(d.get(data_key) is not None and isinstance(d.get(data_key), np.ndarray) and len(d.get(data_key)) == 3 for d in cluster_members_data)
-                else:
-                    has_data = any(d.get(data_key) is not None for d in cluster_members_data)
-                
-                # Show all features with data, INCLUDING those with weight=0.0
-                # (weight=0 means explicitly excluded from clustering, still important to show)
-                if has_data:
-                    weight_value = weights.get(feature_key, 1.0)
-                    f.write(f"  {feature_display_name}: {weight_value:.2f}\n")
-                    weights_printed = True
-            
-            if not weights_printed:
-                f.write("  No features with available data\n")
+                weight_value = weights.get(feature_key, 1.0)
+                f.write(f"  {feature_display_name}: {weight_value:.2f}\n")
             
             f.write("\n")
             
@@ -2394,28 +2315,18 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                 f.write("Clustering Absolute Tolerances Applied:\n")
                 tolerances_printed = False
                 for feature_key, feature_display_name, data_key in weight_display_order:
-                    # Check if this feature has data in the cluster
-                    has_data = False
-                    if data_key == "rotational_constants":
-                        has_data = any(d.get(data_key) is not None and isinstance(d.get(data_key), np.ndarray) and len(d.get(data_key)) == 3 for d in cluster_members_data)
-                    else:
-                        has_data = any(d.get(data_key) is not None for d in cluster_members_data)
-                    
-                    if has_data:
-                        tol_value = tolerances.get(feature_key, 0.0)
-                        if tol_value != 0.0:
-                            # Use consistent decimal notation for all tolerances
-                            # Automatically adjust precision to show significant figures
-                            if abs(tol_value) < 1e-5:
-                                tol_str = f"{tol_value:.7f}".rstrip('0').rstrip('.')
-                            elif abs(tol_value) < 1e-3:
-                                tol_str = f"{tol_value:.6f}".rstrip('0').rstrip('.')
-                            elif abs(tol_value) < 0.1:
-                                tol_str = f"{tol_value:.5f}".rstrip('0').rstrip('.')
-                            else:
-                                tol_str = f"{tol_value:.4f}".rstrip('0').rstrip('.')
-                            f.write(f"  {feature_display_name}: {tol_str}\n")
-                            tolerances_printed = True
+                    tol_value = tolerances.get(feature_key, 0.0)
+                    if tol_value != 0.0:
+                        if abs(tol_value) < 1e-5:
+                            tol_str = f"{tol_value:.7f}".rstrip('0').rstrip('.')
+                        elif abs(tol_value) < 1e-3:
+                            tol_str = f"{tol_value:.6f}".rstrip('0').rstrip('.')
+                        elif abs(tol_value) < 0.1:
+                            tol_str = f"{tol_value:.5f}".rstrip('0').rstrip('.')
+                        else:
+                            tol_str = f"{tol_value:.4f}".rstrip('0').rstrip('.')
+                        f.write(f"  {feature_display_name}: {tol_str}\n")
+                        tolerances_printed = True
                 
                 if not tolerances_printed:
                     f.write("  None\n")
@@ -2429,51 +2340,54 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
         f.write("Electronic configuration descriptors:\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
-            if mol_data['final_electronic_energy'] is not None:
-                f.write(f"        Final Electronic Energy: {mol_data['final_electronic_energy']:.6f} Hartree ({hartree_to_kcal_mol(mol_data['final_electronic_energy']):.2f} kcal/mol, {hartree_to_ev(mol_data['final_electronic_energy']):.2f} eV)\n")
-            if mol_data['gibbs_free_energy'] is not None:
-                f.write(f"        Gibbs Free Energy: {mol_data['gibbs_free_energy']:.6f} Hartree ({hartree_to_kcal_mol(mol_data['gibbs_free_energy']):.2f} kcal/mol, {hartree_to_ev(mol_data['gibbs_free_energy']):.2f} eV)\n")
-            if mol_data['homo_energy'] is not None:
-                f.write(f"        HOMO Energy (eV): {mol_data['homo_energy']:.6f}\n")
-            if mol_data['lumo_energy'] is not None:
-                f.write(f"        LUMO Energy (eV): {mol_data['lumo_energy']:.6f}\n")
-            if mol_data['homo_lumo_gap'] is not None:
-                f.write(f"        HOMO-LUMO Gap (eV): {mol_data['homo_lumo_gap']:.6f}\n")
+            write_scalar_descriptor_line(
+                f,
+                "Final Electronic Energy",
+                mol_data.get('final_electronic_energy'),
+                lambda value: f"{value:.6f} Hartree ({hartree_to_kcal_mol(value):.2f} kcal/mol, {hartree_to_ev(value):.2f} eV)"
+            )
+            write_scalar_descriptor_line(
+                f,
+                "Gibbs Free Energy",
+                mol_data.get('gibbs_free_energy'),
+                lambda value: f"{value:.6f} Hartree ({hartree_to_kcal_mol(value):.2f} kcal/mol, {hartree_to_ev(value):.2f} eV)"
+            )
+            write_scalar_descriptor_line(f, "HOMO Energy (eV)", mol_data.get('homo_energy'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "LUMO Energy (eV)", mol_data.get('lumo_energy'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "HOMO-LUMO Gap (eV)", mol_data.get('homo_lumo_gap'), lambda value: f"{value:.6f}")
         f.write("\n")
 
         f.write("Molecular configuration descriptors:\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
-            if mol_data['dipole_moment'] is not None:
-                f.write(f"        Dipole Moment (Debye): {mol_data['dipole_moment']:.6f}\n")
-            rc = mol_data['rotational_constants']
+            write_scalar_descriptor_line(f, "Dipole Moment (Debye)", mol_data.get('dipole_moment'), lambda value: f"{value:.6f}")
+            rc = mol_data.get('rotational_constants')
             if rc is not None and isinstance(rc, np.ndarray) and rc.ndim == 1 and len(rc) == 3:
                 f.write(f"        Rotational Constants (GHz): {rc[0]:.6f}, {rc[1]:.6f}, {rc[2]:.6f}\n")
-            if mol_data['radius_of_gyration'] is not None:
-                f.write(f"        Radius of Gyration (Å): {mol_data['radius_of_gyration']:.6f}\n")
+            else:
+                f.write("        Rotational Constants (GHz): N/A\n")
+            write_scalar_descriptor_line(f, "Radius of Gyration (Å)", mol_data.get('radius_of_gyration'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "Average H-Bond Distance (Å)", mol_data.get('average_hbond_distance'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "Average H-Bond Angle (°)", mol_data.get('average_hbond_angle'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "Number of Hydrogen Bonds", mol_data.get('num_hydrogen_bonds'), lambda value: f"{int(value)}")
         f.write("\n")
 
-        # Print vibrational frequency summary if any file has frequency data
-        # (regardless of weight - weight=0 means not used for clustering, but data should still be shown)
-        has_any_freq_data = any(d.get('_has_freq_calc', False) for d in cluster_members_data)
-        
-        if has_any_freq_data:
-            f.write("Vibrational frequency summary:\n")
-            for mol_data in cluster_members_data:
-                f.write(f"    {mol_data['filename']}:\n")
-                if mol_data.get('_has_freq_calc', False):
-                    f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
-                    if mol_data['first_vib_freq'] is not None:
-                        f.write(f"        First Vibrational Frequency (cm^-1): {mol_data['first_vib_freq']:.2f}\n")
-                    if mol_data['last_vib_freq'] is not None:
-                        f.write(f"        Last Vibrational Frequency (cm^-1): {mol_data['last_vib_freq']:.2f}\n")
-                else:
-                    f.write("        Frequency calculation not performed.\n")
-            f.write("\n")
+        f.write("Vibrational frequency summary:\n")
+        for mol_data in cluster_members_data:
+            f.write(f"    {mol_data['filename']}:\n")
+            if mol_data.get('_has_freq_calc', False):
+                f.write(f"        Number of imaginary frequencies: {mol_data.get('num_imaginary_freqs', 'N/A')}\n")
+                write_scalar_descriptor_line(f, "First Vibrational Frequency (cm^-1)", mol_data.get('first_vib_freq'), lambda value: f"{value:.2f}")
+                write_scalar_descriptor_line(f, "Last Vibrational Frequency (cm^-1)", mol_data.get('last_vib_freq'), lambda value: f"{value:.2f}")
+            else:
+                f.write("        Number of imaginary frequencies: N/A\n")
+                f.write("        First Vibrational Frequency (cm^-1): N/A\n")
+                f.write("        Last Vibrational Frequency (cm^-1): N/A\n")
+        f.write("\n")
 
         f.write("Hydrogen bond analysis:\n")
         HB_min_angle_actual_for_display = 30.0 # Define explicitly for display
-        f.write(f"Criterion: H...A distance between 1.2 Å and 2.7 Å, with H covalently bonded to a donor (O, N, F).\n")
+        f.write(f"Criterion: H...A distance between 1.2 Å and 3.2 Å, with H covalently bonded to a donor (O, N, F).\n")
         f.write(f"  (For counting, D-H...A angle must be >= {HB_min_angle_actual_for_display:.1f}°)\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
@@ -2796,22 +2710,19 @@ def create_unique_motifs_folder(all_clusters_data, output_base_dir, openbabel_al
             representatives_data = []
             motif_labels = []
             
-            # Use the same comprehensive features as main clustering (excluding H-bond count)
-            # Note: We include H-bond quality features (distance, angle) but NOT quantity (num_hydrogen_bonds)
             all_potential_numerical_features = [
+                'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
                 'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
                 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
                 'average_hbond_angle'
-                # 'num_hydrogen_bonds' is INTENTIONALLY EXCLUDED for motif clustering
             ]
-            rotational_constant_subfeatures = [
-                'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
-            ]
+            rotational_constant_subfeatures = ROTATIONAL_CONSTANT_SUBFEATURES
             
             # Check which features are globally available across all representatives
             globally_missing_features = []
             for feature in all_potential_numerical_features:
-                if all(d.get(feature) is None for d in [rep_data for rep_data, _ in sorted_representatives_with_ids]):
+                internal_key = FEATURE_MAPPING.get(feature, feature)
+                if all(d.get(internal_key) is None for d in [rep_data for rep_data, _ in sorted_representatives_with_ids]):
                     globally_missing_features.append(feature)
             
             # Check rotational constants availability
@@ -3004,7 +2915,6 @@ def combine_xyz_files(cluster_members_data, input_dir, output_base_name=None, op
 FEATURE_MAPPING = {
     "electronic_energy": "final_electronic_energy",
     "gibbs_free_energy": "gibbs_free_energy",
-    "entropy": "entropy",
     "homo_energy": "homo_energy",
     "lumo_energy": "lumo_energy",
     "homo_lumo_gap": "homo_lumo_gap",
@@ -3055,6 +2965,143 @@ def parse_abs_tolerance_argument(tolerance_str):
             print(f"WARNING: Could not parse absolute tolerance for '{key}={value}'. Skipping this tolerance.")
     return tolerances
 
+
+CLUSTERING_NUMERICAL_FEATURES = [
+    'electronic_energy',
+    'gibbs_free_energy',
+    'homo_energy',
+    'lumo_energy',
+    'homo_lumo_gap',
+    'dipole_moment',
+    'radius_of_gyration',
+    'first_vib_freq',
+    'last_vib_freq',
+    'average_hbond_distance',
+    'average_hbond_angle'
+]
+
+ROTATIONAL_CONSTANT_SUBFEATURES = [
+    'rotational_constants_A',
+    'rotational_constants_B',
+    'rotational_constants_C'
+]
+
+
+def is_valid_scalar(value):
+    if value is None:
+        return False
+    if isinstance(value, (float, np.floating)):
+        return np.isfinite(value)
+    return True
+
+
+def group_has_any_clustering_feature_data(group_data):
+    scalar_internal_keys = [FEATURE_MAPPING[feature_name] for feature_name in CLUSTERING_NUMERICAL_FEATURES]
+
+    has_scalar_feature = any(
+        is_valid_scalar(molecule_data.get(feature_key))
+        for molecule_data in group_data
+        for feature_key in scalar_internal_keys
+    )
+    has_rotational_constants = any(
+        molecule_data.get('rotational_constants') is not None
+        and isinstance(molecule_data.get('rotational_constants'), np.ndarray)
+        and molecule_data.get('rotational_constants').ndim == 1
+        and len(molecule_data.get('rotational_constants')) == 3
+        for molecule_data in group_data
+    )
+    return has_scalar_feature or has_rotational_constants
+
+
+def has_valid_rotational_constants(molecule_data):
+    rot_consts = molecule_data.get('rotational_constants')
+    return (
+        rot_consts is not None
+        and isinstance(rot_consts, np.ndarray)
+        and rot_consts.ndim == 1
+        and len(rot_consts) == 3
+    )
+
+
+def select_complete_group_scalar_features(group_data, candidate_features):
+    active_features = []
+    dropped_features = []
+    for feature_name in candidate_features:
+        internal_key = FEATURE_MAPPING.get(feature_name, feature_name)
+        if all(is_valid_scalar(molecule_data.get(internal_key)) for molecule_data in group_data):
+            active_features.append(feature_name)
+        else:
+            dropped_features.append(feature_name)
+    return active_features, dropped_features
+
+
+def extract_homo_lumo_from_orca_text(lines):
+    last_section = None
+    current_section = []
+    in_section = False
+
+    for line in lines:
+        if 'ORBITAL ENERGIES' in line:
+            in_section = True
+            current_section = []
+            continue
+
+        if not in_section:
+            continue
+
+        stripped = line.strip()
+        if not stripped:
+            if current_section:
+                last_section = current_section[:]
+                in_section = False
+            continue
+
+        if '----' in stripped or 'NO   OCC' in stripped or 'NO  OCC' in stripped:
+            continue
+
+        if stripped.startswith('*') or stripped.startswith('JOB NUMBER') or stripped.startswith('MULLIKEN'):
+            if current_section:
+                last_section = current_section[:]
+            in_section = False
+            continue
+
+        current_section.append(stripped)
+
+    if in_section and current_section:
+        last_section = current_section[:]
+
+    if not last_section:
+        return None, None, None
+
+    parsed_rows = []
+    for row in last_section:
+        parts = row.split()
+        if len(parts) < 4:
+            continue
+        try:
+            occupation = float(parts[1])
+            energy_ev = float(parts[3])
+        except ValueError:
+            continue
+        parsed_rows.append((occupation, energy_ev))
+
+    if not parsed_rows:
+        return None, None, None
+
+    homo_energy = None
+    lumo_energy = None
+    for occupation, energy_ev in parsed_rows:
+        if occupation > 0:
+            homo_energy = energy_ev
+        elif occupation == 0 and lumo_energy is None:
+            lumo_energy = energy_ev
+            break
+
+    if homo_energy is None or lumo_energy is None:
+        return None, None, None
+
+    return homo_energy, lumo_energy, lumo_energy - homo_energy
+
 def preprocess_j_argument(argv):
     """
     Preprocesses command line arguments to handle -j8 format (no space) by converting it to -j 8.
@@ -3097,12 +3144,11 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                              for a feature within a group is less than its tolerance, it's zeroed out.
     """
     # Default weights for all clustering features
-    # These can be adjusted using the --weights flag, e.g., --weights "(first_vib_freq=0.5)(homo_lumo_gap=1.5)"
+    # These can be adjusted using the --weights flag, e.g., --weights "(first_vib_freq=1.0)(homo_lumo_gap=1.5)"
 
     # Available features:
     # - electronic_energy: Final electronic energy (Hartree)
     # - gibbs_free_energy: Gibbs free energy (Hartree) 
-    # - entropy: Entropy (J/(mol·K) or a.u.)
     # - homo_energy: HOMO energy (eV)
     # - lumo_energy: LUMO energy (eV)
     # - homo_lumo_gap: HOMO-LUMO gap (eV)
@@ -3117,7 +3163,6 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     default_weights = {
         'electronic_energy': 1.0,          # Final electronic energy
         'gibbs_free_energy': 1.0,          # Gibbs free energy
-        'entropy': 1.0,                    # Entropy
         'homo_energy': 1.0,                # HOMO energy
         'lumo_energy': 1.0,                # LUMO energy
         'homo_lumo_gap': 1.0,              # HOMO-LUMO gap
@@ -3126,8 +3171,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         'rotational_constants_A': 1.0,     # Rotational constant A
         'rotational_constants_B': 1.0,     # Rotational constant B
         'rotational_constants_C': 1.0,     # Rotational constant C
-        'first_vib_freq': 0.0,             # First vibrational frequency
-        'last_vib_freq': 0.5,              # Last vibrational frequency
+        'first_vib_freq': 1.0,             # First vibrational frequency
+        'last_vib_freq': 1.0,              # Last vibrational frequency
         'average_hbond_distance': 1.0,     # Average hydrogen bond distance
         'average_hbond_angle': 1.0,        # Average hydrogen bond angle
     }
@@ -3547,6 +3592,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     summary_file_content_lines.append(f"Total configurations processed: {len(clean_data_for_clustering)}")
     summary_file_content_lines.append(f"Total files skipped: <TOTAL_SKIPPED_PLACEHOLDER>")
     summary_file_content_lines.append(f"Critical skipped files: <IMAG_NEED_RECALC_PLACEHOLDER>")
+    summary_file_content_lines.append(f"Critical reduced-vector unmatched: <REDUCED_UNMATCHED_PLACEHOLDER>")
     summary_file_content_lines.append(f"Total number of final clusters: <TOTAL_CLUSTERS_PLACEHOLDER>")
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"Total RMSD moved configurations: <TOTAL_RMSD_OUTLIERS_PLACEHOLDER>")
@@ -3559,12 +3605,43 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
     all_skipped_clustered_with_normal = []
     all_skipped_need_recalc = []
 
+    # --- Feature completeness summary (printed once, before clustering output) ---
+    _scalar_features = [
+        'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
+        'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
+        'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle'
+    ]
+    _vector_size_hist = {}
+    _total_feature_dims = len(_scalar_features) + 3
+    for _mol in clean_data_for_clustering:
+        _scalar_count = 0
+        for _fname in _scalar_features:
+            _key = FEATURE_MAPPING.get(_fname, _fname)
+            if is_valid_scalar(_mol.get(_key)):
+                _scalar_count += 1
+
+        _rot_count = 3 if has_valid_rotational_constants(_mol) else 0
+        _vector_size = _scalar_count + _rot_count
+        _mol['_feature_vector_size'] = _vector_size
+        _mol['_is_full_feature'] = (_vector_size == _total_feature_dims)
+
+        _vector_size_hist[_vector_size] = _vector_size_hist.get(_vector_size, 0) + 1
+
+    _full_count = _vector_size_hist.get(_total_feature_dims, 0)
+    _non_converged_count = len(clean_data_for_clustering) - _full_count
+    print(f"Converged: {_full_count} with all features ({_total_feature_dims}/{_total_feature_dims})")
+    if _non_converged_count > 0:
+        print(f"  non-converged: {_non_converged_count}")
+        for _vec_size in sorted([k for k in _vector_size_hist.keys() if k < _total_feature_dims], reverse=True):
+            _count = _vector_size_hist[_vec_size]
+            print(f"    - {_count} with reduced vector ({_vec_size}/{_total_feature_dims})")
+
     # --- Boltzmann Population Calculation (based on initial property clusters) ---
     all_initial_property_clusters = []
     pseudo_global_cluster_id_counter = 1 # This counter is for assigning unique IDs to initial clusters for Boltzmann calc
 
     for hbond_count, group_data in sorted(hbond_groups.items()):
-        if len(group_data) < 2 or not any(d.get(f) is not None for d in group_data for f in ['radius_of_gyration', 'dipole_moment', 'homo_lumo_gap', 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle', 'rotational_constants']):
+        if len(group_data) < 2 or not group_has_any_clustering_feature_data(group_data):
             # For singletons or groups without enough numerical features, treat each as a separate initial cluster
             for single_mol_data in group_data:
                 single_mol_data['_initial_cluster_label'] = hbond_count # This is a dummy label for singletons
@@ -3575,30 +3652,17 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             filenames_base = [os.path.splitext(item['filename'])[0] for item in group_data]
             
             all_potential_numerical_features = [
+                'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
                 'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
                 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
                 'average_hbond_angle'
             ]
-            rotational_constant_subfeatures = [
-                'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
-            ]
-
-            globally_missing_for_group = []
-            for feature in all_potential_numerical_features:
-                if all(d.get(feature) is None for d in group_data):
-                    globally_missing_for_group.append(feature)
-            
-            is_rot_const_globally_missing_for_group = True
-            for d in group_data:
-                rot_consts = d.get('rotational_constants')
-                if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
-                    is_rot_const_globally_missing_for_group = False
-                    break
-            
-            if is_rot_const_globally_missing_for_group:
-                globally_missing_for_group.extend(rotational_constant_subfeatures)
-
-            active_numerical_features_for_group = [f for f in all_potential_numerical_features if f not in globally_missing_for_group]
+            active_numerical_features_for_group, dropped_scalar_features = select_complete_group_scalar_features(group_data, all_potential_numerical_features)
+            use_rotational_constants = all(has_valid_rotational_constants(molecule_data) for molecule_data in group_data)
+            if dropped_scalar_features:
+                vprint(f"  H-bond group {hbond_count}: reduced scalar feature set due to missing values in some structures: {', '.join(dropped_scalar_features)}")
+            if not use_rotational_constants:
+                vprint(f"  H-bond group {hbond_count}: reduced vector excludes rotational constants because they are not available for all structures")
             
             features_for_scaling_raw = []
             ordered_feature_names_for_scaling = []
@@ -3610,32 +3674,20 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     internal_key = FEATURE_MAPPING.get(feature_name_user_friendly, feature_name_user_friendly)
                     if weights.get(feature_name_user_friendly, 1.0) != 0.0:
                         value = d.get(internal_key)
-                        if value is None: value = 0.0
                         mol_feature_vector.append(value)
                         current_mol_ordered_feature_names.append(feature_name_user_friendly)
                 
-                if not is_rot_const_globally_missing_for_group:
+                if use_rotational_constants:
                     rc_temp = d.get('rotational_constants')
-                    if rc_temp is not None and isinstance(rc_temp, np.ndarray) and len(rc_temp) == 3:
-                        if weights.get('rotational_constants_A', 1.0) != 0.0:
-                            mol_feature_vector.append(rc_temp[0])
-                            current_mol_ordered_feature_names.append('rotational_constants_A')
-                        if weights.get('rotational_constants_B', 1.0) != 0.0:
-                            mol_feature_vector.append(rc_temp[1])
-                            current_mol_ordered_feature_names.append('rotational_constants_B')
-                        if weights.get('rotational_constants_C', 1.0) != 0.0:
-                            mol_feature_vector.append(rc_temp[2])
-                            current_mol_ordered_feature_names.append('rotational_constants_C')
-                    else:
-                        if weights.get('rotational_constants_A', 1.0) != 0.0:
-                            mol_feature_vector.append(0.0)
-                            current_mol_ordered_feature_names.append('rotational_constants_A')
-                        if weights.get('rotational_constants_B', 1.0) != 0.0:
-                            mol_feature_vector.append(0.0)
-                            current_mol_ordered_feature_names.append('rotational_constants_B')
-                        if weights.get('rotational_constants_C', 1.0) != 0.0:
-                            mol_feature_vector.append(0.0)
-                            current_mol_ordered_feature_names.append('rotational_constants_C')
+                    if weights.get('rotational_constants_A', 1.0) != 0.0:
+                        mol_feature_vector.append(rc_temp[0])
+                        current_mol_ordered_feature_names.append('rotational_constants_A')
+                    if weights.get('rotational_constants_B', 1.0) != 0.0:
+                        mol_feature_vector.append(rc_temp[1])
+                        current_mol_ordered_feature_names.append('rotational_constants_B')
+                    if weights.get('rotational_constants_C', 1.0) != 0.0:
+                        mol_feature_vector.append(rc_temp[2])
+                        current_mol_ordered_feature_names.append('rotational_constants_C')
 
                 features_for_scaling_raw.append(mol_feature_vector)
                 if not ordered_feature_names_for_scaling:
@@ -3776,7 +3828,7 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
 
         current_hbond_group_clusters_for_final_output = [] 
 
-        if len(group_data) < 2 or not any(d.get(f) is not None for d in group_data for f in ['radius_of_gyration', 'dipole_moment', 'homo_lumo_gap', 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle', 'rotational_constants']):
+        if len(group_data) < 2 or not group_has_any_clustering_feature_data(group_data):
             vprint(f"\nSkipping detailed clustering for H-bond group {hbond_count}: Less than 2 configurations or no valid numerical features left after filtering. Treating each as a single-configuration cluster.")
             
             for single_mol_data in group_data:
@@ -3787,32 +3839,14 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             filenames_base = [os.path.splitext(item['filename'])[0] for item in group_data]
             
             all_potential_numerical_features = [
+                'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
                 'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
                 'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 
                 'average_hbond_angle'
             ]
-            rotational_constant_subfeatures = [
-                'rotational_constants_A', 'rotational_constants_B', 'rotational_constants_C'
-            ]
+            active_numerical_features_for_group, dropped_scalar_features = select_complete_group_scalar_features(group_data, all_potential_numerical_features)
+            use_rotational_constants = all(has_valid_rotational_constants(molecule_data) for molecule_data in group_data)
 
-            globally_missing_for_group = []
-            for feature in all_potential_numerical_features:
-                if all(d.get(feature) is None for d in group_data):
-                    globally_missing_for_group.append(feature)
-            
-            is_rot_const_globally_missing_for_group = True
-            for d in group_data:
-                rot_consts = d.get('rotational_constants')
-                if rot_consts is not None and isinstance(rot_consts, np.ndarray) and rot_consts.ndim == 1 and len(rot_consts) == 3:
-                    is_rot_const_globally_missing_for_group = False
-                    break
-            
-            if is_rot_const_globally_missing_for_group:
-                globally_missing_for_group.extend(rotational_constant_subfeatures)
-                print(f"  Note: Rotational constants are globally missing or invalid for H-bond group {hbond_count}. Excluding them from clustering features.")
-
-            active_numerical_features_for_group = [f for f in all_potential_numerical_features if f not in globally_missing_for_group]
-            
             features_for_scaling_raw = []
             ordered_feature_names_for_scaling = [] # To keep track of the order for weights
 
@@ -3824,41 +3858,24 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
                     # Only add to feature vector if the weight is not 0.0
                     if weights.get(feature_name_user_friendly, 1.0) != 0.0:
                         value = d.get(internal_key)
-                        if value is None:
-                            value = 0.0 # Default missing numerical values to 0.0 for scaling
                         mol_feature_vector.append(value)
                         current_mol_ordered_feature_names.append(feature_name_user_friendly)
                 
-                if not is_rot_const_globally_missing_for_group:
+                if use_rotational_constants:
                     # Only add rotational constants if their weights are not 0.0
                     rc_temp = d.get('rotational_constants')
-                    if rc_temp is not None and isinstance(rc_temp, np.ndarray) and len(rc_temp) == 3:
-                        if weights.get('rotational_constants_A', 1.0) != 0.0:
-                            val = rc_temp[0]
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_A')
-                        if weights.get('rotational_constants_B', 1.0) != 0.0:
-                            val = rc_temp[1]
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_B')
-                        if weights.get('rotational_constants_C', 1.0) != 0.0:
-                            val = rc_temp[2]
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_C')
-                    else: # If rotational constants are missing, add zeros if their weights are not 0.0
-                        # Ensure we add placeholders if the feature is not zero-weighted, even if data is missing
-                        if weights.get('rotational_constants_A', 1.0) != 0.0:
-                            val = 0.0
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_A')
-                        if weights.get('rotational_constants_B', 1.0) != 0.0:
-                            val = 0.0
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_B')
-                        if weights.get('rotational_constants_C', 1.0) != 0.0:
-                            val = 0.0
-                            mol_feature_vector.append(val)
-                            current_mol_ordered_feature_names.append('rotational_constants_C')
+                    if weights.get('rotational_constants_A', 1.0) != 0.0:
+                        val = rc_temp[0]
+                        mol_feature_vector.append(val)
+                        current_mol_ordered_feature_names.append('rotational_constants_A')
+                    if weights.get('rotational_constants_B', 1.0) != 0.0:
+                        val = rc_temp[1]
+                        mol_feature_vector.append(val)
+                        current_mol_ordered_feature_names.append('rotational_constants_B')
+                    if weights.get('rotational_constants_C', 1.0) != 0.0:
+                        val = rc_temp[2]
+                        mol_feature_vector.append(val)
+                        current_mol_ordered_feature_names.append('rotational_constants_C')
 
                 features_for_scaling_raw.append(mol_feature_vector)
                 if not ordered_feature_names_for_scaling:
@@ -4178,6 +4195,28 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
         total_skipped_str = str(total_skipped_all)
         critical_skipped_str = str(total_imag_need_recalc)
 
+    # Reduced-vector structures that never co-cluster with a full-feature structure
+    # are likely critical outliers and should be reviewed.
+    reduced_unmatched_critical = []
+    for cluster_members in all_final_clusters:
+        if not cluster_members:
+            continue
+        has_full_feature_member = any(m.get('_is_full_feature', False) for m in cluster_members)
+        if has_full_feature_member:
+            continue
+        for m in cluster_members:
+            if not m.get('_is_full_feature', False):
+                reduced_unmatched_critical.append(m)
+
+    if reduced_unmatched_critical:
+        print(f"\nReduced-vector criticals: {len(reduced_unmatched_critical)} structure(s) did not match any full-feature structure.")
+
+    if total_files_attempted > 0:
+        reduced_unmatched_percentage = (len(reduced_unmatched_critical) / total_files_attempted) * 100
+        reduced_unmatched_str = f"{len(reduced_unmatched_critical)} ({reduced_unmatched_percentage:.1f}%)"
+    else:
+        reduced_unmatched_str = str(len(reduced_unmatched_critical))
+
     for i, line in enumerate(summary_file_content_lines):
         if "<TOTAL_CLUSTERS_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<TOTAL_CLUSTERS_PLACEHOLDER>", str(total_clusters_outputted))
@@ -4187,6 +4226,8 @@ def perform_clustering_and_analysis(input_source, threshold=1.0, file_extension_
             summary_file_content_lines[i] = line.replace("<TOTAL_SKIPPED_PLACEHOLDER>", total_skipped_str)
         if "<IMAG_NEED_RECALC_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<IMAG_NEED_RECALC_PLACEHOLDER>", critical_skipped_str)
+        if "<REDUCED_UNMATCHED_PLACEHOLDER>" in line:
+            summary_file_content_lines[i] = line.replace("<REDUCED_UNMATCHED_PLACEHOLDER>", reduced_unmatched_str)
 
     # Add comparison-specific details at the very end if in comparison mode
     if is_compare_mode:
@@ -4524,7 +4565,7 @@ MORE INFORMATION:
     # Processing control
     parser.add_argument("--cores", "-j", type=int, default=None, metavar="INT",
                         help="number of CPU cores (default: auto-detect)")
-    parser.add_argument("--reprocess-files", action="store_true",
+    parser.add_argument("--reprocess-files", "-r", action="store_true",
                         help="ignore cache and force re-extraction")
     parser.add_argument("--output-dir", type=str, default=None, metavar="PATH",
                         help="output directory (default: current directory)")
