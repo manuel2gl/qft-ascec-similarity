@@ -1579,16 +1579,33 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
     """
     try:
         with open(input_file, 'r') as f:
-            protocol_lines = extract_protocol_lines_from_content(f.read())
-            
-            # Join multi-line protocol into single command
-            if protocol_lines:
-                # Concatenate lines and normalize spacing
-                protocol = ' '.join(protocol_lines)
-                # Clean up multiple spaces but preserve commas
-                protocol = ' '.join(protocol.split())
-                return protocol
-                
+            content = f.read()
+
+        protocol_lines: List[str] = []
+        in_protocol_section = False
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if '#' in stripped:
+                stripped = stripped.split('#')[0].strip()
+                if not stripped:
+                    continue
+            if stripped.startswith('.asc,'):
+                in_protocol_section = True
+                protocol_lines.append(stripped)
+                continue
+            if in_protocol_section:
+                protocol_lines.append(stripped)
+                if not stripped.endswith(',') and not stripped.endswith('.'):
+                    break
+
+        if protocol_lines:
+            protocol = ' '.join(protocol_lines)
+            protocol = ' '.join(protocol.split())
+            return protocol
+
     except Exception:
         pass
     
@@ -1596,65 +1613,27 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
 
 
 def strip_protocol_from_content(content: str) -> str:
-    """Remove an embedded .asc workflow block from raw input-file content."""
-    protocol_lines = extract_protocol_lines_from_content(content)
-    if not protocol_lines:
-        return content
+    """Remove the embedded .asc protocol section and everything after it.
 
+    Annealing replicas only need the raw ASCEC configuration parameters
+    (box size, temperature, molecules …). The protocol block and any
+    embedded QM templates that follow it are not needed and must not be
+    copied – otherwise each replica would re-trigger the workflow.
+    """
     lines = content.splitlines(keepends=True)
-    cleaned_lines: List[str] = []
-    protocol_index = 0
-    in_protocol_section = False
-
-    for line in lines:
-        stripped = line.strip()
-        comparison = stripped.split('#', 1)[0].strip() if '#' in stripped else stripped
-
-        if not in_protocol_section and protocol_index < len(protocol_lines) and comparison == protocol_lines[protocol_index]:
-            in_protocol_section = True
-
-        if in_protocol_section:
-            if protocol_index < len(protocol_lines) and comparison == protocol_lines[protocol_index]:
-                protocol_index += 1
-                if protocol_index >= len(protocol_lines):
-                    in_protocol_section = False
-                continue
-
-            if not comparison:
-                continue
-
-        cleaned_lines.append(line)
-
-    return ''.join(cleaned_lines)
-
-
-def extract_protocol_lines_from_content(content: str) -> List[str]:
-    """Extract normalized embedded protocol lines from raw input-file content."""
-    protocol_lines: List[str] = []
-    in_protocol_section = False
-
-    for line in content.splitlines():
-        stripped = line.strip()
-
-        if not stripped:
-            continue
-
-        if '#' in stripped:
-            stripped = stripped.split('#')[0].strip()
-            if not stripped:
-                continue
-
-        if stripped.startswith('.asc,'):
-            in_protocol_section = True
-            protocol_lines.append(stripped)
-            continue
-
-        if in_protocol_section:
-            protocol_lines.append(stripped)
-            if not stripped.endswith(',') and not stripped.endswith('.'):
-                break
-
-    return protocol_lines
+    for i, line in enumerate(lines):
+        # Strip inline comments to get the bare content of this line
+        bare = line.strip()
+        if '#' in bare:
+            bare = bare.split('#', 1)[0].strip()
+        # Stop as soon as we hit the protocol marker
+        if bare.startswith('.asc'):
+            # Drop trailing blank lines so the file ends cleanly
+            trimmed = lines[:i]
+            while trimmed and not trimmed[-1].strip():
+                trimmed.pop()
+            return ''.join(trimmed)
+    return content
 
 
 def parse_exclusion_pattern(pattern: str) -> List[int]:
@@ -9892,7 +9871,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         bar = render_progress_bar(completed_stages, total, width=30)
 
         lines = [
-            "\n=== ASCEC & Similarity ===",
+            "",
+            "=== ASCEC & Similarity ===",
             "-" * 60,
             f"Progress [{bar}] {pct}%",
             "-" * 60,
@@ -11000,6 +10980,10 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     max_retries = 3
     
     failed_runs = []
+    progress_cb = getattr(context, 'update_progress', None)
+    if not verbose and callable(progress_cb):
+        progress_cb(f"0/{num_replicas} ...")
+    completed_replicas = 0
     for i, input_file in enumerate(replicated_files, 1):
         run_dir = os.path.dirname(input_file)
         run_name = os.path.basename(run_dir)
@@ -11036,7 +11020,7 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     continue
                 
                 # Check if successful
-                output_file = os.path.join(run_dir, input_basename.replace('.in', '.out'))
+                output_file = os.path.join(run_dir, os.path.splitext(input_basename)[0] + '.out')
                 if os.path.exists(output_file):
                     with open(output_file, 'r') as f:
                         content = f.read()
@@ -11052,8 +11036,11 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 last_error = str(e)
         
         if success:
+            completed_replicas += 1
             if verbose:
                 print("✓")
+            elif callable(progress_cb):
+                progress_cb(f"{completed_replicas}/{num_replicas} ...")
         else:
             # Check if result files were created even without proper termination message
             result_files = []
@@ -11065,6 +11052,9 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 if verbose:
                     print(f"✓ (output files created)")
                 success = True
+                completed_replicas += 1
+                if not verbose and callable(progress_cb):
+                    progress_cb(f"{completed_replicas}/{num_replicas} ...")
             else:
                 if verbose:
                     print(f"✗ (no output files)")
