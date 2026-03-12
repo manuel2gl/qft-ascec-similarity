@@ -555,7 +555,7 @@ def _process_xyz_file_for_calc(xyz_file_data):
     This is a module-level function to support multiprocessing.
     Used by both simple and standard calculation workflows.
     """
-    xyz_file, template_content, calc_dir, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
+    xyz_file, template_content, optimization_dir_path, qm_program, input_ext, total_xyz_files, use_combined_naming = xyz_file_data
     
     # Extract configurations
     configurations = extract_configurations_from_xyz(xyz_file)
@@ -617,7 +617,7 @@ def _process_xyz_file_for_calc(xyz_file_data):
             input_name = f"opt_conf_{config['config_num']}{input_ext}"
         else:
             input_name = f"opt{run_num}_conf_{config['config_num']}{input_ext}"
-        input_path = os.path.join(calc_dir, input_name)
+        input_path = os.path.join(optimization_dir_path, input_name)
         
         if create_qm_input_file(config, template_content, input_path, qm_program):
             file_input_files.append(input_name)
@@ -1612,6 +1612,103 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
     return None
 
 
+def extract_embedded_qm_template(input_file: str, template_label: str) -> Optional[Tuple[str, str]]:
+    """
+    Extract an embedded QM template block by label from an input file.
+
+    Supported headers:
+        #orca <label>
+        #gaussian <label>
+
+    Returns:
+        Tuple (template_content, extension) where extension is ".inp" for ORCA
+        and ".com" for Gaussian, or None if no matching block is found.
+    """
+    if not input_file or not template_label:
+        return None
+
+    label_norm = template_label.strip().lower()
+    if not label_norm:
+        return None
+
+    header_re = re.compile(r'^\s*#\s*(orca|gaussian)\s+(\S+)\s*$', re.IGNORECASE)
+
+    try:
+        with open(input_file, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+    except Exception:
+        return None
+
+    collecting = False
+    detected_program = None
+    collected: List[str] = []
+
+    for raw_line in lines:
+        match = header_re.match(raw_line)
+        if match:
+            program = match.group(1).lower()
+            label = match.group(2).strip().lower()
+
+            if collecting:
+                # Reached next template header, stop current block.
+                break
+
+            if label == label_norm:
+                collecting = True
+                detected_program = program
+            continue
+
+        if collecting:
+            collected.append(raw_line)
+
+    if not collecting or not collected or not detected_program:
+        return None
+
+    extension = '.inp' if detected_program == 'orca' else '.com'
+    return ''.join(collected).strip() + '\n', extension
+
+
+def resolve_template_reference(context: 'WorkflowContext', template_token: str) -> Optional[str]:
+    """
+    Resolve template reference for workflow stages.
+
+    Resolution order:
+    1) Existing file path (as provided).
+    2) Embedded template label in context.input_file (#orca/#gaussian blocks).
+
+    Returns absolute path to a resolved template file, or None if unresolved.
+    """
+    if not template_token:
+        return None
+
+    token = template_token.strip()
+    if not token:
+        return None
+
+    # Direct file path resolution first.
+    token_abs = os.path.abspath(token)
+    if os.path.exists(token_abs):
+        return token_abs
+
+    input_file = getattr(context, 'input_file', '')
+    extracted = extract_embedded_qm_template(input_file, token)
+    if not extracted:
+        return None
+
+    template_content, extension = extracted
+    input_stem = Path(input_file).stem if input_file else 'workflow'
+    safe_label = re.sub(r'[^A-Za-z0-9_.-]+', '_', token)
+    out_name = f".ascec_embedded_{input_stem}_{safe_label}{extension}"
+    out_path = os.path.abspath(out_name)
+
+    try:
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write(template_content)
+        return out_path
+    except Exception:
+        return None
+
+
 def strip_protocol_from_content(content: str) -> str:
     """Remove the embedded .asc protocol section and everything after it.
 
@@ -1730,7 +1827,7 @@ def update_protocol_cache(stage_name: str, status: str, result: Optional[Dict[st
     Update protocol cache with stage completion info.
     
     Args:
-        stage_name: Name of the stage (e.g., 'r1', 'calc', 'similarity')
+        stage_name: Name of the stage (e.g., 'r1', 'opt', 'similarity')
         status: Status ('in_progress', 'completed', 'failed')
         result: Optional result dictionary with stage-specific data
         cache_file: Path to cache file
@@ -1816,21 +1913,21 @@ def parse_exclude_pattern(pattern: str) -> List[int]:
     return sorted(set(numbers))  # Remove duplicates and sort
 
 
-def save_exclude_patterns(input_file: str, calc_patterns: Dict[str, List[int]], 
-                         opt_patterns: Dict[str, List[int]]):
+def save_exclude_patterns(input_file: str, optimization_patterns: Dict[str, List[int]],
+                         refinement_patterns: Dict[str, List[int]]):
     """
     Save exclude patterns to a file associated with the input file.
     
     Args:
         input_file: Path to the input file
-        calc_patterns: Dictionary of calc stage patterns {'calc1': [2, 5, 6], 'calc2': [1, 3]}
-        opt_patterns: Dictionary of opt stage patterns {'opt1': [2, 5, 6]}
+        optimization_patterns: Dictionary of optimization stage patterns {'opt1': [2, 5, 6], 'opt2': [1, 3]}
+        refinement_patterns: Dictionary of refinement stage patterns {'ref1': [2, 5, 6]}
     """
     exclude_file = f"{input_file}.exclude"
     
     data = {
-        'calc': calc_patterns,
-        'opt': opt_patterns
+        'optimization': optimization_patterns,
+        'refinement': refinement_patterns
     }
     
     try:
@@ -1848,7 +1945,7 @@ def load_exclude_patterns(input_file: str) -> Tuple[Dict[str, List[int]], Dict[s
         input_file: Path to the input file
         
     Returns:
-        Tuple of (calc_patterns, opt_patterns)
+        Tuple of (optimization_patterns, refinement_patterns)
     """
     exclude_file = f"{input_file}.exclude"
     
@@ -1858,21 +1955,23 @@ def load_exclude_patterns(input_file: str) -> Tuple[Dict[str, List[int]], Dict[s
     try:
         with open(exclude_file, 'rb') as f:
             data = pickle.load(f)
-            return data.get('calc', {}), data.get('opt', {})
+            optimization_patterns = data.get('optimization', {})
+            refinement_patterns = data.get('refinement', {})
+            return optimization_patterns, refinement_patterns
     except Exception as e:
         print(f"Warning: Failed to load exclude patterns: {e}")
         return {}, {}
 
 
-def display_exclude_patterns(calc_patterns: Dict[str, List[int]], opt_patterns: Dict[str, List[int]]):
+def display_exclude_patterns(optimization_patterns: Dict[str, List[int]], refinement_patterns: Dict[str, List[int]]):
     """Display current exclude patterns."""
     print("\n" + "=" * 60)
     print("Current Exclude Patterns")
     print("=" * 60)
     
-    if calc_patterns:
+    if optimization_patterns:
         print("\nOptimization stages:")
-        for stage_name, numbers in sorted(calc_patterns.items()):
+        for stage_name, numbers in sorted(optimization_patterns.items()):
             if numbers:
                 print(f"  {stage_name}: {', '.join(map(str, numbers))}")
             else:
@@ -1880,9 +1979,9 @@ def display_exclude_patterns(calc_patterns: Dict[str, List[int]], opt_patterns: 
     else:
         print("\nOptimization stages: (none)")
     
-    if opt_patterns:
+    if refinement_patterns:
         print("\nRefinement stages:")
-        for stage_name, numbers in sorted(opt_patterns.items()):
+        for stage_name, numbers in sorted(refinement_patterns.items()):
             if numbers:
                 print(f"  {stage_name}: {', '.join(map(str, numbers))}")
             else:
@@ -4840,13 +4939,14 @@ def extract_config_from_input_file(content: str, qm_program: str) -> Optional[Di
         return None
 
 
-def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", auto_select: Optional[str] = None) -> List[str]:
+def interactive_xyz_file_selection(xyz_files: List[str], optimization_dir_path: str = ".", auto_select: Optional[str] = None,
+                                   quiet: bool = False) -> List[str]:
     """
     Provides interactive selection for XYZ files to process.
     
     Args:
         xyz_files (List[str]): List of available XYZ file paths
-        calc_dir (str): Directory where combined files should be created
+        optimization_dir_path (str): Directory where combined files should be created
         auto_select (Optional[str]): Auto-selection mode:
             - 'all': Process all result_*.xyz files (excludes combined files)
             - 'combined': Combine all result_*.xyz files into combined_r{N}.xyz, then process that
@@ -4865,28 +4965,34 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", au
     
     # Handle auto-selection
     if auto_select == 'all':
-        print(f"\nAuto-selected: All result_*.xyz files ({len(result_files)} files)")
+        if not quiet:
+            print(f"\nAuto-selected: All result_*.xyz files ({len(result_files)} files)")
         return result_files
     elif auto_select == 'combined':
         if len(result_files) == 1:
             # Single file: just use it directly (treat as "combined")
-            print(f"\nAuto-selected: Single result file (treating as combined)")
-            print(f"Using: {os.path.basename(result_files[0])}")
+            if not quiet:
+                print(f"\nAuto-selected: Single result file (treating as combined)")
+                print(f"Using: {os.path.basename(result_files[0])}")
             return result_files
         elif len(result_files) > 1:
             # Multiple files: combine them
-            print(f"\nAuto-combining {len(result_files)} result_*.xyz files...")
-            combined_filename = os.path.join(calc_dir, f"combined_r{len(result_files)}.xyz")
-            success = merge_xyz_files(result_files, combined_filename)
+            if not quiet:
+                print(f"\nAuto-combining {len(result_files)} result_*.xyz files...")
+            combined_filename = os.path.join(optimization_dir_path, f"combined_r{len(result_files)}.xyz")
+            success = merge_xyz_files(result_files, combined_filename, quiet=quiet)
             if success:
-                print(f"Successfully created {os.path.basename(combined_filename)}")
+                if not quiet:
+                    print(f"Successfully created {os.path.basename(combined_filename)}")
                 return [combined_filename]
             else:
-                print("Failed to combine files. Using individual files instead.")
+                if not quiet:
+                    print("Failed to combine files. Using individual files instead.")
                 return result_files
         else:
             # No files
-            print("\nNo result files found")
+            if not quiet:
+                print("\nNo result files found")
             return []
     
     # Interactive mode
@@ -4944,7 +5050,7 @@ def interactive_xyz_file_selection(xyz_files: List[str], calc_dir: str = ".", au
             if choice.lower() == 'c' and len(result_files) > 1:
                 print(f"Combining {len(result_files)} result_*.xyz files...")
                 # Use merge_xyz_files to combine result files only
-                combined_filename = os.path.join(calc_dir, f"combined_r{len(result_files)}.xyz")
+                combined_filename = os.path.join(optimization_dir_path, f"combined_r{len(result_files)}.xyz")
                 success = merge_xyz_files(result_files, combined_filename)
                 if success:
                     print(f"Successfully created {os.path.basename(combined_filename)}")
@@ -5200,16 +5306,17 @@ def extract_qm_executable_from_launcher(launcher_content: str, qm_program_idx: i
 
 
 def calculate_input_files(template_file: str, launcher_template: Optional[str] = None, 
-                          auto_select: str = 'interactive', stage_type: str = "calculation", 
+                          auto_select: str = 'interactive', stage_type: str = "optimization", 
                           workflow_mode: bool = False) -> str:
     """
-    Unified function to create QM input files and launcher scripts for both calculation and optimization stages.
+    Unified function to create QM input files and launcher scripts for both
+    optimization and refinement stages.
     
     Args:
         template_file (str): Path to the QM input template file.
         launcher_template (Optional[str]): Path to the launcher script template.
         auto_select (str): 'interactive', 'all', or 'combined' for file selection.
-        stage_type (str): "calculation" or "optimization".
+        stage_type (str): "optimization" or "refinement".
         workflow_mode (bool): True if called from a workflow, suppresses some print statements.
         
     Returns:
@@ -5255,6 +5362,15 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     except IOError as e:
         return f"Error reading template file '{template_file}': {e}"
     
+    # Normalize accepted stage aliases.
+    stage_type_aliases = {
+        'opt': 'optimization',
+        'optimization': 'optimization',
+        'ref': 'refinement',
+        'refinement': 'refinement',
+    }
+    stage_type = stage_type_aliases.get(stage_type.lower(), stage_type.lower())
+
     # Determine output directory name
     def get_next_dir(base):
         """Find the next available directory (base, base_2, etc.)"""
@@ -5271,10 +5387,11 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     
     # File Search Logic
     xyz_files = []
-    if stage_type == "calculation":
+    if stage_type == "optimization":
         # FIRST: Check for retry_input folder (structures from need_recalculation)
         if os.path.exists("retry_input"):
-            print("Found retry_input folder, using structures from previous similarity analysis")
+            if not workflow_mode:
+                print("Found retry_input folder, using structures from previous similarity analysis")
             for file in os.listdir("retry_input"):
                 if file.endswith(".xyz") and not file.startswith("combined"):
                     xyz_files.append(os.path.join("retry_input", file))
@@ -5304,7 +5421,7 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             return float('inf')
         xyz_files.sort(key=get_annealing_number)
         
-    elif stage_type == "optimization":
+    elif stage_type == "refinement":
         # Check for combined files
         for file in os.listdir("."):
             if file.endswith(".xyz") and "combined" in file.lower():
@@ -5321,28 +5438,34 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
             return "No files with 'combined' in name or motif_*.xyz files found."
             
     # File Selection Logic
-    if stage_type == "calculation":
-        print(f"Found {len(xyz_files)} XYZ file(s) to process:")
-        for xyz_file in xyz_files:
-            print(f"  - {xyz_file}")
+    if stage_type == "optimization":
+        if not workflow_mode:
+            print(f"Found {len(xyz_files)} XYZ file(s) to process:")
+            for xyz_file in xyz_files:
+                print(f"  - {xyz_file}")
             
         # Store first XYZ source for protocol summary
         if hasattr(sys, '_current_workflow_context') and sys._current_workflow_context is not None:  # type: ignore[attr-defined]
             if xyz_files:
                 first_file = xyz_files[0]
                 if 'result' in first_file or 'annealing' in first_file.lower():
-                    sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
+                    sys._current_workflow_context.optimization_xyz_source = "Annealing"  # type: ignore[attr-defined]
                 else:
-                    sys._current_workflow_context.calc_xyz_source = first_file  # type: ignore[attr-defined]
+                    sys._current_workflow_context.optimization_xyz_source = first_file  # type: ignore[attr-defined]
             else:
-                sys._current_workflow_context.calc_xyz_source = "Annealing"  # type: ignore[attr-defined]
+                sys._current_workflow_context.optimization_xyz_source = "Annealing"  # type: ignore[attr-defined]
                 
         if auto_select == 'combined':
             os.makedirs(output_dir, exist_ok=True)
             
-        selected_xyz_files = interactive_xyz_file_selection(xyz_files, output_dir, auto_select=auto_select)
+        selected_xyz_files = interactive_xyz_file_selection(
+            xyz_files,
+            output_dir,
+            auto_select=auto_select,
+            quiet=workflow_mode,
+        )
         
-    elif stage_type == "optimization":
+    elif stage_type == "refinement":
         selected_xyz_files = interactive_optimization_file_selection(xyz_files, output_dir)
     else:
         selected_xyz_files = []
@@ -5354,7 +5477,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     # Create directory
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
-        print(f"Created {stage_type} directory: {output_dir}")
+        if not workflow_mode:
+            print(f"Created {stage_type} directory: {output_dir}")
         
     # Process files in parallel
     all_input_files = []
@@ -5365,11 +5489,11 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     use_combined_naming = (auto_select == 'combined')
     
     # Prepare arguments
-    if stage_type == "calculation":
+    if stage_type == "optimization":
         xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext, total_xyz_files, use_combined_naming) 
                          for xyz_file in xyz_files]
         process_func = _process_xyz_file_for_calc
-    else: # optimization
+    else: # refinement
         xyz_file_args = [(xyz_file, template_content, output_dir, qm_program, input_ext) 
                          for xyz_file in xyz_files]
         process_func = _process_xyz_file_for_opt
@@ -5392,7 +5516,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
                 if not workflow_mode:
                     print(f"  Error processing {xyz_file}: {e}")
                     
-    print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
+    if not workflow_mode:
+        print(f"\nCompleted processing. Created {len(all_input_files)} input files total.")
     
     if not all_input_files:
         return "No input files were created successfully."
@@ -5402,7 +5527,8 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
         launcher_path = os.path.join(output_dir, f"launcher_{qm_program}.sh")
         try:
             qm_executable = extract_qm_executable_from_launcher(launcher_content, qm_program_idx)
-            print(f"Using QM executable: {qm_program}")
+            if not workflow_mode:
+                print(f"Using QM executable: {qm_program}")
             
             # Deduplicate input files: keep only flat filenames (basenames)
             # This prevents duplicate commands like motif_29/motif_29_opt.inp AND motif_29_opt.inp
@@ -5479,9 +5605,9 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     return f"Created {stage_type} system in '{output_dir}' with {len(all_input_files)} input files (no launcher)."
 
 
-def create_calculation_system(template_file: str, launcher_template: str) -> str:
+def create_optimization_system(template_file: str, launcher_template: str) -> str:
     """
-    Creates a calculation system by extracting configurations from XYZ files
+    Creates an optimization system by extracting configurations from XYZ files
     and generating QM input files with launcher scripts.
     
     Args:
@@ -5491,27 +5617,12 @@ def create_calculation_system(template_file: str, launcher_template: str) -> str
     Returns:
         str: Status message
     """
-    return calculate_input_files(template_file, launcher_template, stage_type="calculation")
+    return calculate_input_files(template_file, launcher_template, stage_type="optimization")
 
 
-def create_simple_calculation_system(template_file: str, launcher_template: Optional[str] = None) -> str:
+def create_simple_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
     """
-    Creates a calculation system.
-    
-    Args:
-        template_file (str): Path to the QM input template file
-        launcher_template (str): Path to the launcher script template
-    
-    Returns:
-        str: Status message indicating success or failure
-    """
-    return calculate_input_files(template_file, launcher_template, stage_type="calculation")
-
-
-def create_optimization_system(template_file: str, launcher_template: Optional[str] = None) -> str:
-    """
-    Creates an optimization system by looking for files with 'combined' in their name 
-    (like all_motifs_combined.xyz) and motif_*.xyz files.
+    Creates an optimization system.
     
     Args:
         template_file (str): Path to the QM input template file
@@ -5521,6 +5632,21 @@ def create_optimization_system(template_file: str, launcher_template: Optional[s
         str: Status message indicating success or failure
     """
     return calculate_input_files(template_file, launcher_template, stage_type="optimization")
+
+
+def create_refinement_system(template_file: str, launcher_template: Optional[str] = None) -> str:
+    """
+    Creates a refinement system by looking for files with 'combined' in their name 
+    (like all_motifs_combined.xyz) and motif_*.xyz files.
+    
+    Args:
+        template_file (str): Path to the QM input template file
+        launcher_template (str): Path to the launcher script template
+    
+    Returns:
+        str: Status message indicating success or failure
+    """
+    return calculate_input_files(template_file, launcher_template, stage_type="refinement")
 
 
 def interactive_optimization_file_selection(xyz_files: List[str], opt_dir: str = ".") -> List[str]:
@@ -5798,7 +5924,7 @@ def execute_merge_result_command():
     execute_merge_command(result_files_only=True)
 
 
-def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
+def merge_xyz_files(xyz_files: List[str], output_filename: str, quiet: bool = False) -> bool:
     """
     Merge a list of XYZ files into a single output file.
     Renumbers configurations sequentially and adds source file information.
@@ -5888,15 +6014,18 @@ def merge_xyz_files(xyz_files: List[str], output_filename: str) -> bool:
                     print(f"Warning: Could not read {xyz_file}: {e}")
                     continue
         
-        print(f"Merged {len(sorted_files)} files into {output_filename} with {total_configs} configurations")
+        if not quiet:
+            print(f"Merged {len(sorted_files)} files into {output_filename} with {total_configs} configurations")
         
         # Create .mol file if obabel is available
         if shutil.which("obabel"):
             success, error_msg = convert_xyz_to_mol_simple(output_filename, output_filename.replace('.xyz', '.mol'))
             if success:
-                print(f"Also created {output_filename.replace('.xyz', '.mol')}")
+                if not quiet:
+                    print(f"Also created {output_filename.replace('.xyz', '.mol')}")
             else:
-                print(f"Warning: Could not create .mol file: {error_msg}")
+                if not quiet:
+                    print(f"Warning: Could not create .mol file: {error_msg}")
         
         return True
         
@@ -6679,7 +6808,8 @@ def detect_orca_executable(alias: str = "orca") -> Optional[str]:
     return None
 
 
-def create_auto_launcher(output_dir: str, qm_program: str = "orca", orca_alias: str = "orca") -> Optional[str]:
+def create_auto_launcher(output_dir: str, qm_program: str = "orca", orca_alias: str = "orca",
+                         quiet: bool = False) -> Optional[str]:
     """
     Create an auto-generated launcher script when no launcher file is provided.
     
@@ -6695,16 +6825,19 @@ def create_auto_launcher(output_dir: str, qm_program: str = "orca", orca_alias: 
         Path to the created launcher script, or None if ORCA not found
     """
     if qm_program != 'orca':
-        print(f"  Warning: Auto-launcher only supported for ORCA, not {qm_program}")
+        if not quiet:
+            print(f"  Warning: Auto-launcher only supported for ORCA, not {qm_program}")
         return None
     
     # Detect ORCA executable using the alias
     orca_path = detect_orca_executable(orca_alias)
     if not orca_path:
-        print(f"  Warning: ORCA executable '{orca_alias}' not found in PATH. Please provide a launcher script.")
+        if not quiet:
+            print(f"  Warning: ORCA executable '{orca_alias}' not found in PATH. Please provide a launcher script.")
         return None
     
-    print(f"  Auto-detected ORCA at: {orca_path}")
+    if not quiet:
+        print(f"  Auto-detected ORCA at: {orca_path}")
     
     # Create launcher script
     launcher_path = os.path.join(output_dir, "launcher_orca.sh")
@@ -6794,7 +6927,8 @@ export LD_LIBRARY_PATH="$ORCA{orca_version_str}_ROOT:$_SYSTEM_LD_LIBRARY_PATH"
         os.chmod(launcher_path, 0o755)
         return launcher_path
     except Exception as e:
-        print(f"  Warning: Could not create launcher script: {e}")
+        if not quiet:
+            print(f"  Warning: Could not create launcher script: {e}")
         return None
 
 
@@ -8383,58 +8517,61 @@ class WorkflowContext:
     input_file: str = ""
     num_replicas: int = 0
     annealing_dirs: List[str] = dataclasses.field(default_factory=list)
-    calculation_dir: str = ""
+    optimization_stage_dir: str = ""
     similarity_dir: str = ""
-    optimization_dir: str = ""
+    refinement_stage_dir: str = ""
     critical_count: int = 0
     skipped_count: int = 0
     total_structures: int = 0
     current_try: int = 1
     max_tries: int = 3
-    calc_stage_number: int = 0  # Track which calculation stage (1 or 2)
+    optimization_stage_number: int = 0  # Track which optimization/refinement cycle stage (1 or 2)
     cache_file: str = ""  # Protocol-specific cache filename
-    current_stage_key: str = ""  # Current stage key (e.g., "calculation_2")
+    current_stage_key: str = ""  # Current stage key (e.g., "optimization_2")
     similarity_args: List[str] = dataclasses.field(default_factory=list)  # Store all similarity args
     is_workflow: bool = False  # True when running in workflow mode (with , or then separators)
     workflow_verbose: bool = False  # True only when workflow should print detailed stage logs
     max_launch_retries: int = 10  # Hardcoded retry attempts for launch failures only (instant crashes)
     ascec_parallel_cores: int = 0  # Number of cores for parallel processing (0 = auto-detect, capped at 12)
-    # Exclude patterns for calc and opt stages
-    calc_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'calc1': [2, 5, 6, 7, 8, 9]}
-    opt_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'opt1': [2, 5, 6, 7, 8, 9]}
+    # Exclude patterns for optimization/refinement stages
+    optimization_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'opt1': [2, 5, 6, 7, 8, 9]}
+    refinement_exclude_patterns: Dict[str, List[int]] = dataclasses.field(default_factory=dict)  # e.g., {'ref1': [2, 5, 6, 7, 8, 9]}
     # QM program alias from input.in line 9 (e.g., "orca", "g16")
     qm_alias: str = "orca"  # Default to "orca" for ORCA installations
     # Data capture attributes for protocol summary
     annealing_box_size: Optional[float] = None
     annealing_packing: Optional[float] = None
-    calc_xyz_source: Optional[str] = None
-    calc_completed: Optional[int] = None
-    calc_total: Optional[int] = None
-    calc_sim_folder: Optional[str] = None
+    optimization_xyz_source: Optional[str] = None
+    optimization_completed: Optional[int] = None
+    optimization_total: Optional[int] = None
+    optimization_sim_folder: Optional[str] = None
     sim_folder: Optional[str] = None
     sim_motifs_created: Optional[int] = None
-    opt_motifs_source: Optional[str] = None
-    opt_completed: Optional[int] = None
-    opt_total: Optional[int] = None
-    opt_sim_folder: Optional[str] = None
+    last_similarity_motif_count: Optional[int] = None
+    last_similarity_umotif_count: Optional[int] = None
+    refinement_motifs_source: Optional[str] = None
+    refinement_completed: Optional[int] = None
+    refinement_total: Optional[int] = None
+    refinement_sim_folder: Optional[str] = None
     recalculated_files: Optional[List[str]] = None  # List of basenames for files being recalculated in redo
-    pending_similarity_folder: Optional[str] = None  # Folder set by calc/opt to be used by next similarity stage
+    pending_similarity_folder: Optional[str] = None  # Folder set by optimization/refinement for the next similarity stage
     use_skipped_threshold: bool = False  # True if --skipped flag is used, False if --critical (default)
     update_progress: Optional[Callable[[str], None]] = None  # Compact workflow progress callback
+    completed_stage_count: int = 0  # Number of finished workflow stages for progress rendering
     
     def get_previous_stage_output_dir(self, stage_type: str) -> Optional[str]:
         """
         Get output directory from the most recent completed stage of given type.
         
         Args:
-            stage_type: Stage type prefix (e.g., 'r', 'calculation', 'similarity', 'optimization')
+            stage_type: Stage type prefix (e.g., 'r', 'optimization', 'similarity', 'refinement')
         
         Returns:
             Output directory path or None if not found
             
         Example:
             context.get_previous_stage_output_dir('similarity')  # Returns 'similarity/motifs'
-            context.get_previous_stage_output_dir('calculation')  # Returns 'calculation'
+            context.get_previous_stage_output_dir('optimization')  # Returns 'calculation'
         """
         if not self.cache_file:
             return None
@@ -8457,13 +8594,13 @@ class WorkflowContext:
         Get working directory for a specific stage by its key.
         
         Args:
-            stage_key: Exact stage key (e.g., 'calculation_1', 'similarity_2')
+            stage_key: Exact stage key (e.g., 'optimization_1', 'similarity_2')
         
         Returns:
             Working directory path or None if not found
             
         Example:
-            context.get_stage_working_dir('calculation_1')  # Returns 'calculation'
+            context.get_stage_working_dir('optimization_1')  # Returns 'calculation'
         """
         if not self.cache_file:
             return None
@@ -8482,7 +8619,7 @@ class WorkflowContext:
         Get input directory from the most recent completed stage of given type.
         
         Args:
-            stage_type: Stage type prefix (e.g., 'r', 'calculation', 'similarity', 'optimization')
+            stage_type: Stage type prefix (e.g., 'r', 'optimization', 'similarity', 'refinement')
         
         Returns:
             Input directory path or None if not found
@@ -8514,7 +8651,7 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
     Supports both space-separated and comma-attached formats.
     
     Examples:
-        ascec04 at_annealing.in , r3 , calc --redo=3 preopt.inp launcher.sh , similarity --th=2
+        ascec04 at_annealing.in , r3 , opt --redo=3 preopt.inp launcher.sh , similarity --th=2
         ascec04 at_annealing.asc, r3, opt --redo=3 preopt.inp launcher.sh, similarity --th=2
         ascec04 .asc, r3, opt -c --redo=3 preopt.inp launcher.sh, similarity --th=2
         
@@ -8529,10 +8666,10 @@ def parse_workflow_stages(args: List[str]) -> List[Dict[str, Any]]:
             (-c: Combine all result_*.xyz into combined_r{N}.xyz first, then process)
         
         Flag meanings:
-            --redo=N: Redo entire stage (calc+similarity or opt+similarity) up to N times
+            --redo=N: Redo entire stage (optimization+similarity or refinement+similarity) up to N times
             
         Note: Launch failures (instant crashes) are automatically retried up to 10 times.
-        Once a calculation starts running normally, it will not be retried regardless of exit code.
+        Once an optimization run starts running normally, it will not be retried regardless of exit code.
     
     Returns:
         List of stage dictionaries with 'type', 'args', and optional 'pause_after' keys
@@ -8629,11 +8766,11 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
             stage_dict['pause_after'] = True
         return stage_dict
     
-    # Calculation stage: calc/opt/optimization ...
-    # New naming: "opt" means Optimization stage (internal type: calculation)
-    elif first_arg in ['calc', 'opt', 'optimization']:
+    # Optimization stage: opt/optimization ...
+    # New naming: "opt" means Optimization stage (internal type: optimization)
+    elif first_arg in ['opt', 'optimization']:
         stage_dict = {
-            'type': 'calculation',
+            'type': 'optimization',
             'args': stage_args[1:]
         }
         if pause_after:
@@ -8650,7 +8787,7 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
             stage_dict['pause_after'] = True
         return stage_dict
     
-    # Refinement stage: ref/refinement ... (internal type: optimization)
+    # Refinement stage: ref/refinement ... (internal type: refinement)
     elif first_arg in ['ref', 'refinement']:
         # Parse opt stage: opt [flags] template_file launcher_file
         # Find template and launcher (non-flag arguments)
@@ -8669,7 +8806,7 @@ def finalize_stage(stage_args: List[str], pause_after: bool = False) -> Optional
         launcher_sh = files[1] if len(files) >= 2 else None
         
         stage_dict = {
-            'type': 'optimization',
+            'type': 'refinement',
             'args': flags,  # Only flags, not file paths
             'template_inp': template_inp,
             'launcher_sh': launcher_sh
@@ -8821,7 +8958,7 @@ def parse_similarity_output(similarity_dir: str) -> Tuple[int, int]:
     
     return (critical_count, skipped_count)
 
-def get_critical_count(calc_dir: str) -> int:
+def get_critical_count(optimization_dir_path: str) -> int:
     """
     Count files with imaginary frequencies in calculation directory.
     
@@ -8831,7 +8968,7 @@ def get_critical_count(calc_dir: str) -> int:
     critical_count = 0
     
     # Look for ORCA (.out) and Gaussian (.log) output files
-    for root, dirs, files in os.walk(calc_dir):
+    for root, dirs, files in os.walk(optimization_dir_path):
         for file in files:
             if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
@@ -8846,7 +8983,7 @@ def get_critical_count(calc_dir: str) -> int:
     
     return critical_count
 
-def get_critical_files_list(calc_dir: str) -> List[str]:
+def get_critical_files_list(optimization_dir_path: str) -> List[str]:
     """
     Get list of files with imaginary frequencies.
     
@@ -8855,7 +8992,7 @@ def get_critical_files_list(calc_dir: str) -> List[str]:
     """
     critical_files = []
     
-    for root, dirs, files in os.walk(calc_dir):
+    for root, dirs, files in os.walk(optimization_dir_path):
         for file in files:
             if file.endswith('.out') or file.endswith('.log'):
                 filepath = os.path.join(root, file)
@@ -8869,7 +9006,7 @@ def get_critical_files_list(calc_dir: str) -> List[str]:
     
     return critical_files
 
-def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> int:
+def handle_imaginary_frequencies(critical_files: List[str], optimization_dir_path: str) -> int:
     """
     Process structures with imaginary frequencies:
     - For 1 imaginary frequency: Use orca_pltvib to displace along the mode
@@ -8877,7 +9014,7 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
     
     Args:
         critical_files: List of output files with imaginary frequencies
-        calc_dir: Calculation directory
+        optimization_dir_path: Stage working directory
         
     Returns:
         Number of structures successfully processed
@@ -8893,14 +9030,14 @@ def handle_imaginary_frequencies(critical_files: List[str], calc_dir: str) -> in
             
             if imag_count == 1:
                 # Single imaginary frequency: displace along the mode
-                if displace_along_imaginary_mode(out_file, calc_dir):
+                if displace_along_imaginary_mode(out_file, optimization_dir_path):
                     processed += 1
                     print(f"      Displaced structure created")
                 else:
                     print(f"      Could not create displaced structure")
             elif imag_count >= 2:
                 # Multiple imaginary frequencies: displace along highest (most negative) mode
-                if displace_along_imaginary_mode(out_file, calc_dir, use_highest_mode=True):
+                if displace_along_imaginary_mode(out_file, optimization_dir_path, use_highest_mode=True):
                     processed += 1
                     print(f"      Displaced structure created (highest imaginary mode)")
                 else:
@@ -8938,7 +9075,7 @@ def count_imaginary_frequencies(out_file: str) -> int:
     except:
         return 0
 
-def displace_along_imaginary_mode(out_file: str, calc_dir: str, use_highest_mode: bool = False):
+def displace_along_imaginary_mode(out_file: str, optimization_dir_path: str, use_highest_mode: bool = False):
     """
     Create displaced structure along imaginary mode.
     
@@ -8949,7 +9086,7 @@ def displace_along_imaginary_mode(out_file: str, calc_dir: str, use_highest_mode
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory (unused, kept for compatibility)
+        optimization_dir_path: Stage working directory (unused, retained for stable function signatures)
         use_highest_mode: If True, displace along the highest (most negative) imaginary mode.
                          If False (default), displace along the first imaginary mode.
         
@@ -9308,7 +9445,7 @@ def format_ordinal(n):
     return f"{n}{suffix}"
 
 
-def extract_final_geometry(out_file: str, calc_dir: str):
+def extract_final_geometry(out_file: str, optimization_dir_path: str):
     """
     Extract final optimized geometry from output file.
     
@@ -9319,7 +9456,7 @@ def extract_final_geometry(out_file: str, calc_dir: str):
     
     Args:
         out_file: Path to output file (.out for ORCA, .log for Gaussian)
-        calc_dir: Calculation directory (unused, kept for compatibility)
+        optimization_dir_path: Stage working directory (unused, retained for stable function signatures)
         
     Returns:
         List of XYZ lines if successful, None otherwise
@@ -9440,11 +9577,11 @@ def check_workflow_pause(stage: Dict[str, Any], stage_num: int, total_stages: in
     
     return False  # Signal to stop execution
 
-def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_num: int, 
-                                    stages: List[Dict[str, Any]], stage_idx: int,
-                                    cache_file: str) -> Tuple[bool, int]:
+def validate_cached_optimization_similarity(cache: dict, stage: Dict[str, Any], stage_num: int,
+                                            stages: List[Dict[str, Any]], stage_idx: int,
+                                            cache_file: str) -> Tuple[bool, int]:
     """
-    Validate cached calculation+similarity results against thresholds.
+    Validate cached optimization+similarity results against thresholds.
     
     Returns:
         Tuple of (should_skip, new_stage_idx)
@@ -9465,12 +9602,12 @@ def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_nu
        cache['stages'][next_stage_key].get('status') != 'completed':
         return True, stage_idx
     
-    # Check if calculation stage has redo parameters
-    calc_args = stage['args']
+    # Check if optimization stage has redo parameters
+    optimization_args = stage['args']
     max_critical = None
     max_skipped = None
     
-    for arg in calc_args:
+    for arg in optimization_args:
         if arg.startswith('--critical='):
             max_critical = float(arg.split('=')[1])
         elif arg.startswith('--skipped='):
@@ -9507,15 +9644,15 @@ def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_nu
         threshold_met = critical_pct <= max_critical
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: critical {critical_pct:.1f}% > {max_critical}%")
-            print(f"  Invalidating cache and re-running calculation with redo logic...")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
     elif max_skipped is not None:
         threshold_met = skipped_pct <= max_skipped
         if not threshold_met:
             print(f"\n⚠ Cached result invalid: skipped {skipped_pct:.1f}% > {max_skipped}%")
-            print(f"  Invalidating cache and re-running calculation with redo logic...")
+            print(f"  Invalidating cache and re-running optimization with redo logic...")
     
     if not threshold_met:
-        # Remove both calc and similarity from cache
+        # Remove both optimization and similarity from cache
         if stage_key in cache.get('stages', {}):
             del cache['stages'][stage_key]
         if next_stage_key in cache.get('stages', {}):
@@ -9534,7 +9671,7 @@ def validate_cached_calc_similarity(cache: dict, stage: Dict[str, Any], stage_nu
     print('-' * 60)
     return True, stage_idx + 1
 
-def validate_cached_opt_similarity(cache: dict, stage: Dict[str, Any], stage_num: int, 
+def validate_cached_refinement_similarity(cache: dict, stage: Dict[str, Any], stage_num: int, 
                                    stages: List[Dict[str, Any]], stage_idx: int,
                                    cache_file: str) -> Tuple[bool, int]:
     """
@@ -9643,6 +9780,73 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     Returns:
         0 on success, non-zero on failure
     """
+    workflow_start_dt = datetime.now()
+
+    def format_compact_wall_time(seconds: float) -> str:
+        total_seconds = max(0, int(seconds))
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+
+        if days > 0:
+            return f"{days}d {hours}h"
+        if hours > 0:
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
+
+    def render_final_workflow_summary() -> None:
+        total = len(stages)
+        bar = render_progress_bar(total, total, width=30)
+
+        # Prefer cache-backed stage data so redo mode reports FINAL similarity counts.
+        final_cache = load_protocol_cache(cache_file) if use_cache and os.path.exists(cache_file) else {}
+        cache_stages = final_cache.get('stages', {}) if isinstance(final_cache, dict) else {}
+
+        similarity_counter = 0
+        summary_lines: List[str] = []
+
+        for idx, stage_def in enumerate(stages, start=1):
+            stage_type = stage_def.get('type', '')
+            stage_name = stage_display_map.get(stage_type, str(stage_type).capitalize())
+            stage_line = f"[{idx}/{total}] {stage_name} ✓"
+
+            if stage_type == 'similarity':
+                similarity_counter += 1
+                stage_name = "Similarity" if similarity_counter == 1 else f"Similarity_{similarity_counter}"
+                stage_key = f"similarity_{idx}"
+                stage_data = cache_stages.get(stage_key, {}) if isinstance(cache_stages, dict) else {}
+                stage_result = stage_data.get('result', {}) if isinstance(stage_data, dict) else {}
+
+                motifs_created = None
+                if isinstance(stage_result, dict):
+                    motifs_created = stage_result.get('motifs_created')
+
+                # Fallback to last known count if cache is unavailable.
+                if motifs_created is None:
+                    motifs_created = context.sim_motifs_created
+
+                if motifs_created is not None:
+                    stage_line = f"[{idx}/{total}] {stage_name} ({motifs_created}) ✓"
+                else:
+                    stage_line = f"[{idx}/{total}] {stage_name} ✓"
+
+            summary_lines.append(stage_line)
+
+        workflow_end_dt = datetime.now()
+        wall_time_str = format_compact_wall_time((workflow_end_dt - workflow_start_dt).total_seconds())
+
+        print("\n=== ASCEC & Similarity ===")
+        print("-" * 60)
+        print(f"Progress [{bar}] 100%")
+        print("-" * 60)
+        for line in summary_lines:
+            print(line)
+        print("\nWorkflow finished")
+        print(f"Start: {workflow_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"End:   {workflow_end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total wall time: {wall_time_str}")
+        print("-" * 60)
+
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
     context.workflow_verbose = ('-v' in sys.argv or '--v' in sys.argv or '--va' in sys.argv)
@@ -9724,7 +9928,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             with open(cache_file, 'wb') as f:
                 pickle.dump(cache, f)
         if cache:
-            from datetime import datetime
             start_time = cache.get('start_time', None)
             completed_stages = cache.get('stages', {})
             
@@ -9814,21 +10017,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             cache['total_stages'] = len(stages)
             save_protocol_cache(cache, cache_file)
     
-    # Pre-scan stages to extract similarity args for use in calculation stage
+    # Pre-scan stages to extract similarity args for use in optimization stage
     for stage in stages:
         if stage['type'] == 'similarity':
             context.similarity_args = stage.get('args', [])
             break
     
-    # Count calculation stages for proper numbering (calc, calc2)
-    calc_stage_counter = 0
+    # Count optimization stages for proper numbering (opt, opt2)
+    optimization_stage_counter = 0
     
     # Map stage types to display names
     stage_display_map: Dict[str, str] = {
         'replication': 'Annealing',
-        'calculation': 'Optimization',
+        'optimization': 'Optimization',
         'similarity': 'Similarity',
-        'optimization': 'Refinement'
+        'refinement': 'Refinement'
     }
 
     progress_lines = 0
@@ -9861,7 +10064,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         for i, st in enumerate(stages, start=1):
             name = stage_display_map.get(st['type'], st['type'].capitalize())
             if i <= completed_stages:
-                stage_lines.append(f"[{i}/{total}] {name} ✓")
+                line = f"[{i}/{total}] {name} ✓"
+                if st.get('type') == 'similarity':
+                    motif_count = getattr(context, 'last_similarity_motif_count', None)
+                    umotif_count = getattr(context, 'last_similarity_umotif_count', None)
+                    if motif_count is not None or umotif_count is not None:
+                        m_val = motif_count if motif_count is not None else 0
+                        u_val = umotif_count if umotif_count is not None else 0
+                        line += f" (m:{m_val} u:{u_val})"
+                stage_lines.append(line)
             elif i == current_stage_num and completed_stages < total:
                 suffix = f" {sub_progress}" if sub_progress else " ..."
                 stage_lines.append(f"[{i}/{total}] {name}{suffix}")
@@ -9917,7 +10128,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     completed_stage_count = 0
     render_workflow_progress(completed_stage_count, 1)
     
-    # Execute each stage in sequence with calc+similarity retry logic
+    # Execute each stage in sequence with optimization+similarity retry logic
     stage_idx = 0
     while stage_idx < len(stages):
         stage_num = stage_idx + 1
@@ -9942,18 +10153,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     context.completed_stage_count = completed_stage_count
                     stage_idx += 1
                     
-                    # Validate cached calc+similarity if applicable
-                    if stage_type == 'calculation':
-                        should_skip, new_idx = validate_cached_calc_similarity(
+                    # Validate cached optimization+similarity if applicable
+                    if stage_type == 'optimization':
+                        should_skip, new_idx = validate_cached_optimization_similarity(
                             cache, stage, stage_num, stages, stage_idx, cache_file
                         )
                         if not should_skip:
                             stage_idx = new_idx
                             continue
                         stage_idx = new_idx
-                    # Validate cached opt+similarity if applicable
-                    elif stage_type == 'optimization':
-                        should_skip, new_idx = validate_cached_opt_similarity(
+                    # Validate cached refinement+similarity if applicable
+                    elif stage_type == 'refinement':
+                        should_skip, new_idx = validate_cached_refinement_similarity(
                             cache, stage, stage_num, stages, stage_idx, cache_file
                         )
                         if not should_skip:
@@ -10052,23 +10263,23 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 completed_stage_count = stage_num
                 context.completed_stage_count = completed_stage_count
                 
-            elif stage_type == 'calculation':
-                # Increment calculation stage counter
-                calc_stage_counter += 1
-                context.calc_stage_number = calc_stage_counter
+            elif stage_type == 'optimization':
+                # Increment optimization stage counter
+                optimization_stage_counter += 1
+                context.optimization_stage_number = optimization_stage_counter
                 
-                # Check if next stage is similarity - if so, handle calc+similarity with retry
+                # Check if next stage is similarity - if so, handle optimization+similarity with retry
                 next_is_similarity = (stage_idx + 1 < len(stages) and 
                                      stages[stage_idx + 1]['type'] == 'similarity')
                 
                 if next_is_similarity:
-                    # Extract redo parameters from calc stage
-                    calc_args = stage['args']
+                    # Extract redo parameters from optimization stage
+                    optimization_args = stage['args']
                     max_redos = 3  # Default: 3 redo attempts for critical structures
                     max_critical = 0  # Default: 0% critical structures allowed (retry all)
                     max_skipped = None   # Not set by default
                     
-                    for arg in calc_args:
+                    for arg in optimization_args:
                         if arg.startswith('--redo='):
                             max_redos = int(arg.split('=')[1])
                         elif arg.startswith('--critical='):
@@ -10089,7 +10300,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             elif max_skipped is not None:
                                 print(f"  Stage redo enabled: max {max_redos} redo attempts, target skipped ≤ {max_skipped}%")
                     
-                    # Redo loop for calc+similarity
+                    # Redo loop for optimization+similarity
                     # attempt 0 = initial run, attempts 1..max_redos = redo attempts
                     final_attempt = 0
                     initial_critical = None  # Track initial critical % from first attempt
@@ -10105,15 +10316,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         # Don't delete similarity folder - we'll update it with corrected calculations
                         
                         # Run calculation (which includes sort step that creates similarity/)
-                        result = execute_calculation_stage(context, stage)
+                        result = execute_optimization_stage(context, stage)
                         if result != 0:
-                            print(f"\nError: Calculation failed with code {result}")
+                            print(f"\nError: Optimization failed with code {result}")
                             return result
                         
                         # If this is a redo attempt and we have recalculated files, copy them to similarity folder
                         if attempt > 0 and hasattr(context, 'recalculated_files') and context.recalculated_files:
                             # Get calculation and similarity directories
-                            calc_dir = getattr(context, 'calculation_dir', 'calculation')
+                            optimization_dir_path = getattr(context, 'optimization_stage_dir', 'optimization')
                             # Get similarity orca output directory
                             sim_dir = context.similarity_dir if hasattr(context, 'similarity_dir') else "similarity"
                             
@@ -10147,7 +10358,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 # Copy updated .out files from calculation subdirectories to similarity
                                 for basename in context.recalculated_files:
                                     # Find the .out file in calculation subdirectories
-                                    calc_subdir = os.path.join(calc_dir, basename)
+                                    calc_subdir = os.path.join(optimization_dir_path, basename)
                                     calc_out_file = os.path.join(calc_subdir, f"{basename}.out")
                                     
                                     if os.path.exists(calc_out_file):
@@ -10235,9 +10446,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if os.path.exists(summary_file):
                         final_critical, final_skipped = parse_similarity_summary(summary_file)
                     
-                    # Update cache for both calculation and similarity stages
+                    # Update cache for both optimization and similarity stages
                     if use_cache:
-                        calc_key = f"calculation_{stage_num}"
+                        calc_key = f"optimization_{stage_num}"
                         sim_key = f"similarity_{stage_num + 1}"
                         
                         calc_result: Dict[str, Any] = {
@@ -10251,10 +10462,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if input_dir is None:
                             input_dir = '.'  # Default if no previous stage
                         
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
+                        optimization_dir_path = context.optimization_stage_dir if context.optimization_stage_dir else "calculation"
                         calc_result['input_dir'] = input_dir
-                        calc_result['working_dir'] = calc_dir
-                        calc_result['output_dir'] = calc_dir  # .out files are in calc_dir
+                        calc_result['working_dir'] = optimization_dir_path
+                        calc_result['output_dir'] = optimization_dir_path  # .out files are in optimization_dir_path
                         
                         if max_critical is not None:
                             calc_result['critical_threshold'] = max_critical
@@ -10262,18 +10473,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             calc_result['skipped_threshold'] = max_skipped
                         
                         # Add XYZ source info if available
-                        if hasattr(context, 'calc_xyz_source'):
-                            calc_result['xyz_source'] = context.calc_xyz_source
+                        if hasattr(context, 'optimization_xyz_source'):
+                            calc_result['xyz_source'] = context.optimization_xyz_source
                         
                         # Add completion counts if available
-                        if hasattr(context, 'calc_completed'):
-                            calc_result['completed'] = context.calc_completed
-                        if hasattr(context, 'calc_total'):
-                            calc_result['total'] = context.calc_total
+                        if hasattr(context, 'optimization_completed'):
+                            calc_result['completed'] = context.optimization_completed
+                        if hasattr(context, 'optimization_total'):
+                            calc_result['total'] = context.optimization_total
                         
                         # Add similarity folder info if available
-                        if hasattr(context, 'calc_sim_folder'):
-                            calc_result['similarity_folder'] = context.calc_sim_folder
+                        if hasattr(context, 'optimization_sim_folder'):
+                            calc_result['similarity_folder'] = context.optimization_sim_folder
                         
                         update_protocol_cache(calc_key, 'completed', 
                                             result=calc_result, cache_file=cache_file)
@@ -10282,8 +10493,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Store directories for stage memory
                         sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                        sim_result['input_dir'] = calc_dir  # Read from calculation
+                        optimization_dir_path = context.optimization_stage_dir if context.optimization_stage_dir else "calculation"
+                        sim_result['input_dir'] = optimization_dir_path  # Read from calculation
                         sim_result['working_dir'] = sim_dir
                         # After calculation: use "motifs" prefix (first level clustering)
                         sim_result['output_dir'] = os.path.join(sim_dir, "motifs")  # Motifs for opt stage
@@ -10339,9 +10550,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         update_protocol_cache(sim_key, 'completed', 
                                             result=sim_result, cache_file=cache_file)
                     
-                    # Check if workflow should pause after calc stage (check calc stage for pause marker)
+                    # Check if workflow should pause after optimization stage
                     if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
-                        return 0  # Paused after calculation
+                        return 0  # Paused after optimization
                     
                     # Check if workflow should pause after similarity stage (check next stage for pause marker)
                     if stage_idx + 1 < len(stages):
@@ -10349,13 +10560,13 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if not check_workflow_pause(sim_stage, stage_num + 1, len(stages), cache_file, use_cache):
                             return 0  # Paused after similarity
                     
-                    # Skip both calc and similarity stages since we handled them
+                    # Skip both optimization and similarity stages since we handled them
                     stage_idx += 2
                     completed_stage_count = stage_num + 1
                     context.completed_stage_count = completed_stage_count
                 else:
-                    # Standalone calc without similarity
-                    result = execute_calculation_stage(context, stage)
+                    # Standalone optimization without similarity
+                    result = execute_optimization_stage(context, stage)
                     
                     # Check if workflow should pause after this stage
                     if result == 0:
@@ -10367,15 +10578,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     context.completed_stage_count = completed_stage_count
                     
             elif stage_type == 'similarity':
-                # Standalone similarity (not after calc/opt in combined mode)
+                # Standalone similarity (not after optimization/refinement in combined mode)
                 result = execute_similarity_stage(context, stage)
                 
-                # Check if previous stage was calculation or optimization with threshold requirements
+                # Check if previous stage was optimization or refinement with threshold requirements
                 if result == 0 and stage_idx > 0:
                     prev_stage = stages[stage_idx - 1]
                     prev_stage_type = prev_stage['type']
                     
-                    if prev_stage_type in ['calculation', 'optimization']:
+                    if prev_stage_type in ['optimization', 'refinement']:
                         # Check if previous stage had redo parameters
                         prev_args = prev_stage['args']
                         max_critical = None
@@ -10465,18 +10676,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     sim_dir = context.similarity_dir if context.similarity_dir else "similarity"
                     
                     # Determine input directory and output prefix based on previous stage
-                    # Check if previous stage was optimization or calculation
-                    prev_was_opt = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'optimization')
+                    # Check if previous stage was refinement or optimization
+                    prev_was_opt = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'refinement')
                     
                     if prev_was_opt:
                         # After optimization: input from opt dir, output to umotifs
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
                         sim_result['input_dir'] = opt_dir
                         sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")
                     else:
-                        # After calculation: input from calc dir, output to motifs
-                        calc_dir = context.calculation_dir if context.calculation_dir else "calculation"
-                        sim_result['input_dir'] = calc_dir
+                        # After optimization: input from optimization dir, output to motifs
+                        optimization_dir_path = context.optimization_stage_dir if context.optimization_stage_dir else "calculation"
+                        sim_result['input_dir'] = optimization_dir_path
                         sim_result['output_dir'] = os.path.join(sim_dir, "motifs")
                     
                     sim_result['working_dir'] = sim_dir
@@ -10520,7 +10731,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 completed_stage_count = stage_num
                 context.completed_stage_count = completed_stage_count
                 
-            elif stage_type == 'optimization':
+            elif stage_type == 'refinement':
                 # Check if next stage is similarity - if so, handle opt+similarity with retry
                 next_is_similarity = (stage_idx + 1 < len(stages) and 
                                      stages[stage_idx + 1]['type'] == 'similarity')
@@ -10566,12 +10777,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             print(f"\n{'-' * 60}")
                             print(f"Redo {attempt}/{max_redos}")
                         
-                        # Run optimization (includes organizing/copying files to similarity)
-                        result = execute_optimization_stage(context, stage)
+                        # Run refinement (includes organizing/copying files to similarity)
+                        result = execute_refinement_stage(context, stage)
                         if result != 0:
-                            print(f"\nError: Optimization failed with code {result}")
+                            print(f"\nError: Refinement failed with code {result}")
                             # Invalidate cache so we can resume from this stage
-                            opt_key = f"optimization_{stage_num}"
+                            opt_key = f"refinement_{stage_num}"
                             if use_cache and 'stages' in cache and opt_key in cache['stages']:
                                 del cache['stages'][opt_key]
                                 with open(cache_file, 'wb') as f:
@@ -10582,9 +10793,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         # If this is a redo attempt and we have recalculated files, copy them to similarity folder
                         if attempt > 0 and hasattr(context, 'recalculated_files') and context.recalculated_files:
                             # Get optimization and similarity directories
-                            opt_dir = getattr(context, 'optimization_dir', 'optimization') or 'optimization'
+                            opt_dir = getattr(context, 'refinement_stage_dir', 'optimization') or 'optimization'
                             # Get similarity orca output directory
-                            sim_dir = context.opt_sim_folder if hasattr(context, 'opt_sim_folder') else context.similarity_dir
+                            sim_dir = context.refinement_sim_folder if hasattr(context, 'refinement_sim_folder') else context.similarity_dir
                             
                             # Strip orca_out suffix if present - we want the BASE similarity directory
                             base_sim_dir = sim_dir
@@ -10717,9 +10928,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if os.path.exists(summary_file):
                         final_critical, final_skipped = parse_similarity_summary(summary_file)
                     
-                    # Update cache for both stages
+                    # Update cache for both refinement and similarity stages
                     if use_cache:
-                        opt_key = f"optimization_{stage_num}"
+                        opt_key = f"refinement_{stage_num}"
                         sim_key = f"similarity_{stage_num + 1}"
                         
                         # Build result data
@@ -10734,7 +10945,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if not motifs_dir:
                             motifs_dir = "similarity/motifs"  # Fallback
                         
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
                         opt_result['input_dir'] = motifs_dir
                         opt_result['working_dir'] = opt_dir
                         opt_result['output_dir'] = opt_dir
@@ -10745,18 +10956,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             opt_result['skipped_threshold'] = max_skipped
                         
                         # Add motifs source info if available
-                        if hasattr(context, 'opt_motifs_source') and context.opt_motifs_source:
-                            opt_result['motifs_source'] = context.opt_motifs_source
+                        if hasattr(context, 'refinement_motifs_source') and context.refinement_motifs_source:
+                            opt_result['motifs_source'] = context.refinement_motifs_source
                         
                         # Add completion counts if available
-                        if hasattr(context, 'opt_completed') and context.opt_completed is not None:
-                            opt_result['completed'] = context.opt_completed
-                        if hasattr(context, 'opt_total') and context.opt_total is not None:
-                            opt_result['total'] = context.opt_total
+                        if hasattr(context, 'refinement_completed') and context.refinement_completed is not None:
+                            opt_result['completed'] = context.refinement_completed
+                        if hasattr(context, 'refinement_total') and context.refinement_total is not None:
+                            opt_result['total'] = context.refinement_total
                         
                         # Add similarity folder info if available
-                        if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                            opt_result['similarity_folder'] = context.opt_sim_folder
+                        if hasattr(context, 'refinement_sim_folder') and context.refinement_sim_folder:
+                            opt_result['similarity_folder'] = context.refinement_sim_folder
                         
                         update_protocol_cache(opt_key, 'completed', result=opt_result, cache_file=cache_file)
                         
@@ -10764,7 +10975,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Store directories for stage memory
                         sim_dir = context.similarity_dir if context.similarity_dir else "similarity_2"
-                        opt_dir = context.optimization_dir if context.optimization_dir else "optimization"
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
                         sim_result['input_dir'] = opt_dir  # Read from optimization
                         sim_result['working_dir'] = sim_dir
                         # After optimization: use "umotifs" prefix (unique motifs, second level)
@@ -10820,9 +11031,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         update_protocol_cache(sim_key, 'completed', result=sim_result, cache_file=cache_file)
                     
-                    # Check if workflow should pause after opt stage (check opt stage for pause marker)
+                    # Check if workflow should pause after refinement stage
                     if not check_workflow_pause(stage, stage_num, len(stages), cache_file, use_cache):
-                        return 0  # Paused after optimization
+                        return 0  # Paused after refinement
                     
                     # Check if workflow should pause after similarity stage (check next stage for pause marker)
                     if stage_idx + 1 < len(stages):
@@ -10836,12 +11047,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     context.completed_stage_count = completed_stage_count
                     continue
                 else:
-                    # No similarity after optimization - just run it once
-                    result = execute_optimization_stage(context, stage)
+                    # No similarity after refinement - just run it once
+                    result = execute_refinement_stage(context, stage)
                 
-                # Build and save optimization result if successful (for standalone opt)
+                # Build and save refinement result if successful (for standalone refinement)
                 if result == 0 and use_cache and not next_is_similarity:
-                    opt_key = f"optimization_{stage_num}"
+                    opt_key = f"refinement_{stage_num}"
                     
                     # Extract optimization parameters from stage
                     max_skipped = None
@@ -10860,16 +11071,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         opt_result['skipped_threshold'] = max_skipped
                     
                     # Add detailed execution data from context
-                    if hasattr(context, 'opt_motifs_source') and context.opt_motifs_source:
-                        opt_result['motifs_source'] = context.opt_motifs_source
+                    if hasattr(context, 'refinement_motifs_source') and context.refinement_motifs_source:
+                        opt_result['motifs_source'] = context.refinement_motifs_source
                     
-                    if hasattr(context, 'opt_completed') and context.opt_completed is not None:
-                        opt_result['completed'] = context.opt_completed
-                    if hasattr(context, 'opt_total') and context.opt_total is not None:
-                        opt_result['total'] = context.opt_total
+                    if hasattr(context, 'refinement_completed') and context.refinement_completed is not None:
+                        opt_result['completed'] = context.refinement_completed
+                    if hasattr(context, 'refinement_total') and context.refinement_total is not None:
+                        opt_result['total'] = context.refinement_total
                     
-                    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-                        opt_result['similarity_folder'] = context.opt_sim_folder
+                    if hasattr(context, 'refinement_sim_folder') and context.refinement_sim_folder:
+                        opt_result['similarity_folder'] = context.refinement_sim_folder
                     
                     # Save to cache
                     update_protocol_cache(opt_key, 'completed', 
@@ -10896,15 +11107,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             traceback.print_exc()
             return 1
     
-    if not context.workflow_verbose:
-        render_workflow_progress(len(stages), len(stages))
-
     if context.workflow_verbose:
         print(f"\n{'-' * 60}")
         print("✓ Workflow completed")
         print(f"{'-' * 60}")
     else:
-        print("\n✓ Workflow completed")
+        render_final_workflow_summary()
     
     # Clean up temporary folders from retry attempts (final safety cleanup)
     temp_calc_folders = glob.glob("calculation_tmp_*")
@@ -10913,18 +11121,22 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     all_temp = temp_calc_folders + temp_sim_folders + retry_input
     
     if all_temp:
-        print("\nCleaning up temporary folders...")
+        if context.workflow_verbose:
+            print("\nCleaning up temporary folders...")
         for folder in all_temp:
             if os.path.exists(folder):
                 shutil.rmtree(folder)
-                print(f"  Removed: {folder}")
-        print(f"  Cleaned {len(all_temp)} temporary folder(s)")
+                if context.workflow_verbose:
+                    print(f"  Removed: {folder}")
+        if context.workflow_verbose:
+            print(f"  Cleaned {len(all_temp)} temporary folder(s)")
     
     # If using cache (protocol mode), generate summary
     # NOTE: Cache is NOT deleted to allow protocol resume
     if use_cache:
         generate_protocol_summary(cache_file=cache_file)
-        print(f"\n→ Protocol cache saved: {cache_file}")
+        if context.workflow_verbose:
+            print(f"\n→ Protocol cache saved: {cache_file}")
     
     return 0
 
@@ -11187,7 +11399,7 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     if not sim_dir:
         # For optimization stages, check for similarity_2, similarity_3, etc.
-        # For calculation stages, use similarity
+        # For optimization stages, use similarity
         if 'optimization' in stage_dir.lower():
             # Check for similarity_2 first (most common for first optimization)
             if os.path.exists('similarity_2'):
@@ -11700,8 +11912,8 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     # 1. Determine Similarity Directory
     # For optimization, we look for the similarity folder that THIS optimization feeds into.
     # Usually similarity_2, similarity_3, etc.
-    # Use opt_sim_folder (the dedicated variable for optimization outputs)
-    sim_dir = getattr(context, 'opt_sim_folder', None)
+    # Use refinement_sim_folder (the dedicated variable for optimization outputs)
+    sim_dir = getattr(context, 'refinement_sim_folder', None)
     
     if not sim_dir:
         # Try to guess based on existence
@@ -11715,7 +11927,7 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
             return False
     
     # CRITICAL: If sim_dir includes orca_out_X subdirectory, strip it
-    # organize step sets context.opt_sim_folder to "similarity_2/orca_out_5_1"
+    # organize step sets context.refinement_sim_folder to "similarity_2/orca_out_5_1"
     # but skipped_structures is at "similarity_2/skipped_structures/"
     if '/' in sim_dir and ('orca_out_' in sim_dir or 'gaussian_out_' in sim_dir):
         sim_dir = sim_dir.split('/')[0]
@@ -12089,8 +12301,8 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     
     return processed_count > 0
 
-def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
-    """Execute calculation stage with automatic retry logic."""
+def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
+    """Execute optimization stage with automatic retry logic."""
     # Store context globally for access in helper functions
     sys._current_workflow_context = context  # type: ignore[attr-defined]
     
@@ -12100,11 +12312,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     # Parse flags - defaults for when flags are not explicitly provided
     max_critical = 0      # default: 0% critical structures allowed (strict)
     max_skipped = None    # Not set by default (only --critical is used unless --skipped specified)
-    max_stage_redos = 3   # default: 3 stage redos (--redo: redo entire calc+similarity)
+    max_stage_redos = 3   # default: 3 stage redos (--redo: redo entire optimization+similarity)
     # Note: --retry removed; launch failures auto-retry up to 10 times (hardcoded)
     auto_select = 'combined'  # Workflow mode defaults to combining files (like -c flag)
     template_file = None
     launcher_file = None
+    unknown_template_token = None
     
     i = 0
     while i < len(args):
@@ -12132,11 +12345,26 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             template_file = arg
         elif arg.endswith('.sh') and launcher_file is None:
             launcher_file = arg
+        elif not arg.startswith('-') and unknown_template_token is None:
+            # Keep first unrecognized positional token for clearer diagnostics.
+            unknown_template_token = arg
         
         i += 1
     
+    # Allow template labels from embedded blocks (e.g., "opt input1").
+    if not template_file and unknown_template_token:
+        resolved_template = resolve_template_reference(context, unknown_template_token)
+        if resolved_template:
+            template_file = resolved_template
+
     if not template_file:
-        print("Error: No template file specified for calculation stage")
+        if unknown_template_token:
+            print(
+                f"Error: No template file specified for optimization stage. "
+                f"Got '{unknown_template_token}', expected .inp/.com/.gjf or an embedded template label"
+            )
+        else:
+            print("Error: No template file specified for optimization stage (.inp/.com/.gjf or embedded label)")
         return 1
     
     context.max_tries = max_stage_redos  # For compatibility with existing code
@@ -12144,34 +12372,34 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     # Process redo structures at the START of the stage (if need_recalculation exists)
     # This ensures that when the workflow restarts this stage after a similarity failure,
     # we immediately regenerate inputs and delete old outputs before checking completion
-    calc_dir = getattr(context, 'calculation_dir', 'calculation')
-    if not calc_dir:  # Handle empty string
-        calc_dir = 'calculation'
-    if os.path.exists(calc_dir):
-        redo_result = process_redo_structures(context, calc_dir, template_file)
+    optimization_dir_path = getattr(context, 'optimization_stage_dir', 'optimization')
+    if not optimization_dir_path:  # Handle empty string
+        optimization_dir_path = 'optimization'
+    if os.path.exists(optimization_dir_path):
+        redo_result = process_redo_structures(context, optimization_dir_path, template_file)
     
     
-    # Check if we're resuming and calculation directory already exists
+    # Check if we're resuming and optimization directory already exists
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
     cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
     
-    # Get the current stage key from context (e.g., "calculation_2" for first calc at position 2)
+    # Get the current stage key from context (e.g., "optimization_2" for first opt at position 2)
     stage_key = getattr(context, 'current_stage_key', '')
     
     # Get completed calculations from cache
     completed_calcs = cache.get('stages', {}).get(stage_key, {}).get('result', {}).get('completed_files', [])
-    calc_dir_exists = os.path.exists("calculation")
+    opt_dir_exists = os.path.exists("optimization")
     
-    # If resuming (cache exists + calc stage was started before), reuse existing directory  
-    # This works even if no calculations completed yet (e.g., interrupted during first calc)
+    # If resuming (cache exists + optimization stage was started before), reuse existing directory  
+    # This works even if no runs completed yet (e.g., interrupted during first opt)
     stage_was_started = stage_key in cache.get('stages', {})
     
     # Determine if this is a fresh start or resume
-    calc_dir = getattr(context, 'calculation_dir', None)
-    if calc_dir_exists and stage_was_started:
+    optimization_dir_path = getattr(context, 'optimization_stage_dir', None)
+    if opt_dir_exists and stage_was_started:
         # Use absolute path from context if available, otherwise use relative path
-        if not calc_dir:
-            calc_dir = "calculation"
+        if not optimization_dir_path:
+            optimization_dir_path = "optimization"
         
         # Check if redo structures exist (files scheduled for recalculation)
         redo_files = set()
@@ -12182,10 +12410,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         # Files with only .out.backup are being redone and should NOT be counted as completed
         actual_completed = []
         
-        # 1. Check calculation directory subfolders
-        if os.path.exists(calc_dir):
-            for item in os.listdir(calc_dir):
-                item_path = os.path.join(calc_dir, item)
+        # 1. Check optimization directory subfolders
+        if os.path.exists(optimization_dir_path):
+            for item in os.listdir(optimization_dir_path):
+                item_path = os.path.join(optimization_dir_path, item)
                 if os.path.isdir(item_path) and not item.startswith('_'):  # Skip _run_ directories
                     # Skip if this file is marked for redo
                     # Check both "item" AND "item_opt"/"item_calc" against redo_files
@@ -12200,14 +12428,14 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         if check_orca_terminated_normally_opi(out_file):
                             actual_completed.append(item)
             
-            # 1b. Check for flat files in calculation directory (e.g. opt_conf_1.out)
+            # 1b. Check for flat files in optimization directory (e.g. opt_conf_1.out)
             # This handles the case where calculations are not in subdirectories
-            for item in os.listdir(calc_dir):
+            for item in os.listdir(optimization_dir_path):
                 if item.endswith('.out') or item.endswith('.log'):
                     basename = os.path.splitext(item)[0]
                     # Skip if already found in subdir or marked for redo
                     if basename not in actual_completed and basename not in redo_files:
-                        out_file = os.path.join(calc_dir, item)
+                        out_file = os.path.join(optimization_dir_path, item)
                         # Verify completion (OPI-aware for ORCA 6.1+)
                         if item.endswith('.out'):
                             if check_orca_terminated_normally_opi(out_file):
@@ -12270,17 +12498,17 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         # CRITICAL: If we found NO completed files but input_files is very small,
         # this might be a redo scenario where all other files are already done
         # Count ALL subdirectories in calculation/ as potential completed files
-        if len(completed_calcs) == 0 and calc_dir_exists:
-            for item in os.listdir(calc_dir):
-                item_path = os.path.join(calc_dir, item)
+        if len(completed_calcs) == 0 and opt_dir_exists:
+            for item in os.listdir(optimization_dir_path):
+                item_path = os.path.join(optimization_dir_path, item)
                 if os.path.isdir(item_path) and not item.startswith('_'):
-                    # Even if no .out file, if the subdirectory exists, a calc was attempted
+                    # Even if no .out file, if the subdirectory exists, a run was attempted
                     # Check for .out.backup (means it's being redone)
                     # Check both "item" AND "item_opt"/"item_calc" against redo_files
                     redo_variants = [item, f"{item}_opt", f"{item}_calc"]
                     is_redo = any(variant in redo_files for variant in redo_variants)
                     if not is_redo and item not in actual_completed:
-                        # Count any subdirectory as a potential completed calc for total count
+                        # Count any subdirectory as a potential completed run for total count
                         backup_file = os.path.join(item_path, f"{item}.out.backup")
                         # Only count if it has either .out or .out.backup
                         out_file = os.path.join(item_path, f"{item}.out")
@@ -12289,15 +12517,16 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             completed_calcs = actual_completed
 
         
-        if completed_calcs:
-            print(f"\nResuming: Using existing calculation directory ({len(completed_calcs)} files already completed)\n")
-        else:
-            print(f"\nResuming: Using existing calculation directory\n")
+        if not workflow_concise:
+            if completed_calcs:
+                print(f"\nResuming: Using existing optimization directory ({len(completed_calcs)} files already completed)\n")
+            else:
+                print(f"\nResuming: Using existing optimization directory\n")
         
         # Clean up ORCA intermediate files at root level (they should not be there)
         excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.']
-        for item in os.listdir(calc_dir):
-            item_path = os.path.join(calc_dir, item)
+        for item in os.listdir(optimization_dir_path):
+            item_path = os.path.join(optimization_dir_path, item)
             if os.path.isfile(item_path) and any(pattern in item for pattern in excluded_patterns):
                 try:
                     os.remove(item_path)
@@ -12305,7 +12534,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     pass
         
         # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
-        for old_inp in glob.glob(os.path.join(calc_dir, "*.inp")) + glob.glob(os.path.join(calc_dir, "*.com")):
+        for old_inp in glob.glob(os.path.join(optimization_dir_path, "*.inp")) + glob.glob(os.path.join(optimization_dir_path, "*.com")):
             # Skip ORCA intermediate files (already handled above)
             if any(pattern in old_inp for pattern in excluded_patterns):
                 continue
@@ -12317,7 +12546,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             if basename in redo_files:
                 continue
                 
-            subdir = os.path.join(calc_dir, basename)
+            subdir = os.path.join(optimization_dir_path, basename)
             if os.path.isdir(subdir):
                 os.remove(old_inp)
     else:
@@ -12328,8 +12557,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 print("  Attempting to auto-detect ORCA installation...")
                 launcher_file = None
         
-        # Track existing calculation directories before running calculate_input_files
-        existing_calc_dirs = set(d for d in os.listdir('.') if d.startswith('calculation') and os.path.isdir(d))
+        # Track existing optimization directories before running calculate_input_files
+        existing_opt_dirs = set(d for d in os.listdir('.') if d.startswith('optimization') and os.path.isdir(d))
         
         # Get QM alias from context (read from input.in line 9)
         qm_alias = getattr(context, 'qm_alias', 'orca')
@@ -12340,7 +12569,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             # Try to auto-create launcher in a temp location first (don't interfere with directory naming)
             import tempfile
             with tempfile.TemporaryDirectory() as tmpdir:
-                auto_launcher_tmp = create_auto_launcher(tmpdir, "orca", qm_alias)
+                auto_launcher_tmp = create_auto_launcher(tmpdir, "orca", qm_alias, quiet=workflow_concise)
                 if auto_launcher_tmp:
                     # Read the launcher content to pass it later
                     with open(auto_launcher_tmp, 'r') as f:
@@ -12348,41 +12577,43 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     auto_launcher_created = True
         
         # Run calculation system creation with auto_select (in workflow mode)
-        status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="calculation", workflow_mode=True)
+        status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="optimization", workflow_mode=True)
         # Don't print result message in workflow mode - output is already shown
         
-        # Find the calculation directory that was just created (may be calculation, calculation_2, etc.)
-        current_calc_dirs = set(d for d in os.listdir('.') if d.startswith('calculation') and os.path.isdir(d))
-        new_calc_dirs = current_calc_dirs - existing_calc_dirs
-        if new_calc_dirs:
+        # Find the optimization directory that was just created (may be optimization, optimization_2, etc.)
+        current_opt_dirs = set(d for d in os.listdir('.') if d.startswith('optimization') and os.path.isdir(d))
+        new_opt_dirs = current_opt_dirs - existing_opt_dirs
+        if new_opt_dirs:
             # Use the newly created directory
-            calc_dir = sorted(new_calc_dirs)[-1]  # Get the highest numbered one
-        elif "calculation" in current_calc_dirs:
-            calc_dir = "calculation"
+            optimization_dir_path = sorted(new_opt_dirs)[-1]  # Get the highest numbered one
+        elif "optimization" in current_opt_dirs:
+            optimization_dir_path = "optimization"
         else:
-            calc_dir = None
+            optimization_dir_path = None
         
-        # If we auto-created a launcher, copy it to the actual calculation directory
-        if auto_launcher_created and calc_dir and os.path.exists(calc_dir):
-            launcher_dest = os.path.join(calc_dir, "launcher_orca.sh")
+        # If we auto-created a launcher, copy it to the actual optimization directory
+        if auto_launcher_created and optimization_dir_path and os.path.exists(optimization_dir_path):
+            launcher_dest = os.path.join(optimization_dir_path, "launcher_orca.sh")
             if not os.path.exists(launcher_dest):
                 with open(launcher_dest, 'w') as f:
                     f.write(auto_launcher_content)
                 os.chmod(launcher_dest, 0o755)
-                print(f"  Created auto-generated launcher: launcher_orca.sh")
+                if not workflow_concise:
+                    print(f"  Created auto-generated launcher: launcher_orca.sh")
     
-    if calc_dir and os.path.exists(calc_dir):
-        context.calculation_dir = calc_dir
+    if optimization_dir_path and os.path.exists(optimization_dir_path):
+        context.optimization_stage_dir = optimization_dir_path
         
         # Find and execute the launcher script
-        launcher_script = os.path.join(calc_dir, "launcher_orca.sh")
+        launcher_script = os.path.join(optimization_dir_path, "launcher_orca.sh")
         if not os.path.exists(launcher_script):
-            launcher_script = os.path.join(calc_dir, "launcher_gaussian.sh")
+            launcher_script = os.path.join(optimization_dir_path, "launcher_gaussian.sh")
         if not os.path.exists(launcher_script):
-            launcher_script = os.path.join(calc_dir, "launcher.sh")
+            launcher_script = os.path.join(optimization_dir_path, "launcher.sh")
         
         if os.path.exists(launcher_script):
-            print(f"\nExecuting calculations...\n")
+            if not workflow_concise:
+                print(f"\nExecuting calculations...\n")
             
             # Helper function to filter out ORCA intermediate files and rescue inputs
             def is_valid_input_file(filename):
@@ -12395,13 +12626,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             
             # Get list of input files to process
             # Check if files are at root level or in subdirectories (after sort command)
-            input_files = sorted([f for f in os.listdir(calc_dir) if is_valid_input_file(f)], key=natural_sort_key)
+            input_files = sorted([f for f in os.listdir(optimization_dir_path) if is_valid_input_file(f)], key=natural_sort_key)
             
             if not input_files:
                 # No input files at root - check if they're in subdirectories (sorted)
                 # Look for subdirectories with input files
-                for item in os.listdir(calc_dir):
-                    item_path = os.path.join(calc_dir, item)
+                for item in os.listdir(optimization_dir_path):
+                    item_path = os.path.join(optimization_dir_path, item)
                     if os.path.isdir(item_path):
                         subdir_files = [f for f in os.listdir(item_path) if is_valid_input_file(f)]
                         if subdir_files:
@@ -12418,12 +12649,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 qm_program = 'orca'  # Default
             
             # Get exclusions from cache (already loaded earlier)
-            # Use appropriate key based on which calculation stage this is
-            calc_num = getattr(context, 'calc_stage_number', 1)
-            if calc_num == 1:
-                excluded_numbers = cache.get('excluded_calculations', [])
+            # Use appropriate key based on which optimization stage this is
+            optimization_stage_num = getattr(context, 'optimization_stage_number', 1)
+            if optimization_stage_num == 1:
+                excluded_numbers = cache.get('excluded_optimizations', [])
             else:
-                excluded_numbers = cache.get('excluded_calculations_2', [])
+                excluded_numbers = cache.get('excluded_optimizations_2', [])
             
             # Apply exclusion filtering to completed_calcs and input_files
             completed_calcs = [f for f in completed_calcs if not match_exclusion(f, excluded_numbers)]
@@ -12453,10 +12684,10 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             if workflow_concise and callable(progress_cb):
                 progress_cb(f"{initial_completed_count}/{num_inputs} ...")
             
-            if completed_calcs:
+            if completed_calcs and not workflow_concise:
                 print(f"Resuming: {len(completed_calcs)}/{num_inputs} calculations already completed")
             
-            if excluded_numbers:
+            if excluded_numbers and not workflow_concise:
                 print(f"Exclusions active: {excluded_numbers}")
                 print()
             
@@ -12481,14 +12712,15 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 for idx, input_file in enumerate(input_files):
                     # Skip excluded calculations
                     if match_exclusion(input_file, excluded_numbers):
-                        print(f"  Skipping: {input_file} (excluded)")
+                        if not workflow_concise:
+                            print(f"  Skipping: {input_file} (excluded)")
                         continue
                     
                     # Handle both root-level and subdirectory files
                     basename = os.path.splitext(input_file)[0]
                     output_file = basename + ('.out' if qm_program == 'orca' else '.log')
-                    input_path = os.path.join(calc_dir, input_file)
-                    output_path = os.path.join(calc_dir, output_file)
+                    input_path = os.path.join(optimization_dir_path, input_file)
+                    output_path = os.path.join(optimization_dir_path, output_file)
                     
                     # Skip if output already exists AND is successfully completed
                     # This handles redo scenarios where failed .out files were deleted
@@ -12514,7 +12746,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     progress_cb = context.update_progress
                     if workflow_concise and callable(progress_cb):
                         progress_cb(f"{initial_completed_count + num_completed}/{num_inputs} ...")
-                    else:
+                    elif not workflow_concise:
                         print(f"  Running: {display_name}...", end='', flush=True)
                     
                     # ═══════════════════════════════════════════════════════════
@@ -12542,12 +12774,12 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         if '/' in input_file or '\\' in input_file:
                             # File is in subdirectory (e.g., "opt_conf_1/opt_conf_1.inp")
                             calc_subdir = os.path.dirname(input_file)
-                            calc_working_dir = os.path.join(calc_dir, calc_subdir)
+                            calc_working_dir = os.path.join(optimization_dir_path, calc_subdir)
                             input_file_relative = os.path.basename(input_file)
                             output_file_relative = os.path.basename(output_file)
                             script_basename = os.path.splitext(os.path.basename(input_file))[0]
                         else:
-                            calc_working_dir = calc_dir
+                            calc_working_dir = optimization_dir_path
                             input_file_relative = input_file
                             output_file_relative = output_file
                             script_basename = basename
@@ -12680,8 +12912,8 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     print(f"\nStatus: {total_completed}/{num_inputs} calculations completed")
                 
                 # Store for protocol summary (use total)
-                context.calc_completed = total_completed
-                context.calc_total = num_inputs
+                context.optimization_completed = total_completed
+                context.optimization_total = num_inputs
                 
                 # Handle failed calculations
                 if failed_calculations:
@@ -12716,7 +12948,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                          if f.startswith("similarity") and os.path.isdir(os.path.join(parent_dir, f))]
                             if sim_folders:
                                 sim_folder = sim_folders[0]
-                                context.calc_sim_folder = sim_folder
+                                context.optimization_sim_folder = sim_folder
                                 # Set pending for next similarity stage
                                 context.pending_similarity_folder = sim_folder
                         else:
@@ -12725,13 +12957,13 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                 for folder in os.listdir("good_structures"):
                                     src_folder = os.path.join("good_structures", folder)
                                     if os.path.isdir(src_folder):
-                                        dest_folder = os.path.join(calc_dir, folder)
+                                        dest_folder = os.path.join(optimization_dir_path, folder)
                                         if not os.path.exists(dest_folder):
                                             shutil.copytree(src_folder, dest_folder)
                                 # Clean up good_structures folder
                                 shutil.rmtree("good_structures")
                             
-                            os.chdir(calc_dir)
+                            os.chdir(optimization_dir_path)
                             
                             # Group files by base names into subfolders (silent in workflow)
                             import io
@@ -12761,7 +12993,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                                         match = re.search(r'to\s+(similarity[^\s]*)', line)
                                         if match:
                                             sim_folder = match.group(1)
-                                            context.calc_sim_folder = sim_folder
+                                            context.optimization_sim_folder = sim_folder
                                             # Also set as pending for next similarity stage
                                             sim_base = sim_folder.split('/')[0] if '/' in sim_folder else sim_folder
                                             context.pending_similarity_folder = sim_base
@@ -12785,7 +13017,7 @@ def execute_calculation_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             return 1
             
     else:
-        print(f"Warning: Calculation directory not found")
+        print(f"Warning: Optimization directory not found")
         return 1
     
     # Clean up retry_input folder if it exists
@@ -12800,27 +13032,48 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     Runs from the similarity/ folder which contains orca_out_N/ subfolders.
     Supports both similarity/ (first run) and similarity_2/ (after optimization).
     """
+    def _count_latest_similarity_representatives(sim_dir: str) -> Tuple[Optional[int], Optional[int]]:
+        """Return counts for latest motifs_* and umotifs_* representative xyz files."""
+        try:
+            motif_dirs = sorted(glob.glob(os.path.join(sim_dir, "motifs_*")))
+            umotif_dirs = sorted(glob.glob(os.path.join(sim_dir, "umotifs_*")))
+
+            motif_count: Optional[int] = None
+            umotif_count: Optional[int] = None
+
+            if motif_dirs:
+                latest_motif_dir = motif_dirs[-1]
+                motif_count = len(glob.glob(os.path.join(latest_motif_dir, "motif_*.xyz")))
+
+            if umotif_dirs:
+                latest_umotif_dir = umotif_dirs[-1]
+                umotif_count = len(glob.glob(os.path.join(latest_umotif_dir, "umotif_*.xyz")))
+
+            return motif_count, umotif_count
+        except Exception:
+            return None, None
+
     # Determine which similarity folder to use dynamically based on the most recent stage
-    # Priority: use the most recently set similarity folder (from calc or opt that just ran)
+    # Priority: use the most recently set similarity folder (from optimization/refinement that just ran)
     similarity_base = None
     
-    # Check if there's a pending_similarity_folder (set by calc/opt organize step)
+    # Check if there's a pending_similarity_folder (set by optimization/refinement organize step)
     if hasattr(context, 'pending_similarity_folder') and context.pending_similarity_folder:
         similarity_base = context.pending_similarity_folder
         # Clear it after use so it doesn't affect next stage
         context.pending_similarity_folder = None
     
-    # Fallback: check what calc_sim_folder or opt_sim_folder were set
+    # Fallback: check what optimization_sim_folder or refinement_sim_folder were set
     if not similarity_base:
-        # If opt_sim_folder is more recent (set after calc_sim_folder), prefer it
-        if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
-            opt_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
+        # If refinement_sim_folder is more recent (set after optimization_sim_folder), prefer it
+        if hasattr(context, 'refinement_sim_folder') and context.refinement_sim_folder:
+            opt_base = context.refinement_sim_folder.split('/')[0] if '/' in context.refinement_sim_folder else context.refinement_sim_folder
             if os.path.exists(opt_base):
                 similarity_base = opt_base
         
-        # Otherwise use calc_sim_folder
-        if not similarity_base and hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
-            calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+        # Otherwise use optimization_sim_folder
+        if not similarity_base and hasattr(context, 'optimization_sim_folder') and context.optimization_sim_folder:
+            calc_base = context.optimization_sim_folder.split('/')[0] if '/' in context.optimization_sim_folder else context.optimization_sim_folder
             if os.path.exists(calc_base):
                 similarity_base = calc_base
     
@@ -13039,6 +13292,11 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 match = re.search(r'(\d+)\s+representatives', line)
                 if match:
                     context.sim_motifs_created = int(match.group(1))
+
+        # Persist latest motif/umotif counts for compact workflow progress display.
+        motif_count, umotif_count = _count_latest_similarity_representatives(similarity_base)
+        context.last_similarity_motif_count = motif_count
+        context.last_similarity_umotif_count = umotif_count
         
         if verbose:
             print("\n✓ Similarity analysis completed")
@@ -13124,9 +13382,9 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         print(f"Error running similarity analysis: {e}")
         return 1
 
-def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
-    """Execute optimization stage (for motifs from similarity clustering)."""
-    # Very similar to calculation stage, but uses motifs from similarity analysis
+def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int:
+    """Execute refinement stage (for motifs from similarity clustering)."""
+    # Very similar to optimization stage, but uses motifs from similarity analysis
     
     # Store context globally for helper functions
     sys._current_workflow_context = context  # type: ignore[attr-defined]
@@ -13156,15 +13414,15 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     context.use_skipped_threshold = (max_skipped is not None)
     
     if not template_inp:
-        print("Error: Optimization requires template input file")
+        print("Error: Refinement requires template input file or embedded template label")
         return 1
-    
-    # Convert template to absolute path
-    template_inp = os.path.abspath(template_inp)
-    
-    if not os.path.exists(template_inp):
-        print(f"Error: Template file not found: {template_inp}")
+
+    # Resolve path or embedded label from the workflow input file.
+    resolved_template = resolve_template_reference(context, template_inp)
+    if not resolved_template:
+        print(f"Error: Template file/label not found: {template_inp}")
         return 1
+    template_inp = resolved_template
     
     # Handle launcher: if not provided, auto-detect ORCA and create launcher
     if launcher_sh:
@@ -13182,26 +13440,27 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         opt_dir = "optimization"
         if not os.path.exists(opt_dir):
             os.makedirs(opt_dir, exist_ok=True)
-        auto_launcher = create_auto_launcher(opt_dir, "orca", qm_alias)
+        auto_launcher = create_auto_launcher(opt_dir, "orca", qm_alias, quiet=workflow_concise)
         if auto_launcher:
             launcher_sh = auto_launcher
-            print(f"  Created auto-generated launcher: {os.path.basename(auto_launcher)}")
+            if not workflow_concise:
+                print(f"  Created auto-generated launcher: {os.path.basename(auto_launcher)}")
         else:
             print("Error: No launcher script provided and could not auto-detect ORCA")
             return 1
     
     # CRITICAL: Optimization needs to READ motifs from calculation's similarity folder
-    # The calculation stage created motifs in similarity/motifs_XX/ (or umotifs in similarity_N/)
+    # The optimization stage created motifs in similarity/motifs_XX/ (or umotifs in similarity_N/)
     # Optimization will READ from similarity/ and WRITE outputs to similarity_2/ (or next numbered)
     # The subsequent similarity will create umotifs_YY/ (since input came from optimization)
     
     # Step 1: Find where the MOTIFS are (from calculation's similarity stage)
     motifs_source_folder = None
     
-    # Check if calculation stage set a similarity folder
-    if hasattr(context, 'calc_sim_folder') and context.calc_sim_folder:
+    # Check if optimization stage set a similarity folder
+    if hasattr(context, 'optimization_sim_folder') and context.optimization_sim_folder:
         # Extract base folder (e.g., "similarity" from "similarity/orca_out_10")
-        calc_base = context.calc_sim_folder.split('/')[0] if '/' in context.calc_sim_folder else context.calc_sim_folder
+        calc_base = context.optimization_sim_folder.split('/')[0] if '/' in context.optimization_sim_folder else context.optimization_sim_folder
         motifs_source_folder = calc_base
     else:
         # Fallback: search for existing similarity folders with motifs
@@ -13242,10 +13501,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     # Step 3: Determine where optimization OUTPUTS will go
     # This is typically the next similarity folder (similarity_2, similarity_3, etc.)
     # CRITICAL: Only reuse context.similarity_dir if it's from THIS stage's redo loop
-    # Don't use the calculation stage's similarity_dir!
-    if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+    # Don't use the optimization stage's similarity_dir!
+    if hasattr(context, 'refinement_sim_folder') and context.refinement_sim_folder:
         # Already calculated for this optimization stage - use it
-        used_sim_folder = context.opt_sim_folder
+        used_sim_folder = context.refinement_sim_folder
     else:
         # Calculate next folder for outputs based on where motifs came from
         if motifs_source_folder == "similarity":
@@ -13259,13 +13518,13 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             else:
                 used_sim_folder = "similarity_2"
     
-    # Store in opt_sim_folder (optimization's dedicated variable)
-    context.opt_sim_folder = used_sim_folder
+    # Store in refinement_sim_folder (optimization's dedicated variable)
+    context.refinement_sim_folder = used_sim_folder
     # Also update similarity_dir so the similarity stage knows where to look
     context.similarity_dir = used_sim_folder
     
     # Store motifs source in context
-    context.opt_motifs_source = motif_dir
+    context.refinement_motifs_source = motif_dir
     
     # CRITICAL: When resuming optimization stage (with -i flag), clean the OUTPUT similarity folder
     # This must happen BEFORE process_optimization_redo() checks for skipped_structures
@@ -13297,7 +13556,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     # Process redo structures at the START of the stage (if need_recalculation exists)
     # This ensures that when the workflow restarts this stage after a similarity failure,
     # we immediately regenerate inputs and delete old outputs before checking completion
-    opt_dir = getattr(context, 'optimization_dir', 'optimization')
+    opt_dir = getattr(context, 'refinement_stage_dir', 'optimization')
     if not opt_dir:  # Handle empty string
         opt_dir = 'optimization'
     
@@ -13311,7 +13570,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             context.recalculated_files = None
         
         # Clean up any old input files at the root level (they're now in subdirectories after calculations run)
-        # This matches execute_calculation_stage logic to prevent duplicates
+        # This matches execute_optimization_stage logic to prevent duplicates
         # Note: Do NOT clean redo files here - they need to be run first!
         # Cleanup happens AFTER sorting when files are moved to subdirectories
         if not redo_result:
@@ -13609,18 +13868,18 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         parent_dir = os.getcwd()
         
         # Determine which similarity folder belongs to THIS optimization stage
-        opt_sim_folder = getattr(context, 'opt_sim_folder', None)
+        refinement_sim_folder = getattr(context, 'refinement_sim_folder', None)
         
         # CRITICAL: Strip orca_out_X suffix if present
-        # organize step may set opt_sim_folder to "similarity_2/orca_out_5"
+        # organize step may set refinement_sim_folder to "similarity_2/orca_out_5"
         # but we need just "similarity_2" to scan for orca_out subdirectories
-        if opt_sim_folder and '/' in opt_sim_folder:
-            opt_sim_folder = opt_sim_folder.split('/')[0]
+        if refinement_sim_folder and '/' in refinement_sim_folder:
+            refinement_sim_folder = refinement_sim_folder.split('/')[0]
         
-        if not opt_sim_folder:
+        if not refinement_sim_folder:
             # Calculate the expected folder based on motifs source
-            if hasattr(context, 'opt_motifs_source'):
-                motifs_source = context.opt_motifs_source
+            if hasattr(context, 'refinement_motifs_source'):
+                motifs_source = context.refinement_motifs_source
                 # Extract base folder (e.g., "similarity" from "similarity/motifs_03/")
                 if '/' in motifs_source:
                     calc_base = motifs_source.split('/')[0]
@@ -13629,21 +13888,21 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # Optimization outputs go to the NEXT similarity folder
                 if calc_base == "similarity":
-                    opt_sim_folder = "similarity_2"
+                    refinement_sim_folder = "similarity_2"
                 else:
                     # Extract number and increment
                     match = re.search(r'similarity_(\d+)', calc_base)
                     if match:
                         next_num = int(match.group(1)) + 1
-                        opt_sim_folder = f"similarity_{next_num}"
+                        refinement_sim_folder = f"similarity_{next_num}"
                     else:
-                        opt_sim_folder = "similarity_2"
+                        refinement_sim_folder = "similarity_2"
         
         # Only check the optimization's designated similarity folder
-        if opt_sim_folder and os.path.isdir(opt_sim_folder):
-            for subitem in os.listdir(opt_sim_folder):
+        if refinement_sim_folder and os.path.isdir(refinement_sim_folder):
+            for subitem in os.listdir(refinement_sim_folder):
                 if subitem.startswith('orca_out_') or subitem.startswith('gaussian_out_') or subitem.startswith('calc_out_'):
-                    out_dir = os.path.join(opt_sim_folder, subitem)
+                    out_dir = os.path.join(refinement_sim_folder, subitem)
                     if os.path.isdir(out_dir):
                         for f in os.listdir(out_dir):
                             if f.endswith('.out') or f.endswith('.log'):
@@ -13666,7 +13925,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         # Update completed_opts to match reality
         completed_opts = actual_completed
         
-        excluded_numbers = cache.get('excluded_optimizations', [])
+        excluded_numbers = cache.get('excluded_refinements', [])
         
         # Apply exclusion filtering to completed_opts
         completed_opts = [f for f in completed_opts if not match_exclusion(f, excluded_numbers)]
@@ -13696,10 +13955,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         if workflow_concise and callable(progress_cb):
             progress_cb(f"{initial_completed_count}/{num_inputs} ...")
         
-        if completed_opts:
+        if completed_opts and not workflow_concise:
             print(f"Resuming: {len(completed_opts)}/{num_inputs} optimizations already completed")
         
-        if excluded_numbers:
+        if excluded_numbers and not workflow_concise:
             print(f"Exclusions active: {excluded_numbers}")
             print()
         
@@ -13728,7 +13987,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                                 basename in context.recalculated_files)
                 if not is_redo_file:
                     if not is_redo:
-                        print(f"  Skipping: {input_file} (excluded)")
+                        if not workflow_concise:
+                            print(f"  Skipping: {input_file} (excluded)")
                     continue
             
             output_file = basename + ('.out' if qm_program == 'orca' else '.log')
@@ -13781,7 +14041,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             progress_cb = context.update_progress
             if workflow_concise and callable(progress_cb):
                 progress_cb(f"{initial_completed_count + num_completed}/{num_inputs} ...")
-            else:
+            elif not workflow_concise:
                 print(f"  Running: {display_name}...", end='', flush=True)
             
             # ═══════════════════════════════════════════════════════════
@@ -13948,8 +14208,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             print(f"\nStatus: {total_completed}/{num_inputs} optimizations completed")
         
         # Store for protocol summary (use total)
-        context.opt_completed = total_completed
-        context.opt_total = num_inputs
+        context.refinement_completed = total_completed
+        context.refinement_total = num_inputs
         
         # Clean up old failed files if they exist and all succeeded
         if not failed_optimizations:
@@ -13987,10 +14247,10 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             # Organize results - run full sort/organize for both redo and normal mode
             saved_cwd = os.getcwd()
             try:
-                # Determine similarity folder - use opt_sim_folder (set earlier in this function)
-                if hasattr(context, 'opt_sim_folder') and context.opt_sim_folder:
+                # Determine similarity folder - use refinement_sim_folder (set earlier in this function)
+                if hasattr(context, 'refinement_sim_folder') and context.refinement_sim_folder:
                     # Use the folder determined at the start of execute_optimization_stage
-                    sim_base = context.opt_sim_folder.split('/')[0] if '/' in context.opt_sim_folder else context.opt_sim_folder
+                    sim_base = context.refinement_sim_folder.split('/')[0] if '/' in context.refinement_sim_folder else context.refinement_sim_folder
                 else:
                     # Calculate next similarity folder
                     root_dir = os.getcwd()
@@ -14011,7 +14271,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 
                 # Get exclusions from cache to filter output files
                 cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
-                excluded_numbers = cache.get('excluded_optimizations', [])
+                excluded_numbers = cache.get('excluded_refinements', [])
                 
                 # Group files by base names into subfolders (silent in workflow)
                 import io
@@ -14075,14 +14335,14 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             match = re.search(r'to\s+(similarity[^\s]*)', line)
                             if match:
                                 sim_folder = match.group(1)
-                                context.opt_sim_folder = sim_folder
+                                context.refinement_sim_folder = sim_folder
                                 # Also set as pending for next similarity stage
                                 sim_base = sim_folder.split('/')[0] if '/' in sim_folder else sim_folder
                                 context.pending_similarity_folder = sim_base
                             break
                 
                 # Note: File update messages are now handled within collect_out_files_with_tracking
-                # No need to print them again here (unlike calculation stage where we copy manually)
+                # No need to print them again here (unlike optimization stage where we copy manually)
                 
                 # Clean up orphaned root input files after sorting
                 # Files should now be in subdirectories, so root copies are duplicates
@@ -14134,7 +14394,7 @@ def main_ascec_integrated():
         if not existing_caches:
             print(f"Error: No active protocol found")
             print(f"No protocol_*.pkl cache files found in current directory")
-            print("This command is used to exclude calculations from a paused protocol.")
+            print("This command is used to exclude stage inputs from a paused protocol.")
             sys.exit(1)
         
         # Find cache that matches this protocol file
@@ -14165,21 +14425,21 @@ def main_ascec_integrated():
             print(f"Protocol Exclusion Manager - {protocol_file}")
             print("=" * 60)
             
-            # Show excluded files for calculation
-            calc_excluded = cache.get('excluded_calculations', [])
-            calc2_excluded = cache.get('excluded_calculations_2', [])
-            if calc_excluded:
-                print(f"\nExcluded calculations (1st stage): {calc_excluded}")
+            # Show excluded files for optimization
+            optimization_excluded = cache.get('excluded_optimizations', [])
+            optimization2_excluded = cache.get('excluded_optimizations_2', [])
+            if optimization_excluded:
+                print(f"\nExcluded optimizations (1st stage): {optimization_excluded}")
             else:
-                print("\nNo calculations (1st stage) excluded")
+                print("\nNo optimizations (1st stage) excluded")
             
-            if calc2_excluded:
-                print(f"Excluded calculations (2nd stage): {calc2_excluded}")
+            if optimization2_excluded:
+                print(f"Excluded optimizations (2nd stage): {optimization2_excluded}")
             else:
-                print("No calculations (2nd stage) excluded")
+                print("No optimizations (2nd stage) excluded")
             
             # Show excluded files for optimization
-            opt_excluded = cache.get('excluded_optimizations', [])
+            opt_excluded = cache.get('excluded_refinements', [])
             if opt_excluded:
                 print(f"Excluded optimizations: {opt_excluded}")
             else:
@@ -14207,17 +14467,11 @@ def main_ascec_integrated():
         
         stage_type = sys.argv[3].lower()
 
-        # Normalize legacy aliases
-        if stage_type == 'calc':
-            stage_type = 'opt'
-        elif stage_type == 'calc2':
-            stage_type = 'opt2'
-        
         if stage_type == "clear":
             # Clear all exclusions
-            cache['excluded_calculations'] = []
-            cache['excluded_calculations_2'] = []
             cache['excluded_optimizations'] = []
+            cache['excluded_optimizations_2'] = []
+            cache['excluded_refinements'] = []
             save_protocol_cache(cache, cache_file)
             print("✓ All exclusions cleared")
             sys.exit(0)
@@ -14241,15 +14495,15 @@ def main_ascec_integrated():
         # Check for stage-specific clear
         if pattern.lower() == 'clear':
             if stage_type == 'opt':
-                cache['excluded_calculations'] = []
+                cache['excluded_optimizations'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for opt (1st stage)")
             elif stage_type == 'opt2':
-                cache['excluded_calculations_2'] = []
+                cache['excluded_optimizations_2'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for opt2 (2nd stage)")
             else:  # ref
-                cache['excluded_optimizations'] = []
+                cache['excluded_refinements'] = []
                 save_protocol_cache(cache, cache_file)
                 print("✓ Cleared exclusions for ref")
             sys.exit(0)
@@ -14258,21 +14512,21 @@ def main_ascec_integrated():
             excluded_numbers = parse_exclusion_pattern(pattern)
             
             if stage_type == 'opt':
-                key = 'excluded_calculations'
+                key = 'excluded_optimizations'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
                 print(f"✓ Excluded optimizations (1st stage) matching: {excluded_numbers}")
                 print(f"  Total excluded: {cache[key]}")
             elif stage_type == 'opt2':
-                key = 'excluded_calculations_2'
+                key = 'excluded_optimizations_2'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
                 print(f"✓ Excluded optimizations (2nd stage) matching: {excluded_numbers}")
                 print(f"  Total excluded: {cache[key]}")
             else:  # ref
-                key = 'excluded_optimizations'
+                key = 'excluded_refinements'
                 existing = cache.get(key, [])
                 existing.extend(excluded_numbers)
                 cache[key] = sorted(list(set(existing)))
@@ -14417,8 +14671,8 @@ def main_ascec_integrated():
                                        key=lambda k: int(k.split('_')[1]))
                 
                 # Build a map of stage types for user guidance
-                calc_stages = [k for k in all_stage_keys if k.startswith('calculation_')]
-                opt_stages = [k for k in all_stage_keys if k.startswith('optimization_')]
+                optimization_stages = [k for k in all_stage_keys if k.startswith('optimization_')]
+                refinement_stages = [k for k in all_stage_keys if k.startswith('refinement_')]
                 
                 # Find matching stage(s) to restart by stage number
                 stages_to_restart = []
@@ -14434,69 +14688,65 @@ def main_ascec_integrated():
                 except ValueError:
                     # Not a number - match by stage alias
                     # New naming:
-                    #   opt -> calculation stage
-                    #   ref -> optimization stage
-                    # Backward compatibility:
-                    #   calc -> calculation stage
-                    #   opt (legacy) may also refer to optimization in old docs
-                    if restart_stage in ['opt', 'opt1', 'calc', 'calc1']:
-                        # Find first calculation stage (Optimization in UI)
-                        if calc_stages:
-                            stages_to_restart.append(calc_stages[0])
-                    elif restart_stage in ['opt2', 'calc2']:
-                        # Find second calculation stage
-                        if len(calc_stages) >= 2:
-                            stages_to_restart.append(calc_stages[1])
-                        elif len(calc_stages) == 1:
-                            print(f"\nError: Only one calculation stage exists: {calc_stages[0]}")
+                    #   opt -> optimization stage
+                    #   ref -> refinement stage
+                    if restart_stage in ['opt', 'opt1']:
+                        # Find first optimization stage
+                        if optimization_stages:
+                            stages_to_restart.append(optimization_stages[0])
+                        else:
+                            print(f"\nError: No optimization stages found in cache")
+                            sys.exit(1)
+                    elif restart_stage == 'opt2':
+                        # Find second optimization stage
+                        if len(optimization_stages) >= 2:
+                            stages_to_restart.append(optimization_stages[1])
+                        elif len(optimization_stages) == 1:
+                            print(f"\nError: Only one optimization stage exists: {optimization_stages[0]}")
                             print(f"There is no '{restart_stage}' stage in this protocol")
                             sys.exit(1)
                         else:
-                            print(f"\nError: No calculation stages found in cache")
+                            print(f"\nError: No optimization stages found in cache")
                             sys.exit(1)
-                    elif (restart_stage.startswith('opt') and len(restart_stage) > 3) or \
-                         (restart_stage.startswith('calc') and len(restart_stage) > 4):
-                        # Handle calc3, calc4, etc.
+                    elif restart_stage.startswith('opt') and len(restart_stage) > 3:
+                        # Handle opt3, opt4, etc.
                         try:
-                            if restart_stage.startswith('opt'):
-                                calc_idx = int(restart_stage[3:]) - 1
-                            else:
-                                calc_idx = int(restart_stage[4:]) - 1
-                            if 0 <= calc_idx < len(calc_stages):
-                                stages_to_restart.append(calc_stages[calc_idx])
+                            opt_idx = int(restart_stage[3:]) - 1
+                            if 0 <= opt_idx < len(optimization_stages):
+                                stages_to_restart.append(optimization_stages[opt_idx])
                             else:
                                 print(f"\nError: {restart_stage} not found")
-                                print(f"There are {len(calc_stages)} calculation stage(s): {', '.join(calc_stages)}")
+                                print(f"There are {len(optimization_stages)} optimization stage(s): {', '.join(optimization_stages)}")
                                 sys.exit(1)
                         except ValueError:
                             pass
                     elif restart_stage in ['ref', 'ref1']:
-                        # Find first optimization stage (Refinement in UI)
-                        if opt_stages:
-                            stages_to_restart.append(opt_stages[0])
+                        # Find first refinement stage
+                        if refinement_stages:
+                            stages_to_restart.append(refinement_stages[0])
                         else:
-                            print(f"\nError: No optimization stages found in cache")
+                            print(f"\nError: No refinement stages found in cache")
                             sys.exit(1)
                     elif restart_stage == 'ref2':
-                        # Find second optimization stage
-                        if len(opt_stages) >= 2:
-                            stages_to_restart.append(opt_stages[1])
-                        elif len(opt_stages) == 1:
-                            print(f"\nError: Only one optimization stage exists: {opt_stages[0]}")
+                        # Find second refinement stage
+                        if len(refinement_stages) >= 2:
+                            stages_to_restart.append(refinement_stages[1])
+                        elif len(refinement_stages) == 1:
+                            print(f"\nError: Only one refinement stage exists: {refinement_stages[0]}")
                             print(f"There is no 'ref2' stage in this protocol")
                             sys.exit(1)
                         else:
-                            print(f"\nError: No optimization stages found in cache")
+                            print(f"\nError: No refinement stages found in cache")
                             sys.exit(1)
                     elif restart_stage.startswith('ref') and len(restart_stage) > 3:
-                        # Handle opt3, opt4, etc.
+                        # Handle ref3, ref4, etc.
                         try:
-                            opt_idx = int(restart_stage[3:]) - 1
-                            if 0 <= opt_idx < len(opt_stages):
-                                stages_to_restart.append(opt_stages[opt_idx])
+                            ref_idx = int(restart_stage[3:]) - 1
+                            if 0 <= ref_idx < len(refinement_stages):
+                                stages_to_restart.append(refinement_stages[ref_idx])
                             else:
                                 print(f"\nError: {restart_stage} not found")
-                                print(f"There are {len(opt_stages)} optimization stage(s): {', '.join(opt_stages)}")
+                                print(f"There are {len(refinement_stages)} refinement stage(s): {', '.join(refinement_stages)}")
                                 sys.exit(1)
                         except ValueError:
                             pass
@@ -14546,7 +14796,7 @@ def main_ascec_integrated():
                             similarity_dirs = sorted(glob.glob('similarity*'))
                             for sim_dir in similarity_dirs:
                                 if os.path.isdir(sim_dir):
-                                    # Check if it's similarity_N where N > calc similarity number
+                                    # Check if it's similarity_N where N > optimization-stage similarity index
                                     if '_' in sim_dir:
                                         try:
                                             sim_num = int(sim_dir.split('_')[1])
@@ -14584,25 +14834,25 @@ def main_ascec_integrated():
                         stage_num = stage_key.split('_')[1]
                         print(f"  [{stage_num}] {stage_type}")
                     
-                    # Show calculation-specific guidance
-                    if calc_stages:
-                        print(f"\nCalculation stages ({len(calc_stages)} total):")
-                        for i, calc_stage in enumerate(calc_stages, 1):
-                            stage_num = calc_stage.split('_')[1]
-                            if i == 1:
-                                print(f"  calc or calc1 -> stage {stage_num}")
-                            else:
-                                print(f"  calc{i} -> stage {stage_num}")
-                    
                     # Show optimization-specific guidance
-                    if opt_stages:
-                        print(f"\nOptimization stages ({len(opt_stages)} total):")
-                        for i, opt_stage in enumerate(opt_stages, 1):
+                    if optimization_stages:
+                        print(f"\nOptimization stages ({len(optimization_stages)} total):")
+                        for i, opt_stage in enumerate(optimization_stages, 1):
                             stage_num = opt_stage.split('_')[1]
                             if i == 1:
                                 print(f"  opt or opt1 -> stage {stage_num}")
                             else:
                                 print(f"  opt{i} -> stage {stage_num}")
+
+                    # Show refinement-specific guidance
+                    if refinement_stages:
+                        print(f"\nRefinement stages ({len(refinement_stages)} total):")
+                        for i, ref_stage in enumerate(refinement_stages, 1):
+                            stage_num = ref_stage.split('_')[1]
+                            if i == 1:
+                                print(f"  ref or ref1 -> stage {stage_num}")
+                            else:
+                                print(f"  ref{i} -> stage {stage_num}")
                     
                     print(f"\nUsage:")
                     print(f"  ascec04 {input_file} protocol <stage_number>")
@@ -14690,9 +14940,9 @@ COMMANDS:
     input.asc rN --boxP         N replicas with P%% box packing density
     input.asc box               Analyze simulation box requirements
   
-  Analysis:
-    calc TEMPLATE LAUNCHER      Generate quantum chemistry inputs from results
-    opt TEMPLATE LAUNCHER       Generate optimization inputs from motifs
+    Analysis:
+        opt TEMPLATE LAUNCHER       Generate optimization inputs from results
+        ref TEMPLATE LAUNCHER       Generate refinement inputs from motifs
     sort [--nosum|--justsum]    Organize outputs and generate summary reports
     simil [OPTIONS]             Clustering analysis (see: ascec simil --help)
   
@@ -14708,8 +14958,8 @@ WORKFLOW:
   Typical manual workflow:
     1. ascec input.asc box      → validate simulation parameters
     2. ascec input.asc r3       → perform 3 replicated samplings
-    3. ascec calc T.inp L.sh    → generate QM input files
-    4. [Execute quantum calculations externally]
+    3. ascec opt T.inp L.sh     → generate QM input files
+    4. [Execute quantum evaluations externally]
     5. ascec sort               → organize results and generate summaries
     6. ascec simil --th=0.9     → cluster structures by similarity
 
@@ -14726,7 +14976,7 @@ WORKFLOW:
     ascec input.asc protocol 2 -i    → resume interactively
 
     Pipeline stages:
-      1. Annealing → 2. Calculation → 3. Similarity → 4. Optimization → 5. Similarity(2)
+    1. Annealing → 2. Optimization → 3. Similarity → 4. Refinement → 5. Similarity(2)
 
   Excluding problematic structures:
     For resumable protocols, exclude structures that cause errors:
@@ -14740,28 +14990,28 @@ WORKFLOW:
 PROTOCOL FLAGS (optional):
   These flags modify stage behavior. Defaults shown in [brackets].
 
-  Calculation/Optimization stages:
+    Optimization/Refinement stages:
     --critical=N    Max %% of "critical" structures (imaginary freqs) [0]
-    --redo=N        Max stage redos (recalc all failed structures) [3]
+    --redo=N        Max stage redos (re-run all failed structures) [3]
     --skipped=N     Max %% of skipped structures (use instead of --critical)
 
   Launch failure handling:
-    Calculations that fail to start (instant crashes) are automatically
-    retried up to 10 times. Once a calculation starts running normally,
+    Runs that fail to start (instant crashes) are automatically
+    retried up to 10 times. Once a run starts running normally,
     it will not be retried regardless of exit code.
 
   Example protocol with custom flags:
-    calc template.inp launcher.sh , similarity --th=0.9 , \\
+    opt template.inp launcher.sh , similarity --th=0.9 , \\
     opt --critical=5 template.inp launcher.sh
 
   Launcher file is OPTIONAL:
     If omitted, ASCEC auto-detects ORCA from PATH and generates a launcher.
-    Example: calc template.inp , similarity --th=0.9
+    Example: opt template.inp , similarity --th=0.9
 
 TEMPLATE DIRECTIVES:
   Add these comments to your ORCA template (.inp) for rescue hessian behavior:
 
-  #rescue(METHOD)       Specify method for rescue Hessian calculation
+    #rescue(METHOD)       Specify method for rescue Hessian evaluation
   #rescue(METHOD,num)   Use NumFreq instead of Freq for Hessian
 
   Default rescue method: HF-3c with Freq
@@ -14790,7 +15040,7 @@ OPTIONS:
 EXAMPLES:
   ascec w6.in r5                      Perform 5 replicated water hexamer runs
   ascec diagram --scaled              Generate auto-scaled energy diagrams
-  ascec calc opt.inp launcher.sh      Create inputs with launcher script
+    ascec opt opt.inp launcher.sh       Create inputs with launcher script
   ascec sort                          Organize results with summary
   ascec simil --th=0.95 --rmsd=0.5    Cluster with 0.95 th similarity + RMSD
 
@@ -14807,7 +15057,7 @@ MORE INFORMATION:
   Support:    Química Física Teórica - Universidad de Antioquia
 """)
     parser.add_argument("command", metavar="COMMAND", 
-                       help="Input file or command (calc, sort, simil, diagram, etc.)")
+                       help="Input file or command (opt, ref, sort, simil, diagram, etc.)")
     parser.add_argument("arg1", nargs='?', default=None, metavar="ARG1",
                        help="Command-specific argument (e.g., template file, mode)")
     parser.add_argument("arg2", nargs='?', default=None, metavar="ARG2",
@@ -14879,8 +15129,7 @@ MORE INFORMATION:
         return
     
     # Check if optimization-input generation mode is requested
-    # New naming: opt command (calc kept as backward-compatible alias)
-    if args.command.lower() in ["opt", "calc"]:
+    if args.command.lower() == "opt":
         if not args.arg1:
             print("Error: opt command requires a template file.")
             print("Usage: python ascec-v04.py opt template_file [launcher_template]")
@@ -14888,13 +15137,13 @@ MORE INFORMATION:
             print("         python ascec-v04.py opt example_input.inp  # Creates inputs only")
             sys.exit(1)
         
-        result = create_simple_calculation_system(args.arg1, args.arg2)
+        result = create_simple_optimization_system(args.arg1, args.arg2)
         if result:
             print(result)
         return
 
     # Check if refinement-input generation mode is requested
-    # New naming: ref command (legacy opt behavior)
+    # Refinement-input generation command
     if args.command.lower() in ["ref", "refinement"]:
         if not args.arg1:
             print("Error: ref command requires a template file.")
@@ -14903,7 +15152,7 @@ MORE INFORMATION:
             print("         python ascec-v04.py ref example_input.inp  # Creates inputs only")
             sys.exit(1)
         
-        result = create_optimization_system(args.arg1, args.arg2)
+        result = create_refinement_system(args.arg1, args.arg2)
         if result:
             print(result)
         return
