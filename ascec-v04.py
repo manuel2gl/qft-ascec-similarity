@@ -1579,36 +1579,7 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
     """
     try:
         with open(input_file, 'r') as f:
-            protocol_lines = []
-            in_protocol_section = False
-            
-            for line in f:
-                stripped = line.strip()
-                
-                # Skip empty lines
-                if not stripped:
-                    continue
-                
-                # Remove inline comments
-                if '#' in stripped:
-                    stripped = stripped.split('#')[0].strip()
-                    if not stripped:
-                        continue
-                
-                # Check if this line starts a protocol section
-                if stripped.startswith('.asc,'):
-                    in_protocol_section = True
-                    protocol_lines.append(stripped)
-                    continue
-                
-                # If in protocol section, collect continuation lines
-                if in_protocol_section:
-                    # Stop if we hit a line that doesn't end with comma or dot (pause marker)
-                    if stripped:
-                        protocol_lines.append(stripped)
-                        # Stop collecting if line doesn't end with comma or dot
-                        if not stripped.endswith(',') and not stripped.endswith('.'):
-                            break
+            protocol_lines = extract_protocol_lines_from_content(f.read())
             
             # Join multi-line protocol into single command
             if protocol_lines:
@@ -1622,6 +1593,68 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
         pass
     
     return None
+
+
+def strip_protocol_from_content(content: str) -> str:
+    """Remove an embedded .asc workflow block from raw input-file content."""
+    protocol_lines = extract_protocol_lines_from_content(content)
+    if not protocol_lines:
+        return content
+
+    lines = content.splitlines(keepends=True)
+    cleaned_lines: List[str] = []
+    protocol_index = 0
+    in_protocol_section = False
+
+    for line in lines:
+        stripped = line.strip()
+        comparison = stripped.split('#', 1)[0].strip() if '#' in stripped else stripped
+
+        if not in_protocol_section and protocol_index < len(protocol_lines) and comparison == protocol_lines[protocol_index]:
+            in_protocol_section = True
+
+        if in_protocol_section:
+            if protocol_index < len(protocol_lines) and comparison == protocol_lines[protocol_index]:
+                protocol_index += 1
+                if protocol_index >= len(protocol_lines):
+                    in_protocol_section = False
+                continue
+
+            if not comparison:
+                continue
+
+        cleaned_lines.append(line)
+
+    return ''.join(cleaned_lines)
+
+
+def extract_protocol_lines_from_content(content: str) -> List[str]:
+    """Extract normalized embedded protocol lines from raw input-file content."""
+    protocol_lines: List[str] = []
+    in_protocol_section = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        if '#' in stripped:
+            stripped = stripped.split('#')[0].strip()
+            if not stripped:
+                continue
+
+        if stripped.startswith('.asc,'):
+            in_protocol_section = True
+            protocol_lines.append(stripped)
+            continue
+
+        if in_protocol_section:
+            protocol_lines.append(stripped)
+            if not stripped.endswith(',') and not stripped.endswith('.'):
+                break
+
+    return protocol_lines
 
 
 def parse_exclusion_pattern(pattern: str) -> List[int]:
@@ -6013,6 +6046,8 @@ def create_replicated_runs(input_file_path: str, num_replicas: int, create_launc
             # Update box size if specified
             if box_size is not None:
                 content = update_box_size_in_input(input_file_path_full, box_size)
+
+            content = strip_protocol_from_content(content)
             
             with open(replicated_input_path, 'w') as dst:
                 dst.write(content)
