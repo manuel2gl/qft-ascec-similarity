@@ -10071,7 +10071,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     }
 
     progress_lines = 0
-    last_progress_signature: Optional[Tuple[int, int, str, int, int]] = None
+    last_progress_render: Optional[Tuple[str, ...]] = None
 
     def render_progress_bar(current: int, total: int, width: int = 30) -> str:
         if total <= 0:
@@ -10082,22 +10082,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
 
     def render_workflow_progress(completed_stages: int, current_stage_num: int, sub_progress: str = "") -> None:
         """Render compact workflow progress with in-place updates (always visible)."""
-        nonlocal progress_lines, last_progress_signature
+        nonlocal progress_lines, last_progress_render
 
         total = len(stages)
         completed_stages = max(0, min(completed_stages, total))
         current_stage_num = max(1, min(current_stage_num, total))
 
-        # Skip exact duplicate redraws to avoid repeated panels in non-verbose mode.
-        sig = (
-            completed_stages,
-            current_stage_num,
-            sub_progress,
-            getattr(context, 'last_similarity_motif_count', -1) if getattr(context, 'last_similarity_motif_count', None) is not None else -1,
-            getattr(context, 'last_similarity_umotif_count', -1) if getattr(context, 'last_similarity_umotif_count', None) is not None else -1,
-        )
-        if sig == last_progress_signature:
-            return
+        # Ensure the active stage is always ahead of completed stages to avoid blank panels.
+        if completed_stages < total and current_stage_num <= completed_stages:
+            current_stage_num = completed_stages + 1
 
         if sys.stdout.isatty() and progress_lines > 0:
             sys.stdout.write(f"\033[{progress_lines}A")
@@ -10117,7 +10110,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if motif_count is not None or umotif_count is not None:
                         m_val = motif_count if motif_count is not None else 0
                         u_val = umotif_count if umotif_count is not None else 0
-                        line += f" (m:{m_val} u:{u_val})"
+                        total_val = m_val + u_val
+                        if total_val > 0:
+                            line += f" ({total_val})"
                 stage_lines.append(line)
             elif i == current_stage_num and completed_stages < total:
                 suffix = f" {sub_progress}" if sub_progress else " ..."
@@ -10135,10 +10130,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             "-" * 60,
         ] + stage_lines + [""]
 
+        # Skip duplicate redraw if the rendered panel text is identical.
+        render_snapshot = tuple(lines)
+        if render_snapshot == last_progress_render:
+            return
+
         for line in lines:
             print(line)
         progress_lines = len(lines)
-        last_progress_signature = sig
+        last_progress_render = render_snapshot
 
     context.completed_stage_count = 0
     context.update_progress = lambda sub_progress="": render_workflow_progress(
