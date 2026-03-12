@@ -61,6 +61,8 @@ if __name__ == '__main__':
         pass
 
 # Global Constants
+ASCEC_VERSION = "0.4"  # ASCEC version string for display
+
 max_mole = 100  # Increase this if you have more than 100 molecules
 B2 = 3.166811563e-6   # Boltzmann constant in Hartree/K (approx. 3.166811563 × 10^-6 Hartree/K)
 
@@ -77,9 +79,20 @@ max_overlap_placement_attempts = 100000 # Max attempts to place a single molecul
 # This can be overridden by the --nobox command line flag.
 create_box_xyz_copy = True 
 
-version = "* ASCEC-v04: Feb-2026 *"  # Version of the ASCEC script
+def parse_verbosity_level(argv: List[str]) -> int:
+    """Parse verbosity level from command line arguments.
+    Returns: 0 (silent), 1 (-v), 2 (-v2), 3 (-v3)
+    """
+    for arg in argv:
+        if arg == '-v':
+            return 1
+        elif arg == '-v2':
+            return 2
+        elif arg == '-v3':
+            return 3
+    return 0
 
-# Protocol marker accepted at the start of embedded workflow blocks.
+
 # Supports both legacy placeholder (.asc,) and explicit input-file markers
 # (e.g. formic_annealing.in, formic_annealing.asc, etc.).
 PROTOCOL_MARKER_RE = re.compile(
@@ -135,7 +148,7 @@ def print_version_banner(script_name="ASCEC"):
 
 
 ===========================================================================
-""".format(version=version)
+""".format(version=ASCEC_VERSION)
     print(banner)
 
 # Symbol for dummy atoms used to mark box corners.
@@ -902,7 +915,7 @@ def write_simulation_summary(state: SystemState, output_file_handle, xyz_output_
     print("", file=output_file_handle)
     print(center_text("Annealing Simulado Con Energía Cuántica"), file=output_file_handle)
     print("", file=output_file_handle)
-    print(center_text(version), file=output_file_handle)
+    print(center_text(ASCEC_VERSION), file=output_file_handle)
     print("", file=output_file_handle)
     print(center_text("Química Física Teórica - QFT"), file=output_file_handle)
     print("", file=output_file_handle)
@@ -8553,6 +8566,7 @@ class WorkflowContext:
     similarity_args: List[str] = dataclasses.field(default_factory=list)  # Store all similarity args
     is_workflow: bool = False  # True when running in workflow mode (with , or then separators)
     workflow_verbose: bool = False  # True only when workflow should print detailed stage logs
+    workflow_verbose_level: int = 0  # 0: silent, 1: -v, 2: -v2, 3: -v3
     max_launch_retries: int = 10  # Hardcoded retry attempts for launch failures only (instant crashes)
     ascec_parallel_cores: int = 0  # Number of cores for parallel processing (0 = auto-detect, capped at 12)
     # Exclude patterns for optimization/refinement stages
@@ -9871,7 +9885,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
 
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
-    context.workflow_verbose = ('-v' in sys.argv or '--v' in sys.argv or '--va' in sys.argv)
+    context.workflow_verbose_level = parse_verbosity_level(sys.argv)
     
     # Read configuration from input file
     # - Line 9: QM program index and alias (e.g., "2 orca")
@@ -9923,7 +9937,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             test_cache = load_protocol_cache(cache_path)
             if test_cache and test_cache.get('input_file') == input_file:
                 cache_file = cache_path
-                if context.workflow_verbose:
+                if context.workflow_verbose_level >= 1:
                     print(f"Found existing protocol cache: {cache_file} (for {input_file})")
                 break
     
@@ -9932,7 +9946,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         import random
         protocol_seed = random.randint(100000, 999999)
         cache_file = f"protocol_{protocol_seed}.pkl"
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print(f"Creating new protocol cache: {cache_file} (for {input_file})")
     
     context.cache_file = cache_file  # Store in context for use by stages
@@ -10022,10 +10036,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 # Protocol in progress - just resume
                 dt = datetime.fromtimestamp(start_time)
                 time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-                if context.workflow_verbose:
+                if context.workflow_verbose_level >= 1:
                     print(f"Resuming workflow (started: {time_str})")
             else:
-                if context.workflow_verbose:
+                if context.workflow_verbose_level >= 1:
                     print(f"Resuming workflow")
             
             # Backfill total_stages for old cache files (compatibility)
@@ -10066,10 +10080,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         return "█" * filled + "░" * (width - filled)
 
     def render_workflow_progress(completed_stages: int, current_stage_num: int, sub_progress: str = "") -> None:
-        """Render compact workflow progress with in-place updates (non-verbose)."""
+        """Render compact workflow progress with in-place updates (always visible)."""
         nonlocal progress_lines
-        if context.workflow_verbose:
-            return
 
         total = len(stages)
         completed_stages = max(0, min(completed_stages, total))
@@ -10131,10 +10143,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 display_name += ' ⏸'
             stage_display_names.append(display_name)
         stage_names = ' → '.join(stage_display_names)
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print(f"\nWorkflow: {stage_names}\n")
     else:
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print("-" * 60)
             print(f"Workflow: {input_file}")
             stage_display_parts = []
@@ -10165,7 +10177,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 if stage_cache.get('status') == 'completed':
                     # Display name (use new naming convention)
                     display_name = stage_display_map.get(stage_type, stage_type.capitalize())
-                    if context.workflow_verbose:
+                    if context.workflow_verbose_level >= 1:
                         print(f"\n{'-' * 60}")
                         print(f"[{stage_num}/{len(stages)}] {display_name} (cached)")
                         print(f"  ✓ Skipped (completed at {stage_cache.get('timestamp', 'unknown')})")
@@ -10197,7 +10209,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         
         # Display name for stage (use new naming convention)
         display_name = stage_display_map.get(stage_type, stage_type.capitalize())
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print(f"\n{'-' * 60}")
             print(f"[{stage_num}/{len(stages)}] {display_name}")
             print('-' * 60)
@@ -10316,7 +10328,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Show redo configuration
                     if max_redos > 1:
-                        if context.workflow_verbose:
+                        if context.workflow_verbose_level >= 1:
                             if max_critical is not None:
                                 print(f"  Stage redo enabled: max {max_redos} redo attempts, target critical ≤ {max_critical}%")
                             elif max_skipped is not None:
@@ -10331,7 +10343,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     initial_skipped_count = None
                     for attempt in range(max_redos + 1):
                         final_attempt = attempt
-                        if attempt > 0 and context.workflow_verbose:
+                        if attempt > 0 and context.workflow_verbose_level >= 1:
                             print(f"\n{'-' * 60}")
                             print(f"Redo {attempt}/{max_redos}")
                         
@@ -10417,7 +10429,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 initial_critical_count = init_crit_count
                                 initial_skipped_count = init_skip_count
                             
-                            if context.workflow_verbose:
+                            if context.workflow_verbose_level >= 1:
                                 print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
                             
                             # Check thresholds based on which was set
@@ -10427,22 +10439,22 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 threshold_met = critical_pct <= max_critical
                                 
                                 if threshold_met:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold met (critical ≤ {max_critical}%)")
                                     break
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
                                     
                             elif max_skipped is not None:
                                 threshold_met = skipped_pct <= max_skipped
                                 
                                 if threshold_met:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
                                     break
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
                             else:
                                 # No thresholds set - accept results
@@ -10454,10 +10466,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                     # Loop will continue to next iteration
                                     pass
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"Max attempts reached")
                         else:
-                            if context.workflow_verbose:
+                            if context.workflow_verbose_level >= 1:
                                 print("⚠ Warning: Could not find clustering_summary.txt")
                             break
                     
@@ -10780,7 +10792,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     
                     # Show redo configuration
                     if max_redos > 1:
-                        if context.workflow_verbose:
+                        if context.workflow_verbose_level >= 1:
                             if max_critical is not None:
                                 print(f"  Stage redo enabled: max {max_redos} redo attempts, target critical ≤ {max_critical}%")
                             elif max_skipped is not None:
@@ -10795,7 +10807,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     initial_skipped_count = None
                     for attempt in range(max_redos + 1):
                         final_attempt = attempt
-                        if attempt > 0 and context.workflow_verbose:
+                        if attempt > 0 and context.workflow_verbose_level >= 1:
                             print(f"\n{'-' * 60}")
                             print(f"Redo {attempt}/{max_redos}")
                         
@@ -10903,7 +10915,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                 initial_critical_count = init_crit_count
                                 initial_skipped_count = init_skip_count
                             
-                            if context.workflow_verbose:
+                            if context.workflow_verbose_level >= 1:
                                 print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
                             
                             # Check thresholds
@@ -10912,20 +10924,20 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             if max_critical is not None:
                                 threshold_met = critical_pct <= max_critical
                                 if threshold_met:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold met (critical ≤ {max_critical}%)")
                                     break
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
                             elif max_skipped is not None:
                                 threshold_met = skipped_pct <= max_skipped
                                 if threshold_met:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
                                     break
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
                             else:
                                 break
@@ -10936,10 +10948,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                     # Loop will continue to next iteration
                                     pass
                                 else:
-                                    if context.workflow_verbose:
+                                    if context.workflow_verbose_level >= 1:
                                         print(f"Max attempts reached")
                         else:
-                            if context.workflow_verbose:
+                            if context.workflow_verbose_level >= 1:
                                 print("⚠ Warning: Could not find clustering_summary.txt")
                             break
                     
@@ -11129,7 +11141,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             traceback.print_exc()
             return 1
     
-    if context.workflow_verbose:
+    if context.workflow_verbose_level >= 1:
         print(f"\n{'-' * 60}")
         print("✓ Workflow completed")
         print(f"{'-' * 60}")
@@ -11143,21 +11155,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     all_temp = temp_calc_folders + temp_sim_folders + retry_input
     
     if all_temp:
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print("\nCleaning up temporary folders...")
         for folder in all_temp:
             if os.path.exists(folder):
                 shutil.rmtree(folder)
-                if context.workflow_verbose:
+                if context.workflow_verbose_level >= 1:
                     print(f"  Removed: {folder}")
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print(f"  Cleaned {len(all_temp)} temporary folder(s)")
     
     # If using cache (protocol mode), generate summary
     # NOTE: Cache is NOT deleted to allow protocol resume
     if use_cache:
         generate_protocol_summary(cache_file=cache_file)
-        if context.workflow_verbose:
+        if context.workflow_verbose_level >= 1:
             print(f"\n→ Protocol cache saved: {cache_file}")
     
     return 0
@@ -12601,6 +12613,12 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
         
         # Run calculation system creation with auto_select (in workflow mode)
         status = calculate_input_files(template_file, launcher_file, auto_select=auto_select, stage_type="optimization", workflow_mode=True)
+        # Check if calculate_input_files succeeded (returns string message)
+        # Successfully created files return: "Created optimization system in '...' with X input files..."
+        # Errors return: "Error: ..."
+        if isinstance(status, str) and status.startswith("Error"):
+            print(f"\n{status}") # Print the error message directly
+            return 1  # Return error code
         # Don't print result message in workflow mode - output is already shown
         
         # Find the optimization directory that was just created (may be optimization, optimization_2, etc.)
@@ -13004,13 +13022,15 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                             
                             # Extract key info from output
                             output = f.getvalue()
-                            if 'Summary written to' in output:
-                                print("\nSummary written to orca_summary.txt")
+                            if context.workflow_verbose_level >= 1:
+                                if 'Summary written to' in output:
+                                    print("\nSummary written to orca_summary.txt")
+                            # Look for similarity folder reference
                             if 'Copied' in output and 'similarity' in output:
-                                # Extract the copy message and similarity folder
                                 for line in output.split('\n'):
                                     if 'Copied' in line and '.out files to' in line:
-                                        print(line)
+                                        if context.workflow_verbose_level >= 1:
+                                            print(line)
                                         # Extract similarity folder name (e.g., "similarity/orca_out_3")
                                         import re
                                         match = re.search(r'to\s+(similarity[^\s]*)', line)
@@ -13022,7 +13042,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                                             context.pending_similarity_folder = sim_base
                                         break
                             
-                            print(f"\n✓ Files organized and sorted")
+                            if context.workflow_verbose_level >= 1:
+                                print(f"\n✓ Files organized and sorted")
                             
                     except Exception as e:
                         print(f"⚠ Warning: Could not organize files: {e}")
@@ -14347,13 +14368,15 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 
                 # Extract key info from output
                 output = f.getvalue()
-                if 'Summary written to' in output:
-                    print("\nSummary written to orca_summary.txt")
+                if context.workflow_verbose_level >= 1:
+                    if 'Summary written to' in output:
+                        print("\nSummary written to orca_summary.txt")
                 if 'Copied' in output and 'similarity' in output:
                     # Extract the copy message and similarity folder
                     for line in output.split('\n'):
                         if 'Copied' in line and '.out files to' in line:
-                            print(line)
+                            if context.workflow_verbose_level >= 1:
+                                print(line)
                             # Extract similarity folder name
                             match = re.search(r'to\s+(similarity[^\s]*)', line)
                             if match:
@@ -14380,7 +14403,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                         except:
                             pass
             
-                print(f"\n✓ Files organized and sorted")
+                if context.workflow_verbose_level >= 1:
+                    print(f"\n✓ Files organized and sorted")
             except Exception as e:
                 print(f"⚠ Warning: Could not organize files: {e}")
             finally:
@@ -14645,7 +14669,7 @@ def main_ascec_integrated():
         print("")
         print(center_text("Annealing Simulado Con Energía Cuántica"))
         print("")
-        print(center_text(version))
+        print(center_text(ASCEC_VERSION))
         print("")
         print(center_text("Química Física Teórica - QFT"))
         print("")
@@ -15052,8 +15076,9 @@ TEMPLATE DIRECTIVES:
     ORCA 5.x:  Uses GFN2-xTB, GFN-xTB (requires external xtb)
 
 OPTIONS:
-  -v, --v          Verbose output (print every 10 Monte Carlo cycles)
-  --va             Very verbose (print every cycle)
+  -v              Verbose level 1: show intermediate progress
+  -v2             Verbose level 2: extended progress tracking
+  -v3             Verbose level 3: maximum detail output
   --standard       Use standard Metropolis acceptance criterion
   --nobox          Disable generation of box-visualization XYZ files
   --nosum          Skip summary file generation in sort command
@@ -15085,10 +15110,8 @@ MORE INFORMATION:
                        help="Command-specific argument (e.g., template file, mode)")
     parser.add_argument("arg2", nargs='?', default=None, metavar="ARG2",
                        help="Additional command-specific argument")
-    parser.add_argument("-v", "--v", action="store_true", 
-                       help="Enable verbose output (every 10 Monte Carlo cycles)")
-    parser.add_argument("--va", action="store_true", 
-                       help="Enable very verbose output (every cycle)")
+    parser.add_argument("-v", action="count", default=0,
+                       help="Increase verbosity level (use -v, -v2, -v3, etc.)")
     parser.add_argument("--standard", action="store_true", 
                        help="Use standard Metropolis criterion instead of modified")
     
@@ -15356,16 +15379,12 @@ MORE INFORMATION:
     state = SystemState()
     
     # Print startup message early to confirm script is running
-    _print_verbose(f"{version}", 0, state)
+    _print_verbose(f"{ASCEC_VERSION}", 0, state)
     _print_verbose("Starting ASCEC simulation...", 0, state)
     
     # Set verbosity level based on command line arguments
-    if args.va:
-        state.verbosity_level = 2
-    elif args.v:
-        state.verbosity_level = 1
-    else:
-        state.verbosity_level = 0 # Default minimal output
+    # args.v is now an integer (0, 1, 2, 3...) from action="count" in argparse
+    state.verbosity_level = args.v if hasattr(args, 'v') else 0
     
     state.use_standard_metropolis = args.standard # Set the flag in state
     
