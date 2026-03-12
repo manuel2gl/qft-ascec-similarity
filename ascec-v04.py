@@ -10071,6 +10071,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     }
 
     progress_lines = 0
+    last_progress_signature: Optional[Tuple[int, int, str, int, int]] = None
 
     def render_progress_bar(current: int, total: int, width: int = 30) -> str:
         if total <= 0:
@@ -10081,11 +10082,22 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
 
     def render_workflow_progress(completed_stages: int, current_stage_num: int, sub_progress: str = "") -> None:
         """Render compact workflow progress with in-place updates (always visible)."""
-        nonlocal progress_lines
+        nonlocal progress_lines, last_progress_signature
 
         total = len(stages)
         completed_stages = max(0, min(completed_stages, total))
         current_stage_num = max(1, min(current_stage_num, total))
+
+        # Skip exact duplicate redraws to avoid repeated panels in non-verbose mode.
+        sig = (
+            completed_stages,
+            current_stage_num,
+            sub_progress,
+            getattr(context, 'last_similarity_motif_count', -1) if getattr(context, 'last_similarity_motif_count', None) is not None else -1,
+            getattr(context, 'last_similarity_umotif_count', -1) if getattr(context, 'last_similarity_umotif_count', None) is not None else -1,
+        )
+        if sig == last_progress_signature:
+            return
 
         if sys.stdout.isatty() and progress_lines > 0:
             sys.stdout.write(f"\033[{progress_lines}A")
@@ -10126,6 +10138,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         for line in lines:
             print(line)
         progress_lines = len(lines)
+        last_progress_signature = sig
 
     context.completed_stage_count = 0
     context.update_progress = lambda sub_progress="": render_workflow_progress(
@@ -10160,7 +10173,6 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             print("-" * 60)
 
     completed_stage_count = 0
-    render_workflow_progress(completed_stage_count, 1)
     
     # Execute each stage in sequence with optimization+similarity retry logic
     stage_idx = 0
