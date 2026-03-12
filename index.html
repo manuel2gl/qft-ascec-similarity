@@ -6211,7 +6211,7 @@ end
                 return;
             }
 
-            let text = '.in,\n';
+            let text = '.asc,\n';
             protocolStages.forEach((s, idx) => {
                 let name = s.type === 'rN' ? `r${s.n || 1}` : s.type;
                 const line = s.args ? `${name} ${s.args}` : name;
@@ -6997,7 +6997,7 @@ H   1.981282  0.134064  0.000000`;
             if (protocolStages.length > 0) {
                 content += `\n# Protocol\n`;
                 content += `# (annealing, (pre)optimization, clustering, separated by "," or ".")\n\n`;
-                content += `.in,\n`;
+                content += `.asc,\n`;
                 protocolStages.forEach((stage, idx) => {
                     let stageName = stage.type === 'rN' ? `r${stage.n || 1}` : stage.type;
                     const line = stage.args ? `${stageName} ${stage.args}` : stageName;
