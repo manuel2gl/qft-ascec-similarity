@@ -8585,6 +8585,7 @@ class WorkflowContext:
     sim_motifs_created: Optional[int] = None
     last_similarity_motif_count: Optional[int] = None
     last_similarity_umotif_count: Optional[int] = None
+    similarity_stage_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> representative count
     refinement_motifs_source: Optional[str] = None
     refinement_completed: Optional[int] = None
     refinement_total: Optional[int] = None
@@ -10072,6 +10073,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
 
     progress_lines = 0
     last_progress_render: Optional[Tuple[str, ...]] = None
+    supports_ansi_repaint = bool(sys.stdout.isatty() or (os.environ.get("TERM") not in (None, "", "dumb")))
 
     def render_progress_bar(current: int, total: int, width: int = 30) -> str:
         if total <= 0:
@@ -10092,27 +10094,23 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         if completed_stages < total and current_stage_num <= completed_stages:
             current_stage_num = completed_stages + 1
 
-        if sys.stdout.isatty() and progress_lines > 0:
-            sys.stdout.write(f"\033[{progress_lines}A")
-            for _ in range(progress_lines):
-                sys.stdout.write("\033[2K\033[1B")
-            sys.stdout.write(f"\033[{progress_lines}A")
-            sys.stdout.flush()
-
         stage_lines = []
         for i, st in enumerate(stages, start=1):
             name = stage_display_map.get(st['type'], st['type'].capitalize())
             if i <= completed_stages:
                 line = f"[{i}/{total}] {name} ✓"
                 if st.get('type') == 'similarity':
-                    motif_count = getattr(context, 'last_similarity_motif_count', None)
-                    umotif_count = getattr(context, 'last_similarity_umotif_count', None)
-                    if motif_count is not None or umotif_count is not None:
-                        m_val = motif_count if motif_count is not None else 0
-                        u_val = umotif_count if umotif_count is not None else 0
-                        total_val = m_val + u_val
-                        if total_val > 0:
-                            line += f" ({total_val})"
+                    stage_counts = getattr(context, 'similarity_stage_counts', {})
+                    stage_total = stage_counts.get(i)
+                    if stage_total is None:
+                        motif_count = getattr(context, 'last_similarity_motif_count', None)
+                        umotif_count = getattr(context, 'last_similarity_umotif_count', None)
+                        if motif_count is not None or umotif_count is not None:
+                            m_val = motif_count if motif_count is not None else 0
+                            u_val = umotif_count if umotif_count is not None else 0
+                            stage_total = m_val + u_val
+                    if stage_total is not None and stage_total > 0:
+                        line += f" ({stage_total})"
                 stage_lines.append(line)
             elif i == current_stage_num and completed_stages < total:
                 suffix = f" {sub_progress}" if sub_progress else " ..."
@@ -10135,17 +10133,32 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         if render_snapshot == last_progress_render:
             return
 
+        if supports_ansi_repaint and progress_lines > 0:
+            sys.stdout.write(f"\033[{progress_lines}A")
+            for _ in range(progress_lines):
+                sys.stdout.write("\033[2K\033[1B")
+            sys.stdout.write(f"\033[{progress_lines}A")
+            sys.stdout.flush()
+
         for line in lines:
             print(line)
         progress_lines = len(lines)
         last_progress_render = render_snapshot
 
     context.completed_stage_count = 0
-    context.update_progress = lambda sub_progress="": render_workflow_progress(
-        context.completed_stage_count,
-        min(context.completed_stage_count + 1, len(stages)),
-        sub_progress,
-    )
+    last_progress_call: Optional[Tuple[int, int, str]] = None
+
+    def _update_workflow_progress(sub_progress: str = "") -> None:
+        nonlocal last_progress_call
+        completed = context.completed_stage_count
+        current = min(completed + 1, len(stages))
+        call_sig = (completed, current, sub_progress)
+        if call_sig == last_progress_call:
+            return
+        last_progress_call = call_sig
+        render_workflow_progress(completed, current, sub_progress)
+
+    context.update_progress = _update_workflow_progress
     
     # Cleaner output for protocol mode
     if use_cache:
@@ -10226,7 +10239,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             print(f"[{stage_num}/{len(stages)}] {display_name}")
             print('-' * 60)
         else:
-            render_workflow_progress(completed_stage_count, stage_num)
+            context.update_progress("")
         
         # Update cache - mark stage as in progress
         if use_cache:
@@ -12995,7 +13008,8 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                         already_organized = os.path.exists(os.path.join(parent_dir, "similarity"))
                         
                         if already_organized:
-                            print("\n✓ Files already organized (resuming from cache)")
+                            if not workflow_concise:
+                                print("\n✓ Files already organized (resuming from cache)")
                             # Find the existing similarity folder
                             sim_folders = [f for f in os.listdir(parent_dir) 
                                          if f.startswith("similarity") and os.path.isdir(os.path.join(parent_dir, f))]
@@ -13361,6 +13375,12 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         motif_count, umotif_count = _count_latest_similarity_representatives(similarity_base)
         context.last_similarity_motif_count = motif_count
         context.last_similarity_umotif_count = umotif_count
+        stage_total = (motif_count or 0) + (umotif_count or 0)
+        stage_key = getattr(context, 'current_stage_key', '')
+        match = re.search(r'^similarity_(\d+)$', stage_key)
+        if match:
+            stage_num = int(match.group(1))
+            context.similarity_stage_counts[stage_num] = stage_total
         
         if verbose:
             print("\n✓ Similarity analysis completed")
@@ -13493,7 +13513,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         launcher_sh = os.path.abspath(launcher_sh)
         if not os.path.exists(launcher_sh):
             print(f"Warning: Launcher script not found: {launcher_sh}")
-            print("  Attempting to auto-detect ORCA installation...")
+            if not workflow_concise:
+                print("  Attempting to auto-detect ORCA installation...")
             launcher_sh = None
     
     # Get QM alias from context (read from input.in line 9)
@@ -13652,7 +13673,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     # Only print motifs message if this is NOT a redo attempt
     # (redo attempts already printed "Processing redo structures..." message)
     if not (hasattr(context, 'recalculated_files') and context.recalculated_files):
-        print(f"Using motifs from: {motif_dir}")
+        if not workflow_concise:
+            print(f"Using motifs from: {motif_dir}")
     
     # Get motif/umotif XYZ files from the motifs directory
     # Look for both motif_*.xyz and umotif_*.xyz patterns
@@ -13697,9 +13719,11 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     if os.path.exists(opt_dir) and has_content and (stage_was_started or is_redo):
         # Resuming or redo - reuse existing directory
         if is_redo:
-            print("Resuming: Using existing refinement directory (Redo Mode)\n")
+            if not workflow_concise:
+                print("Resuming: Using existing refinement directory (Redo Mode)\n")
         else:
-            print("Resuming: Using existing refinement directory\n")
+            if not workflow_concise:
+                print("Resuming: Using existing refinement directory\n")
     else:
         # Not resuming or empty directory - create fresh directory
         if os.path.exists(opt_dir):
@@ -13752,7 +13776,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             print("Error: No input files created")
             return 1
         
-        print(f"Created {len(all_input_files)} input file(s)")
+        if not workflow_concise:
+            print(f"Created {len(all_input_files)} input file(s)")
     else:
         # Redo/Resume mode: reuse existing input files
         # process_redo_structures handles updating failed ones in redo mode
@@ -13824,11 +13849,13 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                     f.write("\n")
         
         os.chmod(launcher_path, 0o755)
-        print(f"Created launcher script: {launcher_path}")
+        if not workflow_concise:
+            print(f"Created launcher script: {launcher_path}")
     
     # Execute the refinement calculations
     if os.path.exists(os.path.join(opt_dir, "launcher_orca.sh")) or os.path.exists(os.path.join(opt_dir, "launcher_gaussian.sh")):
-        print(f"\nExecuting refinement calculations...")
+        if not workflow_concise:
+            print(f"\nExecuting refinement calculations...")
         
         # Determine launcher name and QM program
         if os.path.exists(os.path.join(opt_dir, "launcher_orca.sh")):
@@ -14300,16 +14327,17 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 for failed_file in sorted(failed_optimizations, key=natural_sort_key):
                     f.write(f"{failed_file}\n")
             
-            print(f"Failed optimizations list written to: {failed_list_file}")
+            if not workflow_concise:
+                print(f"Failed optimizations list written to: {failed_list_file}")
         
         # Organize files if any optimizations are completed (new or already done)
         if total_completed > 0:
-            if num_completed > 0:
-                print("\n\nOptimization calculations completed")
+            if num_completed > 0 and not workflow_concise:
+                print("\n\nRefinement calculations completed")
             
             # Check if this is a redo (recalculated files exist)
             if not workflow_concise:
-                print(f"All optimizations completed successfully")
+                print(f"All refinements completed successfully")
             
             # Organize results - run full sort/organize for both redo and normal mode
             saved_cwd = os.getcwd()
