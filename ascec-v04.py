@@ -79,6 +79,29 @@ create_box_xyz_copy = True
 
 version = "* ASCEC-v04: Feb-2026 *"  # Version of the ASCEC script
 
+# Protocol marker accepted at the start of embedded workflow blocks.
+# Supports both legacy placeholder (.asc,) and explicit input-file markers
+# (e.g. formic_annealing.in, formic_annealing.asc, etc.).
+PROTOCOL_MARKER_RE = re.compile(
+    r'^\s*(?:\.asc|[^,\s#]+\.(?:asc|in|inp|com|gjf))\s*,',
+    re.IGNORECASE,
+)
+
+
+def is_protocol_marker_line(raw_line: str) -> bool:
+    """Return True when a line starts an embedded protocol block."""
+    if not raw_line:
+        return False
+    stripped = raw_line.strip().lstrip('\ufeff')
+    if not stripped:
+        return False
+    # Ignore inline comments while preserving the leading command token.
+    if '#' in stripped:
+        stripped = stripped.split('#', 1)[0].strip()
+    if not stripped:
+        return False
+    return bool(PROTOCOL_MARKER_RE.match(stripped))
+
 def print_version_banner(script_name="ASCEC"):
     """Print the ASCII art banner with UdeA logo and version information."""
     banner = """
@@ -1441,7 +1464,7 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
         
         # Stop parsing if we hit the Protocol section (old or new format)
         stripped = raw_line.strip()
-        if '# Protocol' in raw_line or '# protocol' in raw_line.lower() or stripped.startswith('.asc,'):
+        if '# Protocol' in raw_line or '# protocol' in raw_line.lower() or is_protocol_marker_line(raw_line):
             break
         
         line = clean_line(raw_line)
@@ -1592,7 +1615,7 @@ def extract_protocol_from_input(input_file: str) -> Optional[str]:
                 stripped = stripped.split('#')[0].strip()
                 if not stripped:
                     continue
-            if stripped.startswith('.asc,'):
+            if is_protocol_marker_line(stripped):
                 in_protocol_section = True
                 protocol_lines.append(stripped)
                 continue
@@ -1696,9 +1719,8 @@ def resolve_template_reference(context: 'WorkflowContext', template_token: str) 
         return None
 
     template_content, extension = extracted
-    input_stem = Path(input_file).stem if input_file else 'workflow'
     safe_label = re.sub(r'[^A-Za-z0-9_.-]+', '_', token)
-    out_name = f".ascec_embedded_{input_stem}_{safe_label}{extension}"
+    out_name = f"{safe_label}{extension}"
     out_path = os.path.abspath(out_name)
 
     try:
@@ -1723,8 +1745,8 @@ def strip_protocol_from_content(content: str) -> str:
         bare = line.strip()
         if '#' in bare:
             bare = bare.split('#', 1)[0].strip()
-        # Stop as soon as we hit the protocol marker
-        if bare.startswith('.asc'):
+        # Stop as soon as we hit the embedded protocol marker
+        if is_protocol_marker_line(bare):
             # Drop trailing blank lines so the file ends cleanly
             trimmed = lines[:i]
             while trimmed and not trimmed[-1].strip():
@@ -11218,6 +11240,7 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     cwd=run_dir,
                     capture_output=True,
                     text=True,
+                    env={**os.environ, "ASCEC_DISABLE_EMBEDDED_PROTOCOL": "1"},
                     timeout=3600  # 1 hour timeout per run
                 )
                 
@@ -14870,7 +14893,7 @@ def main_ascec_integrated():
 
     # AUTO-DETECT EMBEDDED PROTOCOL (single input-file invocation)
     # Example: ascec04 glaw.asc
-    if len(sys.argv) == 2:
+    if len(sys.argv) == 2 and os.environ.get("ASCEC_DISABLE_EMBEDDED_PROTOCOL") != "1":
         input_file = sys.argv[1]
         if os.path.exists(input_file):
             protocol = extract_protocol_from_input(input_file)
