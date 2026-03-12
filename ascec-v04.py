@@ -10402,8 +10402,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             else:
                                 print(f"\n  Warning: No orca_out directory found in {sim_dir}/")
                         
-                        # Run similarity (suppress stage header in retry mode)
-                        if attempt == 0:
+                        # Run similarity; stage header is only shown in verbose mode.
+                        if attempt == 0 and context.workflow_verbose_level >= 1:
                             print(f"\n{'-' * 60}")
                             print(f"[{stage_idx + 2}/{len(stages)}] Similarity")
                             print('-' * 60)
@@ -10714,8 +10714,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     prev_was_opt = (stage_idx > 0 and stages[stage_idx - 1]['type'] == 'refinement')
                     
                     if prev_was_opt:
-                        # After optimization: input from opt dir, output to umotifs
-                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
+                        # After refinement: input from refinement dir, output to umotifs
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "refinement"
                         sim_result['input_dir'] = opt_dir
                         sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")
                     else:
@@ -10888,8 +10888,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             else:
                                 print(f"\n  Warning: No orca_out directory found (sim_dir={sim_dir})")
                         
-                        # Run similarity (suppress stage header in retry mode)
-                        if attempt == 0:
+                        # Run similarity; stage header is only shown in verbose mode.
+                        if attempt == 0 and context.workflow_verbose_level >= 1:
                             print(f"\n{'-' * 60}")
                             print(f"[{stage_idx + 2}/{len(stages)}] Similarity")
                             print('-' * 60)
@@ -10979,7 +10979,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         if not motifs_dir:
                             motifs_dir = "similarity/motifs"  # Fallback
                         
-                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "refinement"
                         opt_result['input_dir'] = motifs_dir
                         opt_result['working_dir'] = opt_dir
                         opt_result['output_dir'] = opt_dir
@@ -11009,8 +11009,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         
                         # Store directories for stage memory
                         sim_dir = context.similarity_dir if context.similarity_dir else "similarity_2"
-                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "optimization"
-                        sim_result['input_dir'] = opt_dir  # Read from optimization
+                        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "refinement"
+                        sim_result['input_dir'] = opt_dir  # Read from refinement
                         sim_result['working_dir'] = sim_dir
                         # After optimization: use "umotifs" prefix (unique motifs, second level)
                         sim_result['output_dir'] = os.path.join(sim_dir, "umotifs")  # Unique motifs
@@ -11178,7 +11178,7 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     """Execute replication stage (r3, r5, etc.) and run annealing simulations."""
     num_replicas = stage['num_replicas']
     context.num_replicas = num_replicas
-    verbose = getattr(context, 'workflow_verbose', False)
+    verbose = getattr(context, 'workflow_verbose_level', 0) >= 1
     
     # Parse --box flags from stage args
     # Note: --retry is removed; launch failures are now auto-retried 10 times
@@ -12342,7 +12342,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
     sys._current_workflow_context = context  # type: ignore[attr-defined]
     
     args = stage['args']
-    workflow_concise = getattr(context, 'is_workflow', False) and not getattr(context, 'workflow_verbose', False)
+    workflow_concise = getattr(context, 'is_workflow', False) and getattr(context, 'workflow_verbose_level', 0) < 1
     
     # Parse flags - defaults for when flags are not explicitly provided
     max_critical = 0      # default: 0% critical structures allowed (strict)
@@ -13121,12 +13121,20 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             if os.path.exists(calc_base):
                 similarity_base = calc_base
     
-    # Final fallback: check what exists (prefer similarity over similarity_2)
+    # Final fallback: pick the latest similarity folder if present.
     if not similarity_base:
-        if os.path.exists("similarity"):
-            similarity_base = "similarity"
-        elif os.path.exists("similarity_2"):
-            similarity_base = "similarity_2"
+        similarity_candidates = [
+            d for d in os.listdir('.')
+            if d.startswith('similarity') and os.path.isdir(d)
+        ]
+        if similarity_candidates:
+            def _sim_sort_key(name: str) -> int:
+                if name == 'similarity':
+                    return 1
+                match = re.search(r'^similarity_(\d+)$', name)
+                return int(match.group(1)) if match else 0
+
+            similarity_base = sorted(similarity_candidates, key=_sim_sort_key)[-1]
         else:
             print("Warning: similarity folder not found")
             return 0
@@ -13440,7 +13448,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
     # Note: --retry removed; launch failures auto-retry up to 10 times (hardcoded)
     
     args = stage.get('args', [])
-    workflow_concise = getattr(context, 'is_workflow', False) and not getattr(context, 'workflow_verbose', False)
+    workflow_concise = getattr(context, 'is_workflow', False) and getattr(context, 'workflow_verbose_level', 0) < 1
     template_inp = stage.get('template_inp')
     launcher_sh = stage.get('launcher_sh')
     
@@ -13645,8 +13653,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         print("Warning: No motif/umotif files found in motifs directory")
         return 0
     
-    # Create optimization directory (or reuse if resuming)
-    opt_dir = "optimization"
+    # Create refinement directory (or reuse if resuming)
+    opt_dir = "refinement"
     
     # Check if we're resuming - if so, reuse existing directory
     cache_file = getattr(context, 'cache_file', 'protocol_cache.pkl')
@@ -13675,11 +13683,11 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                     break
     
     if os.path.exists(opt_dir) and has_content and (stage_was_started or is_redo):
-        # Resuming or Redo - reuse existing directory
+        # Resuming or redo - reuse existing directory
         if is_redo:
-            print("Resuming: Using existing optimization directory (Redo Mode)\n")
+            print("Resuming: Using existing refinement directory (Redo Mode)\n")
         else:
-            print("Resuming: Using existing optimization directory\n")
+            print("Resuming: Using existing refinement directory\n")
     else:
         # Not resuming or empty directory - create fresh directory
         if os.path.exists(opt_dir):
@@ -13688,6 +13696,9 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         os.makedirs(opt_dir)
         # CRITICAL: If we recreated the directory, this is NOT a redo scenario
         is_redo = False
+
+    # Persist the refinement working directory for downstream stages.
+    context.refinement_stage_dir = opt_dir
     
     # Choose files to process:
     # - If only 1 motif file and a combined file exists: use only the single motif file
@@ -13803,16 +13814,16 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         os.chmod(launcher_path, 0o755)
         print(f"Created launcher script: {launcher_path}")
     
-    # Execute the optimization calculations
-    if os.path.exists("optimization/launcher_orca.sh") or os.path.exists("optimization/launcher_gaussian.sh"):
-        print(f"\nExecuting optimization calculations...")
+    # Execute the refinement calculations
+    if os.path.exists(os.path.join(opt_dir, "launcher_orca.sh")) or os.path.exists(os.path.join(opt_dir, "launcher_gaussian.sh")):
+        print(f"\nExecuting refinement calculations...")
         
         # Determine launcher name and QM program
-        if os.path.exists("optimization/launcher_orca.sh"):
-            launcher_path = "optimization/launcher_orca.sh"
+        if os.path.exists(os.path.join(opt_dir, "launcher_orca.sh")):
+            launcher_path = os.path.join(opt_dir, "launcher_orca.sh")
             qm_program = 'orca'
         else:
-            launcher_path = "optimization/launcher_gaussian.sh"
+            launcher_path = os.path.join(opt_dir, "launcher_gaussian.sh")
             qm_program = 'gaussian'
         
         # Get list of input files to process
@@ -13826,13 +13837,13 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.', '_rescue.']
             return not any(pattern in filename for pattern in excluded_patterns)
         
-        input_files = sorted([f for f in os.listdir("optimization") if is_valid_input_file(f)], key=natural_sort_key)
+        input_files = sorted([f for f in os.listdir(opt_dir) if is_valid_input_file(f)], key=natural_sort_key)
         
         # If no files at root and sort command was used, check subdirectories
         if not input_files:
-            subdirs = [d for d in os.listdir("optimization") if os.path.isdir(os.path.join("optimization", d))]
+            subdirs = [d for d in os.listdir(opt_dir) if os.path.isdir(os.path.join(opt_dir, d))]
             for subdir in sorted(subdirs, key=natural_sort_key):
-                subdir_path = os.path.join("optimization", subdir)
+                subdir_path = os.path.join(opt_dir, subdir)
                 subdir_files = [os.path.join(subdir, f) for f in os.listdir(subdir_path) if is_valid_input_file(f)]
                 input_files.extend(sorted(subdir_files, key=natural_sort_key))
         
@@ -13851,7 +13862,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         # Scan ALL subdirectories for completed calculations (check for .out files)
         # Files with only .out.backup are being redone and should NOT be counted as completed
         actual_completed = []
-        opt_dir = "optimization"
+        opt_dir = context.refinement_stage_dir if context.refinement_stage_dir else "refinement"
         
         # 1. Check optimization directory subfolders
         if os.path.exists(opt_dir):
@@ -14036,8 +14047,8 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                     continue
             
             output_file = basename + ('.out' if qm_program == 'orca' else '.log')
-            input_path = os.path.join("optimization", input_file)
-            output_path = os.path.join("optimization", output_file)
+            input_path = os.path.join(opt_dir, input_file)
+            output_path = os.path.join(opt_dir, output_file)
             
             # Skip if output already exists AND is successfully completed
             # This handles redo scenarios where failed .out files were deleted
@@ -14048,21 +14059,21 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 output_exists = True
             else:
                 # Check subdirectory (if files were sorted)
-                # E.g. optimization/motif_01_opt/motif_01_opt.out
-                subdir_path = os.path.join("optimization", basename, output_file)
+                # E.g. refinement/motif_01_opt/motif_01_opt.out
+                subdir_path = os.path.join(opt_dir, basename, output_file)
                 if os.path.exists(subdir_path):
                     output_path = subdir_path
                     output_exists = True
                 else:
                     # Also check shortened basename subdirectory
-                    # E.g. optimization/motif_01/motif_01_opt.out
+                    # E.g. refinement/motif_01/motif_01_opt.out
                     short_basename = basename
                     if '_opt' in basename:
                         short_basename = basename.replace('_opt', '')
                     elif '_calc' in basename:
                         short_basename = basename.replace('_calc', '')
                     
-                    subdir_path = os.path.join("optimization", short_basename, output_file)
+                    subdir_path = os.path.join(opt_dir, short_basename, output_file)
                     if os.path.exists(subdir_path):
                         output_path = subdir_path
                         output_exists = True
@@ -14112,11 +14123,11 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 # Determine working directory
                 if '/' in input_file or '\\' in input_file:
                     opt_subdir = os.path.dirname(input_file)
-                    opt_working_dir = os.path.join("optimization", opt_subdir)
+                    opt_working_dir = os.path.join(opt_dir, opt_subdir)
                     input_file_relative = os.path.basename(input_file)
                     output_file_relative = os.path.basename(output_file)
                 else:
-                    opt_working_dir = "optimization"
+                    opt_working_dir = opt_dir
                     input_file_relative = input_file
                     output_file_relative = output_file
                 
@@ -14257,7 +14268,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         
         # Clean up old failed files if they exist and all succeeded
         if not failed_optimizations:
-            for old_file in ["optimization/failed_opt.txt", "optimization/launcher_failed.sh"]:
+            for old_file in [os.path.join(opt_dir, "failed_opt.txt"), os.path.join(opt_dir, "launcher_failed.sh")]:
                 if os.path.exists(old_file):
                     try:
                         os.remove(old_file)
@@ -14270,7 +14281,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 print(f"Failed optimizations: {len(failed_optimizations)}/{num_inputs}")
             
             # Write failed_opt.txt
-            failed_list_file = os.path.join("optimization", "failed_opt.txt")
+            failed_list_file = os.path.join(opt_dir, "failed_opt.txt")
             with open(failed_list_file, 'w') as f:
                 f.write(f"# Failed optimizations: {len(failed_optimizations)}/{num_inputs}\n")
                 f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -14311,7 +14322,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                     
                     context.similarity_dir = sim_base
                 
-                os.chdir("optimization")
+                os.chdir(opt_dir)
                 
                 # Get exclusions from cache to filter output files
                 cache = load_protocol_cache(cache_file) if os.path.exists(cache_file) else {}
@@ -14413,7 +14424,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             print("✗ No output files found")
             return 1
     else:
-        print("Warning: No launcher script found in optimization/")
+        print(f"Warning: No launcher script found in {opt_dir}/")
         return 1
     
     return 0
