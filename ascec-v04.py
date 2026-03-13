@@ -7183,6 +7183,18 @@ def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_p
     Returns:
         Path to the generated .hess file, or None if failed
     """
+    workflow_ctx = getattr(sys, '_current_workflow_context', None)
+    workflow_concise = bool(
+        workflow_ctx
+        and getattr(workflow_ctx, 'is_workflow', False)
+        and getattr(workflow_ctx, 'workflow_verbose_level', 0) < 1
+        and not verbose
+    )
+
+    def _rescue_log(message: str) -> None:
+        if not workflow_concise:
+            print(message)
+
     # Get working directory and basename
     working_dir = os.path.dirname(xyz_file)
     if not working_dir:
@@ -7203,7 +7215,7 @@ def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_p
         # Skip first two lines (atom count and comment)
         xyz_coords = "".join(lines[2:])
     except Exception as e:
-        print(f"  Error reading XYZ file: {e}")
+        _rescue_log(f"  Error reading XYZ file: {e}")
         return None
     
     # Generate rescue input (pass use_numfreq for explicit control)
@@ -7224,7 +7236,7 @@ def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_p
         with open(launcher_path, 'r') as f:
             launcher_content = f.read()
     except Exception as e:
-        print(f"  Error reading launcher: {e}")
+        _rescue_log(f"  Error reading launcher: {e}")
         return None
     
     # Extract environment setup from launcher (before ### separator if present)
@@ -7271,12 +7283,12 @@ def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_p
             timeout=3600  # 1 hour timeout for Hessian calculation
         )
     except subprocess.TimeoutExpired:
-        print(f"  ✗ Rescue Hessian calculation timed out (1 hour)")
+        _rescue_log(f"  ✗ Rescue Hessian calculation timed out (1 hour)")
         if os.path.exists(temp_script):
             os.remove(temp_script)
         return None
     except Exception as e:
-        print(f"  ✗ Rescue Hessian calculation error: {e}")
+        _rescue_log(f"  ✗ Rescue Hessian calculation error: {e}")
         if os.path.exists(temp_script):
             os.remove(temp_script)
         return None
@@ -7323,7 +7335,7 @@ def run_rescue_hessian_calculation(xyz_file: str, rescue_method: str, launcher_p
             if verbose and result.stderr:
                 error_msg += f"\n    stderr: {result.stderr[:200]}"
         
-        print(error_msg)
+        _rescue_log(error_msg)
         return None
 
 
@@ -11974,6 +11986,11 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     # Usually similarity_2, similarity_3, etc.
     # Use refinement_sim_folder (the dedicated variable for optimization outputs)
     sim_dir = getattr(context, 'refinement_sim_folder', None)
+    workflow_concise = getattr(context, 'is_workflow', False) and getattr(context, 'workflow_verbose_level', 0) < 1
+
+    def _redo_log(*args, **kwargs):
+        if not workflow_concise:
+            print(*args, **kwargs)
     
     if not sim_dir:
         # Try to guess based on existence
@@ -12038,8 +12055,8 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
     if os.path.exists(critical_non_conv_dir):
         display_dir = os.path.dirname(need_recalc_dir)  # Show parent "skipped_structures"
     
-    print(f"\nProcessing redo structures from: {display_dir}")
-    print(f"Found {len(xyz_files)} structure(s) to retry")
+    _redo_log(f"\nProcessing redo structures from: {display_dir}")
+    _redo_log(f"Found {len(xyz_files)} structure(s) to retry")
     
     # 4. Process each file
     processed_count = 0
@@ -12161,15 +12178,15 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                 xyz_lines = displace_along_imaginary_mode(out_file, os.path.dirname(out_file))
                 if xyz_lines and len(xyz_lines) > 2:
                     new_geometry = xyz_lines[2:]
-                    print(f"    {basename}: 1 imaginary freq, displacing along mode \u2713")
+                    _redo_log(f"    {basename}: 1 imaginary freq, displacing along mode \u2713")
             elif imag_count >= 2:
                 # Multiple imaginary: displace along the highest (most negative) imaginary mode
                 xyz_lines = displace_along_imaginary_mode(out_file, os.path.dirname(out_file), use_highest_mode=True)
                 if xyz_lines and len(xyz_lines) > 2:
                     new_geometry = xyz_lines[2:]
-                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
+                    _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
                 else:
-                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗")
+                    _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗")
             else:
                 # No imaginary frequencies - check if non-converged (max iterations reached)
                 conv_status = detect_convergence_status(out_file)
@@ -12201,28 +12218,28 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                             
                             if hess_file and os.path.exists(hess_file):
                                 rescue_hessian_tasks.append((basename, hess_file))
-                                print(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
+                                _redo_log(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
                             else:
-                                print(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
+                                _redo_log(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
                             
                             # Cleanup temporary XYZ
                             if os.path.exists(rescue_xyz_path):
                                 os.remove(rescue_xyz_path)
                         except Exception as e:
-                            print(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
+                            _redo_log(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
                     else:
-                        print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        _redo_log(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
                 elif conv_status['status'] == 'not_converged':
                     # Non-converged but no rescue method - use final geometry
                     xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
                     if xyz_lines and len(xyz_lines) > 2:
                         new_geometry = xyz_lines[2:]
-                        print(f"    {basename}: non-converged (max iter), using final geometry ✓")
+                        _redo_log(f"    {basename}: non-converged (max iter), using final geometry ✓")
                     else:
-                        print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        _redo_log(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
                 else:
                     # Converged with no imaginary freqs - use similarity XYZ
-                    print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
+                    _redo_log(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
         else:
             # No .out file found - check if from critical_non_converged (needs rescue hessian)
             if is_critical_non_converged and os.path.exists(xyz_file):
@@ -12251,19 +12268,19 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                         
                         if hess_file and os.path.exists(hess_file):
                             rescue_hessian_tasks.append((basename, hess_file))
-                            print(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
+                            _redo_log(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
                         else:
-                            print(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
+                            _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
                         
                         if os.path.exists(rescue_xyz_path):
                             os.remove(rescue_xyz_path)
                     except Exception as e:
-                        print(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
+                        _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
                 else:
-                    print(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
+                    _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
             else:
                 # Regular case - just use XYZ from similarity
-                print(f"    {basename}: No .out file, using similarity XYZ", end='')
+                _redo_log(f"    {basename}: No .out file, using similarity XYZ", end='')
         
         # Fallback to XYZ file
         if not new_geometry:
@@ -12271,7 +12288,7 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                 new_geometry = f.readlines()[2:]
             imag_count = 0  # Initialize
             if out_file is None or imag_count == 0:
-                print(f" \u2713")
+                _redo_log(f" \u2713")
                 
         # 4c. Generate Input File
         if new_geometry:
@@ -12321,11 +12338,11 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                         os.remove(out_file)
                     
     if processed_count > 0:
-        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        _redo_log(f"\n  Regenerated {processed_count} input file(s) with new geometries")
         
         # Enable Hessian restart for structures with rescue Hessians computed
         if rescue_hessian_tasks:
-            print(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
+            _redo_log(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
             for task_basename, hess_file in rescue_hessian_tasks:
                 # Find the input file path
                 template_lower = template_file.lower().strip()
@@ -12352,9 +12369,9 @@ def process_optimization_redo(context: WorkflowContext, stage_dir: str, template
                         shutil.copy2(hess_file, hess_dest)
                     
                     if enable_hessian_restart(input_path, hess_dest):
-                        print(f"    {task_basename}: Hessian restart enabled ✓")
+                        _redo_log(f"    {task_basename}: Hessian restart enabled ✓")
                     else:
-                        print(f"    {task_basename}: Hessian restart failed ✗")
+                        _redo_log(f"    {task_basename}: Hessian restart failed ✗")
         
         # Sort for natural ordering (motif_01, motif_02, etc.)
         context.recalculated_files = sorted(processed_basenames, key=natural_sort_key)
