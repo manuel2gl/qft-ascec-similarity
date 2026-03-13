@@ -9844,6 +9844,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         return f"{minutes}m"
 
     def render_final_workflow_summary() -> None:
+        nonlocal progress_lines, last_progress_render
+
         total = len(stages)
         bar = render_progress_bar(total, total, width=30)
 
@@ -9884,17 +9886,34 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         workflow_end_dt = datetime.now()
         wall_time_str = format_compact_wall_time((workflow_end_dt - workflow_start_dt).total_seconds())
 
-        print("\n=== ASCEC & Similarity ===")
-        print("-" * 60)
-        print(f"Progress [{bar}] 100%")
-        print("-" * 60)
-        for line in summary_lines:
+        # Build the final panel as a single block so it repaints the live progress
+        # in-place instead of printing a duplicate header below it.
+        lines = [
+            "",
+            "=== ASCEC & Similarity ===",
+            "-" * 60,
+            f"Progress [{bar}] 100.0%",
+            "-" * 60,
+        ] + summary_lines + [
+            "",
+            "Workflow finished",
+            f"Start: {workflow_start_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"End:   {workflow_end_dt.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Total wall time: {wall_time_str}",
+            "-" * 60,
+        ]
+
+        if supports_ansi_repaint and progress_lines > 0:
+            sys.stdout.write(f"\033[{progress_lines}A")
+            for _ in range(progress_lines):
+                sys.stdout.write("\033[2K\033[1B")
+            sys.stdout.write(f"\033[{progress_lines}A")
+            sys.stdout.flush()
+
+        for line in lines:
             print(line)
-        print("\nWorkflow finished")
-        print(f"Start: {workflow_start_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"End:   {workflow_end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"Total wall time: {wall_time_str}")
-        print("-" * 60)
+        progress_lines = len(lines)
+        last_progress_render = tuple(lines)
 
     context = WorkflowContext(input_file=input_file)
     context.is_workflow = True  # We're in workflow mode
@@ -10087,7 +10106,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     last_progress_render: Optional[Tuple[str, ...]] = None
     supports_ansi_repaint = bool(sys.stdout.isatty() or (os.environ.get("TERM") not in (None, "", "dumb")))
 
-    def render_progress_bar(current: int, total: int, width: int = 30) -> str:
+    def render_progress_bar(current: float, total: float, width: int = 30) -> str:
         if total <= 0:
             return "░" * width
         ratio = min(current / total, 1.0)
