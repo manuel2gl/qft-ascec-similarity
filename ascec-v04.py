@@ -9830,6 +9830,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         0 on success, non-zero on failure
     """
     workflow_start_dt = datetime.now()
+    cache_file: Optional[str] = None
 
     def format_compact_wall_time(seconds: float) -> str:
         total_seconds = max(0, int(seconds))
@@ -9850,7 +9851,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         bar = render_progress_bar(total, total, width=30)
 
         # Prefer cache-backed stage data so redo mode reports FINAL similarity counts.
-        final_cache = load_protocol_cache(cache_file) if use_cache and os.path.exists(cache_file) else {}
+        final_cache: Dict[str, Any] = {}
+        if use_cache and isinstance(cache_file, str) and cache_file and os.path.exists(cache_file):
+            final_cache = load_protocol_cache(cache_file) or {}
         cache_stages = final_cache.get('stages', {}) if isinstance(final_cache, dict) else {}
 
         similarity_counter = 0
