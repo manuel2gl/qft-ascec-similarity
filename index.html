@@ -766,31 +766,35 @@
         }
 
         .smart-header-item.install-tab {
-            color: #0e5d8e;
+            color: #165224;
             font-weight: 700;
-            background: linear-gradient(180deg, #ecf8ff 0%, #d7efff 100%);
-            border-left: 1px solid #b8ddf4;
-            border-right: 1px solid #b8ddf4;
-            box-shadow: inset 0 0 0 1px rgba(90, 170, 220, 0.2);
-            padding: 8px 12px;
-            font-size: 0.83em;
+            letter-spacing: 0.01em;
+            background: linear-gradient(180deg, #b9efc3 0%, #7ad78a 58%, #53bf68 100%);
+            border-left: 1px solid #62b873;
+            border-right: 1px solid #62b873;
+            box-shadow: 0 4px 10px rgba(54, 142, 74, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.38);
+            padding: 10px 18px;
+            font-size: 0.91em;
             margin-right: 18px;
             margin-left: 8px;
-            border-radius: 4px 4px 0 0;
+            border-radius: 7px 7px 0 0;
         }
 
         .smart-header-item.install-tab:hover {
-            color: #0a4f79;
-            background: linear-gradient(180deg, #e0f4ff 0%, #c6e9ff 100%);
+            color: #11441c;
+            background: linear-gradient(180deg, #c6f2ce 0%, #88de97 58%, #5bc46f 100%);
+            box-shadow: 0 6px 12px rgba(54, 142, 74, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.42);
         }
 
         .smart-header-item.install-tab.active {
-            color: #08486d;
-            background: linear-gradient(180deg, #d5f0ff 0%, #afe0ff 100%);
+            color: #0f3d18;
+            background: linear-gradient(180deg, #d1f6d8 0%, #95e3a3 58%, #67ca7a 100%);
+            box-shadow: 0 7px 14px rgba(54, 142, 74, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.46);
         }
 
         .smart-header-item.install-tab.active::after {
-            background: #2ca7ea;
+            background: #2c9344;
+            height: 3px;
         }
 
         a.smart-header-item {
@@ -924,14 +928,14 @@
         }
 
         .install-command-row .install-download-btn {
-            background: linear-gradient(180deg, #3d9de2 0%, #2f86ca 100%);
-            border-color: #2a79b6;
+            background: linear-gradient(180deg, #4caf68 0%, #2f8f48 100%);
+            border-color: #2a7a3f;
             color: #ffffff;
         }
 
         .install-command-row .install-download-btn:hover {
-            background: linear-gradient(180deg, #318fcf 0%, #2877b4 100%);
-            border-color: #236ca4;
+            background: linear-gradient(180deg, #439f5f 0%, #287b3e 100%);
+            border-color: #226935;
         }
 
         .install-callout {
@@ -2763,65 +2767,65 @@
                     <h2>Tolerances</h2>
                     <div class="form-row-4">
                         <div class="form-group">
-                            <label>Electronic Energy</label>
+                            <label>Elec. Energy (Eh)</label>
                             <input type="number" id="adv-tol-electronic-energy" value="5e-6" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Gibbs Free Energy</label>
+                            <label>Gibbs Free E (Eh)</label>
                             <input type="number" id="adv-tol-gibbs-free-energy" value="5e-6" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>HOMO Energy</label>
+                            <label>HOMO E (eV)</label>
                             <input type="number" id="adv-tol-homo-energy" value="3e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>LUMO Energy</label>
+                            <label>LUMO E (eV)</label>
                             <input type="number" id="adv-tol-lumo-energy" value="2e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                     </div>
                     <div class="form-row-4">
                         <div class="form-group">
-                            <label>HOMO-LUMO Gap</label>
+                            <label>HOMO-LUMO (eV)</label>
                             <input type="number" id="adv-tol-homo-lumo-gap" value="3e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Dipole Moment</label>
+                            <label>Dipole Moment (D)</label>
                             <input type="number" id="adv-tol-dipole-moment" value="1.5e-3" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Radius of Gyration</label>
+                            <label>Radius Gyr. (Å)</label>
                             <input type="number" id="adv-tol-radius-of-gyration" value="1.5e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Rot. Const A</label>
+                            <label>Rot. A (GHz)</label>
                             <input type="number" id="adv-tol-rotational-constants-a" value="7e-5" step="any" oninput="updateAllPreviews()">
                         </div>
                     </div>
                     <div class="form-row-4">
                         <div class="form-group">
-                            <label>Rot. Const B</label>
+                            <label>Rot. B (GHz)</label>
                             <input type="number" id="adv-tol-rotational-constants-b" value="3.5e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Rot. Const C</label>
+                            <label>Rot. C (GHz)</label>
                             <input type="number" id="adv-tol-rotational-constants-c" value="3e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>First Vib. Freq</label>
+                            <label>First Vib. (cm^-1)</label>
                             <input type="number" id="adv-tol-first-vib-freq" value="1e-2" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Last Vib. Freq</label>
+                            <label>Last Vib. (cm^-1)</label>
                             <input type="number" id="adv-tol-last-vib-freq" value="0.3" step="any" oninput="updateAllPreviews()">
                         </div>
                     </div>
                     <div class="form-row-4">
                         <div class="form-group">
-                            <label>Avg H-Bond Dist</label>
+                            <label>Avg HB Dist (Å)</label>
                             <input type="number" id="adv-tol-average-hbond-distance" value="1e-3" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Avg H-Bond Angle</label>
+                            <label>Avg HB Angle (deg)</label>
                             <input type="number" id="adv-tol-average-hbond-angle" value="0.1" step="any" oninput="updateAllPreviews()">
                         </div>
                     </div>
