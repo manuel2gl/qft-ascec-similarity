@@ -16362,19 +16362,19 @@ if __name__ == "__main__":
             
             port = int(sys.argv[2]) if len(sys.argv) > 2 else 8080
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            web_dir = os.path.join(script_dir, 'web')
+            web_dir = script_dir
+            input_page = 'index.html'
             
-            if not os.path.exists(web_dir) or not os.path.exists(os.path.join(web_dir, 'ascec_input_generator.html')):
+            if not os.path.exists(os.path.join(web_dir, input_page)):
                 print("Error: Web input generator not found.")
-                print(f"Expected at: {web_dir}/ascec_input_generator.html")
+                print(f"Expected at: {web_dir}/{input_page}")
                 sys.exit(1)
             
-            os.chdir(web_dir)
             handler = partial(http.server.SimpleHTTPRequestHandler, directory=web_dir)
             
             try:
                 with socketserver.TCPServer(("", port), handler) as httpd:
-                    url = f"http://localhost:{port}/ascec_input_generator.html"
+                    url = f"http://localhost:{port}/{input_page}"
                     print(f"\n  ASCEC Input Generator")
                     print(f"  ─────────────────────")
                     print(f"  Opening: {url}")
