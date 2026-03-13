@@ -10129,14 +10129,27 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 stage_lines.append(f"[{i}/{total}] {name}{suffix}")
                 break
 
-        pct = int((completed_stages / total) * 100) if total > 0 else 0
-        bar = render_progress_bar(completed_stages, total, width=30)
+        # Smooth progress within a stage using n/N updates (annealing/optimization/refinement only).
+        stage_fraction = 0.0
+        if completed_stages < total and 1 <= current_stage_num <= total:
+            active_stage_type = stages[current_stage_num - 1].get('type')
+            if active_stage_type in ('replication', 'optimization', 'refinement') and sub_progress:
+                m = re.search(r'(\d+)\s*/\s*(\d+)', sub_progress)
+                if m:
+                    done = int(m.group(1))
+                    stage_total = int(m.group(2))
+                    if stage_total > 0:
+                        stage_fraction = min(max(done / stage_total, 0.0), 1.0)
+
+        progress_units = min(completed_stages + stage_fraction, float(total))
+        pct = ((progress_units / total) * 100.0) if total > 0 else 0.0
+        bar = render_progress_bar(progress_units, total, width=30)
 
         lines = [
             "",
             "=== ASCEC & Similarity ===",
             "-" * 60,
-            f"Progress [{bar}] {pct}%",
+            f"Progress [{bar}] {pct:.1f}%",
             "-" * 60,
         ] + stage_lines + [""]
 
