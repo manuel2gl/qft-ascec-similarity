@@ -2374,8 +2374,9 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                 for stage_key, stage_info in sorted_stages:
                     if stage_info.get('status') == 'completed':
                         stage_type = stage_key.split('_')[0].capitalize()
-                        type_map = {'Replication': 'Annealing', 'Calculation': 'Opt',
-                                  'Similarity': 'Similarity', 'Optimization': 'Ref'}
+                        type_map = {'Replication': 'Annealing', 'Calculation': 'Optimization',
+                                  'Similarity': 'Similarity', 'Optimization': 'Optimization',
+                                  'Refinement': 'Refinement'}
                         stage_name = type_map.get(stage_type, stage_type)
                         completed_stages.append(stage_name)
                 
@@ -2417,7 +2418,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             percentage = (wall_time / total_wall_time) * 100
                             total_qm_percentage += percentage
                             type_map = {'Replication': 'Annealing', 'Calculation': 'Optimization',
-                                      'Optimization': 'Refinement'}
+                                      'Optimization': 'Optimization', 'Refinement': 'Refinement'}
                             stage_name = type_map.get(stage_type, stage_type)
                             f.write(f"  {stage_name:<15} {format_wall_time_timing(wall_time):>15} {percentage:>9.1f}%\n")
                 
@@ -2466,7 +2467,8 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                     
                     stage_type = stage_key.split('_')[0].capitalize()
                     type_map = {'Replication': 'Annealing', 'Calculation': 'Optimization',
-                              'Similarity': 'Similarity', 'Optimization': 'Refinement'}
+                              'Similarity': 'Similarity', 'Optimization': 'Optimization',
+                              'Refinement': 'Refinement'}
                     stage_name = type_map.get(stage_type, stage_type)
                     
                     result = stage_info.get('result', {})
@@ -2519,7 +2521,11 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         
                         if 'motifs_created' in result:
                             motif_label = "Unique Motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
-                            f.write(f"    {motif_label}:           {result['motifs_created']} representatives\n")
+                            input_cnt = result.get('input_count')
+                            if input_cnt:
+                                f.write(f"    {motif_label}:           {input_cnt}/{result['motifs_created']} representatives\n")
+                            else:
+                                f.write(f"    {motif_label}:           {result['motifs_created']} representatives\n")
                         
                         # Get threshold info for validation output
                         threshold_met = result.get('threshold_met', True)
@@ -2588,17 +2594,30 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                                     f.write(f"    Target: {threshold_type} ≤ {threshold_value}% | Actual: {actual}%\n")
                     
                     elif stage_type == 'Optimization':
-                        if 'motifs_source' in result and result['motifs_source']:
-                            f.write(f"    Inputs from:      {result['motifs_source']}\n")
+                        if 'xyz_source' in result and result['xyz_source']:
+                            xyz_source = result['xyz_source'] if result['xyz_source'] else "Annealing"
+                            f.write(f"    Inputs from:      {xyz_source}\n")
                         if 'completed' in result and 'total' in result:
                             f.write(f"    Completed:        {result['completed']}/{result['total']} optimizations\n")
-                        if 'similarity_folder' in result and result['similarity_folder']:
-                            f.write(f"    Outputs to:       {result['similarity_folder']}\n")
                         # Calculate and show mean execution time
                         if wall_time and 'completed' in result and result['completed'] > 0:
                             mean_time = wall_time / result['completed']
                             f.write(f"    Mean exec time:   {format_wall_time_timing(mean_time)}\n")
-                    
+                        if 'similarity_folder' in result and result['similarity_folder']:
+                            f.write(f"    Outputs to:       {result['similarity_folder']}\n")
+
+                    elif stage_type == 'Refinement':
+                        if 'motifs_source' in result and result['motifs_source']:
+                            f.write(f"    Inputs from:      {result['motifs_source']}\n")
+                        if 'completed' in result and 'total' in result:
+                            f.write(f"    Completed:        {result['completed']}/{result['total']} refinements\n")
+                        # Calculate and show mean execution time
+                        if wall_time and 'completed' in result and result['completed'] > 0:
+                            mean_time = wall_time / result['completed']
+                            f.write(f"    Mean exec time:   {format_wall_time_timing(mean_time)}\n")
+                        if 'similarity_folder' in result and result['similarity_folder']:
+                            f.write(f"    Outputs to:       {result['similarity_folder']}\n")
+
                     # Wall time for non-similarity stages
                     if wall_time and stage_type != 'Similarity':
                         f.write(f"    Wall time:        {format_wall_time_timing(wall_time)}\n")
@@ -8598,6 +8617,7 @@ class WorkflowContext:
     last_similarity_motif_count: Optional[int] = None
     last_similarity_umotif_count: Optional[int] = None
     similarity_stage_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> representative count
+    similarity_stage_input_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> input structure count
     refinement_motifs_source: Optional[str] = None
     refinement_completed: Optional[int] = None
     refinement_total: Optional[int] = None
@@ -9872,15 +9892,23 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 stage_result = stage_data.get('result', {}) if isinstance(stage_data, dict) else {}
 
                 motifs_created = None
+                inputs_count = None
                 if isinstance(stage_result, dict):
                     motifs_created = stage_result.get('motifs_created')
+                    inputs_count = stage_result.get('input_count')
 
                 # Fallback to last known count if cache is unavailable.
                 if motifs_created is None:
                     motifs_created = context.sim_motifs_created
+                if inputs_count is None:
+                    stage_input_counts = getattr(context, 'similarity_stage_input_counts', {})
+                    inputs_count = stage_input_counts.get(idx)
 
                 if motifs_created is not None:
-                    stage_line = f"[{idx}/{total}] {stage_name} ({motifs_created}) ✓"
+                    if inputs_count is not None and inputs_count > 0:
+                        stage_line = f"[{idx}/{total}] {stage_name} ({inputs_count}/{motifs_created}) ✓"
+                    else:
+                        stage_line = f"[{idx}/{total}] {stage_name} ({motifs_created}) ✓"
                 else:
                     stage_line = f"[{idx}/{total}] {stage_name} ✓"
 
@@ -10135,7 +10163,9 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 line = f"[{i}/{total}] {name} ✓"
                 if st.get('type') == 'similarity':
                     stage_counts = getattr(context, 'similarity_stage_counts', {})
+                    stage_input_counts = getattr(context, 'similarity_stage_input_counts', {})
                     stage_total = stage_counts.get(i)
+                    stage_inputs = stage_input_counts.get(i)
                     if stage_total is None:
                         motif_count = getattr(context, 'last_similarity_motif_count', None)
                         umotif_count = getattr(context, 'last_similarity_umotif_count', None)
@@ -10144,7 +10174,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             u_val = umotif_count if umotif_count is not None else 0
                             stage_total = m_val + u_val
                     if stage_total is not None and stage_total > 0:
-                        line += f" ({stage_total})"
+                        if stage_inputs is not None and stage_inputs > 0:
+                            line += f" ({stage_inputs}/{stage_total})"
+                        else:
+                            line += f" ({stage_total})"
                 stage_lines.append(line)
             elif i == current_stage_num and completed_stages < total:
                 suffix = f" {sub_progress}" if sub_progress else " ..."
@@ -10714,13 +10747,15 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             if os.path.exists(summary_file):
                                 critical_pct, skipped_pct = parse_similarity_summary(summary_file)
                                 
-                                print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
+                                if context.workflow_verbose_level >= 1:
+                                    print(f"\nResults: {critical_pct:.1f}% critical, {skipped_pct:.1f}% skipped")
                                 
                                 threshold_met = True
                                 if max_critical is not None:
                                     threshold_met = critical_pct <= max_critical
                                     if not threshold_met:
-                                        print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
+                                        if context.workflow_verbose_level >= 1:
+                                            print(f"→ Threshold exceeded (critical {critical_pct:.1f}% > {max_critical}%)")
                                         print(f"  Invalidating cache and re-running {prev_stage_type} with redo logic...")
                                         
                                         # Invalidate both previous stage and similarity stages
@@ -10741,12 +10776,14 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         stage_idx -= 1
                                         continue
                                     else:
-                                        print(f"→ Threshold met (critical ≤ {max_critical}%)")
+                                        if context.workflow_verbose_level >= 1:
+                                            print(f"→ Threshold met (critical ≤ {max_critical}%)")
                                         
                                 elif max_skipped is not None:
                                     threshold_met = skipped_pct <= max_skipped
                                     if not threshold_met:
-                                        print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
+                                        if context.workflow_verbose_level >= 1:
+                                            print(f"→ Threshold exceeded (skipped {skipped_pct:.1f}% > {max_skipped}%)")
                                         print(f"  Invalidating cache and re-running {prev_stage_type} with redo logic...")
                                         
                                         # Invalidate both previous stage and similarity stages
@@ -10767,7 +10804,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                                         stage_idx -= 1
                                         continue
                                     else:
-                                        print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
+                                        if context.workflow_verbose_level >= 1:
+                                            print(f"→ Threshold met (skipped ≤ {max_skipped}%)")
                 
                 # Save similarity result to cache
                 if result == 0 and use_cache:
@@ -10803,6 +10841,10 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         sim_result['similarity_folder'] = context.sim_folder
                     if hasattr(context, 'sim_motifs_created') and context.sim_motifs_created is not None:
                         sim_result['motifs_created'] = context.sim_motifs_created
+                    sim_stage_num_s = stage_num
+                    input_cnt_s = getattr(context, 'similarity_stage_input_counts', {}).get(sim_stage_num_s)
+                    if input_cnt_s:
+                        sim_result['input_count'] = input_cnt_s
                     
                     # Extract critical and skipped percentages and counts
                     summary_file = os.path.join(sim_dir, "clustering_summary.txt")
@@ -11113,7 +11155,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                             sim_result['similarity_folder'] = context.sim_folder
                         if hasattr(context, 'sim_motifs_created'):
                             sim_result['motifs_created'] = context.sim_motifs_created
-                        
+                        ref_sim_stage_num = stage_num + 1
+                        input_cnt_r = getattr(context, 'similarity_stage_input_counts', {}).get(ref_sim_stage_num)
+                        if input_cnt_r:
+                            sim_result['input_count'] = input_cnt_r
+
                         # Add initial validation values (from first attempt)
                         if initial_critical is not None:
                             sim_result['initial_critical'] = initial_critical
@@ -11503,7 +11549,12 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     """
     # Determine similarity directory (check context or default)
     sim_dir = getattr(context, 'similarity_dir', None)
-    
+    workflow_concise = getattr(context, 'is_workflow', False) and getattr(context, 'workflow_verbose_level', 0) < 1
+
+    def _redo_log(*args, **kwargs):
+        if not workflow_concise:
+            print(*args, **kwargs)
+
     if not sim_dir:
         # For optimization stages, check for similarity_2, similarity_3, etc.
         # For optimization stages, use similarity
@@ -11560,8 +11611,8 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
     
     # Determine display directory
     display_dir = os.path.join(sim_dir, "skipped_structures")
-    print(f"\nProcessing redo structures from: {display_dir}")
-    print(f"\nFound {len(need_recalc_basenames)} structure(s) to retry")
+    _redo_log(f"\nProcessing redo structures from: {display_dir}")
+    _redo_log(f"\nFound {len(need_recalc_basenames)} structure(s) to retry")
 
     processed_count = 0
     processed_basenames = []
@@ -11571,7 +11622,7 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         with open(template_file, 'r') as f:
             template_content = f.read()
     else:
-        print(f"  Warning: Template file {template_file} not found. Cannot regenerate inputs.")
+        _redo_log(f"  Warning: Template file {template_file} not found. Cannot regenerate inputs.")
         return False
 
     # Find launcher path for ORCA calculations (load early for version detection)
@@ -11629,7 +11680,7 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         
         # Skip if no xyz_file found (shouldn't happen since basenames come from xyz files)
         if not xyz_file:
-            print(f"    {basename}: XYZ file not found, skipping")
+            _redo_log(f"    {basename}: XYZ file not found, skipping")
             continue
         
         # Check if this structure came from critical_non_converged (non-converged optimization)
@@ -11697,13 +11748,13 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                         natoms = int(xyz_lines[0].strip())
                         if len(xyz_lines) >= natoms + 2:
                             new_geometry = xyz_lines[2:]  # Skip first 2 lines
-                            print(f"    {basename}: 1 imaginary freq, displacing along mode ✓")
+                            _redo_log(f"    {basename}: 1 imaginary freq, displacing along mode ✓")
                         else:
-                            print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (malformed XYZ)")
+                            _redo_log(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (malformed XYZ)")
                     except (ValueError, IndexError):
-                        print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (invalid XYZ format)")
+                        _redo_log(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (invalid XYZ format)")
                 else:
-                    print(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (displacement failed)")
+                    _redo_log(f"    {basename}: 1 imaginary freq, displacing along mode ✗ (displacement failed)")
             
             elif imag_count >= 2:
                 # Multiple imaginary: displace along the highest (most negative) imaginary mode
@@ -11713,13 +11764,13 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                         natoms = int(xyz_lines[0].strip())
                         if len(xyz_lines) >= natoms + 2:
                             new_geometry = xyz_lines[2:]  # Skip first 2 lines
-                            print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
+                            _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✓")
                         else:
-                            print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (malformed XYZ)")
+                            _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (malformed XYZ)")
                     except (ValueError, IndexError):
-                        print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (invalid XYZ format)")
+                        _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (invalid XYZ format)")
                 else:
-                    print(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (displacement failed)")
+                    _redo_log(f"    {basename}: {imag_count} imaginary freqs, displacing along highest mode ✗ (displacement failed)")
             else:
                 # No imaginary frequencies - check if non-converged (max iterations reached)
                 conv_status = detect_convergence_status(out_file)
@@ -11751,47 +11802,47 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                             
                             if hess_file and os.path.exists(hess_file):
                                 rescue_hessian_tasks.append((basename, hess_file))
-                                print(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
+                                _redo_log(f"    {basename}: non-converged (max iter), rescue Hessian computed ✓")
                             else:
-                                print(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
+                                _redo_log(f"    {basename}: non-converged (max iter), using final geometry (rescue failed)")
                             
                             # Cleanup temporary XYZ
                             if os.path.exists(rescue_xyz_path):
                                 os.remove(rescue_xyz_path)
                         except Exception as e:
-                            print(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
+                            _redo_log(f"    {basename}: non-converged (max iter), using final geometry (error: {e})")
                     else:
                         # Fallback to similarity XYZ
-                        print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        _redo_log(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
                         if os.path.exists(xyz_file):
                             with open(xyz_file, 'r') as f:
                                 new_geometry = f.readlines()[2:]
-                            print(f" ✓")
+                            _redo_log(f" ✓")
                         else:
-                            print(f" ✗ (extraction failed)")
+                            _redo_log(f" ✗ (extraction failed)")
                 elif conv_status['status'] == 'not_converged':
                     # Non-converged but no rescue method - use final geometry
                     xyz_lines = extract_final_geometry(out_file, os.path.dirname(out_file))
                     if xyz_lines:
                         new_geometry = xyz_lines[2:]
-                        print(f"    {basename}: non-converged (max iter), using final geometry ✓")
+                        _redo_log(f"    {basename}: non-converged (max iter), using final geometry ✓")
                     else:
-                        print(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
+                        _redo_log(f"    {basename}: non-converged (max iter), using similarity XYZ", end='')
                         if os.path.exists(xyz_file):
                             with open(xyz_file, 'r') as f:
                                 new_geometry = f.readlines()[2:]
-                            print(f" ✓")
+                            _redo_log(f" ✓")
                         else:
-                            print(f" ✗")
+                            _redo_log(f" ✗")
                 else:
                     # Converged with no imaginary freqs - use similarity XYZ
-                    print(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
+                    _redo_log(f"    {basename}: No imaginary freqs, using similarity XYZ", end='')
                     if os.path.exists(xyz_file):
                         with open(xyz_file, 'r') as f:
                             new_geometry = f.readlines()[2:]
-                        print(f" ✓")
+                        _redo_log(f" ✓")
                     else:
-                        print(f" ✗ (similarity XYZ not found)")
+                        _redo_log(f" ✗ (similarity XYZ not found)")
         else:
             # No .out file found - check if from critical_non_converged (needs rescue hessian)
             if is_critical_non_converged and xyz_file and os.path.exists(xyz_file):
@@ -11820,24 +11871,24 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                         
                         if hess_file and os.path.exists(hess_file):
                             rescue_hessian_tasks.append((basename, hess_file))
-                            print(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
+                            _redo_log(f"    {basename}: critical non-converged, rescue Hessian computed ✓")
                         else:
-                            print(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
+                            _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (rescue failed)")
                         
                         if os.path.exists(rescue_xyz_path):
                             os.remove(rescue_xyz_path)
                     except Exception as e:
-                        print(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
+                        _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (error: {e})")
                 else:
-                    print(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
+                    _redo_log(f"    {basename}: critical non-converged, using XYZ geometry (no rescue method)")
             elif xyz_file and os.path.exists(xyz_file):
                 # Regular case - just use XYZ from similarity
-                print(f"    {basename}: No .out file, using similarity XYZ", end='')
+                _redo_log(f"    {basename}: No .out file, using similarity XYZ", end='')
                 with open(xyz_file, 'r') as f:
                     new_geometry = f.readlines()[2:]
-                print(f" ✓")
+                _redo_log(f" ✓")
             else:
-                print(f"    {basename}: No .out file, similarity XYZ not found ✗")
+                _redo_log(f"    {basename}: No .out file, similarity XYZ not found ✗")
         
         # Regenerate input file with new geometry
         if new_geometry:
@@ -11901,7 +11952,7 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                     processed_count += 1
                     processed_basenames.append(basename)
                 except Exception as e:
-                    print(f"\n    Warning: Could not update {basename}: {e}")
+                    _redo_log(f"\n    Warning: Could not update {basename}: {e}")
             else:
                 # Original file doesn't exist - create new from template
                 # Parse XYZ lines into atom fields (symbol, x, y, z)
@@ -11924,11 +11975,11 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                     processed_basenames.append(basename)
     
     if processed_count > 0:
-        print(f"\n  Regenerated {processed_count} input file(s) with new geometries")
+        _redo_log(f"\n  Regenerated {processed_count} input file(s) with new geometries")
         
         # Enable Hessian restart for structures with rescue Hessians computed
         if rescue_hessian_tasks:
-            print(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
+            _redo_log(f"  Enabling Hessian restart for {len(rescue_hessian_tasks)} structure(s)")
             for task_basename, hess_file in rescue_hessian_tasks:
                 # Find the input file path
                 template_lower = template_file.lower().strip()
@@ -11955,9 +12006,9 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
                         shutil.copy2(hess_file, hess_dest)
                     
                     if enable_hessian_restart(input_path, hess_dest):
-                        print(f"    {task_basename}: Hessian restart enabled ✓")
+                        _redo_log(f"    {task_basename}: Hessian restart enabled ✓")
                     else:
-                        print(f"    {task_basename}: Hessian restart failed ✗")
+                        _redo_log(f"    {task_basename}: Hessian restart failed ✗")
         
         # Store recalculated basenames in context for similarity cache update
         context.recalculated_files = processed_basenames
@@ -11965,7 +12016,7 @@ def process_redo_structures(context: WorkflowContext, stage_dir: str, template_f
         # RENAME (not delete) output files for structures needing recalculation
         # This preserves the old .out file in case the new calculation fails
         # We can then extract geometry from the backup on next redo attempt
-        print(f"  Backing up old output files for structures needing recalculation")
+        _redo_log(f"  Backing up old output files for structures needing recalculation")
         for basename in processed_basenames:
             # Build list of subdirectories to search, including shortened basename variants
             subdirs_to_search = ['orca_out', 'gaussian_out', 'completed', basename]
@@ -13252,11 +13303,14 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
                 except Exception:
                     pass
     
-    # Verify orca_out_N or opt_out_N subfolder exists
+    # Verify orca_out_N or opt_out_N subfolder exists and count input structures
     out_folder_found = False
-    for item in os.listdir(similarity_base):
+    sim_input_count = 0
+    for item in sorted(os.listdir(similarity_base)):
         if item.startswith("orca_out_") or item.startswith("opt_out_"):
             out_folder_found = True
+            out_dir = os.path.join(similarity_base, item)
+            sim_input_count = len(glob.glob(os.path.join(out_dir, "*.out")))
             break
     
     if not out_folder_found:
@@ -13433,6 +13487,8 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         if match:
             stage_num = int(match.group(1))
             context.similarity_stage_counts[stage_num] = stage_total
+            if sim_input_count > 0:
+                context.similarity_stage_input_counts[stage_num] = sim_input_count
         
         if verbose:
             print("\n✓ Similarity analysis completed")
