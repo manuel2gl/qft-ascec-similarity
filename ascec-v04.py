@@ -2316,7 +2316,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
         except:
             pass
         return None
-    
+
     def _extract_energy_evals_from_annealing(annealing_dir: str) -> Optional[int]:
         """Extract total energy evaluations from annealing.out file."""
         annealing_out = os.path.join(annealing_dir, 'annealing.out')
@@ -2332,6 +2332,32 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
         except:
             pass
         return None
+
+    def _extract_final_clusters_from_summary(summary_file: str) -> Optional[int]:
+        """Extract final cluster count from clustering_summary.txt."""
+        try:
+            with open(summary_file, 'r') as f:
+                content = f.read()
+            match = re.search(r'Total number of final clusters:\s*(\d+)', content, re.IGNORECASE)
+            if match:
+                return int(match.group(1))
+        except Exception:
+            pass
+        return None
+
+    def _resolve_similarity_summary_file(result: Dict[str, Any]) -> Optional[str]:
+        """Resolve clustering_summary.txt for a similarity result entry."""
+        sim_path = result.get('working_dir') or result.get('similarity_folder')
+        if not sim_path:
+            return None
+
+        sim_base = sim_path
+        base_name = os.path.basename(os.path.normpath(sim_path))
+        if base_name.startswith('orca_out_') or base_name.startswith('opt_out_'):
+            sim_base = os.path.dirname(sim_path)
+
+        summary_file = os.path.join(sim_base, 'clustering_summary.txt')
+        return summary_file if os.path.exists(summary_file) else None
     
     try:
         with open(output_file, 'w') as f:
@@ -2509,6 +2535,18 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             f.write(f"    Outputs to:       {result['similarity_folder']}\n")
                     
                     elif stage_type == 'Similarity':
+                        live_critical_pct = None
+                        live_skipped_pct = None
+                        live_critical_count = None
+                        live_skipped_count = None
+                        live_clusters = None
+                        sim_summary_file = _resolve_similarity_summary_file(result)
+                        if sim_summary_file:
+                            live_critical_pct, live_skipped_pct = parse_similarity_summary(sim_summary_file)
+                            sim_base = os.path.dirname(sim_summary_file)
+                            live_critical_count, live_skipped_count = parse_similarity_output(sim_base)
+                            live_clusters = _extract_final_clusters_from_summary(sim_summary_file)
+
                         if 'similarity_folder' in result and result['similarity_folder']:
                             f.write(f"    Working dir:      {result['similarity_folder']}\n")
                         if 'threshold' in result:
@@ -2519,13 +2557,14 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             f.write(f"    RMSD:             N/A\n")
                         f.write("\n")
                         
-                        if 'motifs_created' in result:
+                        motifs_created = live_clusters if live_clusters is not None else result.get('motifs_created')
+                        if motifs_created is not None:
                             motif_label = "Unique Motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
                             input_cnt = result.get('input_count')
                             if input_cnt:
-                                f.write(f"    {motif_label}:           {input_cnt}/{result['motifs_created']} representatives\n")
+                                f.write(f"    {motif_label}:           {input_cnt}/{motifs_created} representatives\n")
                             else:
-                                f.write(f"    {motif_label}:           {result['motifs_created']} representatives\n")
+                                f.write(f"    {motif_label}:           {motifs_created} representatives\n")
                         
                         # Get threshold info for validation output
                         threshold_met = result.get('threshold_met', True)
@@ -2554,13 +2593,13 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                             
                             # Show Final validation
                             f.write(f"\n    Final validation ({attempts} Redo Attempts)\n")
-                            if 'critical_pct' in result:
-                                crit_pct = result['critical_pct']
-                                crit_count = result.get('critical_count', 0)
+                            crit_pct = live_critical_pct if live_critical_pct is not None else result.get('critical_pct')
+                            crit_count = live_critical_count if live_critical_count is not None else result.get('critical_count', 0)
+                            if crit_pct is not None:
                                 f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
-                            if 'skipped_pct' in result:
-                                skip_pct = result['skipped_pct']
-                                skip_count = result.get('skipped_count', 0)
+                            skip_pct = live_skipped_pct if live_skipped_pct is not None else result.get('skipped_pct')
+                            skip_count = live_skipped_count if live_skipped_count is not None else result.get('skipped_count', 0)
+                            if skip_pct is not None:
                                 f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
                             
                             if threshold_value is not None:
@@ -2574,13 +2613,13 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         else:
                             # No redo - show single validation
                             f.write("\n")
-                            if 'critical_pct' in result:
-                                crit_pct = result['critical_pct']
-                                crit_count = result.get('critical_count', 0)
+                            crit_pct = live_critical_pct if live_critical_pct is not None else result.get('critical_pct')
+                            crit_count = live_critical_count if live_critical_count is not None else result.get('critical_count', 0)
+                            if crit_pct is not None:
                                 f.write(f"    Critical:         {crit_pct}% ({crit_count} structures)\n")
-                            if 'skipped_pct' in result:
-                                skip_pct = result['skipped_pct']
-                                skip_count = result.get('skipped_count', 0)
+                            skip_pct = live_skipped_pct if live_skipped_pct is not None else result.get('skipped_pct')
+                            skip_count = live_skipped_count if live_skipped_count is not None else result.get('skipped_count', 0)
+                            if skip_pct is not None:
                                 f.write(f"    Skipped:          {skip_pct}% ({skip_count} structures)\n")
                             
                             # Threshold validation
@@ -7784,7 +7823,12 @@ def summarize_calculations(directory=".", file_types=None):
                 outfile.write(f"  Mean cycles: {all_results['total_cycles'] // all_results['cycles_count']}\n")
                 outfile.write(f"  Min cycles: {all_results['min_cycles']}\n")
                 outfile.write(f"  Max cycles: {all_results['max_cycles']}\n")
-                outfile.write(f"  Non-converged: {all_results['non_converged']}\n")
+            else:
+                # Keep cycle metrics explicit even when all jobs are non-converged.
+                outfile.write("  Mean cycles: N/A\n")
+                outfile.write("  Min cycles: N/A\n")
+                outfile.write("  Max cycles: N/A\n")
+            outfile.write(f"  Non-converged: {all_results['non_converged']}\n")
 
             outfile.write("=" * 40 + "\n\n")
 
@@ -7801,6 +7845,8 @@ def summarize_calculations(directory=".", file_types=None):
                     outfile.write(f"  energy = {result['energy']}\n")
                 if 'cycles' in result and result['cycles'] is not None:
                     outfile.write(f"  cycles = {result['cycles']}\n")
+                else:
+                    outfile.write("  cycles = N/A\n")
                 if 'time' in result and result['time'] is not None:
                     outfile.write(f"  time = {format_time_summary(result['time'], include_days=False)}\n")
                 outfile.write("\n")
@@ -8943,10 +8989,14 @@ def parse_similarity_percentages(stdout_text: str) -> Tuple[float, float]:
     skipped_pct = 0.0
     
     try:
-        # Look for "Critical skipped files: 4 (1.0%)"
-        critical_match = re.search(r'Critical skipped files:.*?\(([0-9.]+)%\)', stdout_text, re.IGNORECASE)
-        if critical_match:
-            critical_pct = float(critical_match.group(1))
+        # Look for critical percentages from both legacy and new similarity outputs.
+        critical_matches = re.findall(
+            r'(?:Critical skipped files|Critical reduced-vector unmatched):.*?\(([0-9.]+)%\)',
+            stdout_text,
+            re.IGNORECASE,
+        )
+        if critical_matches:
+            critical_pct = max(float(val) for val in critical_matches)
         
         # Look for "Total files skipped: 47 (11.2%)"
         skipped_match = re.search(r'Total files skipped:.*?\(([0-9.]+)%\)', stdout_text, re.IGNORECASE)
@@ -8978,10 +9028,14 @@ def parse_similarity_summary(summary_file: str) -> Tuple[float, float]:
         with open(summary_file, 'r') as f:
             content = f.read()
             
-        # Look for "Critical skipped files: 1 (50.0%)"
-        critical_match = re.search(r'Critical skipped files:.*?\(([0-9.]+)%\)', content, re.IGNORECASE)
-        if critical_match:
-            critical_pct = float(critical_match.group(1))
+        # Capture critical percentages from both formats and use the strictest value.
+        critical_matches = re.findall(
+            r'(?:Critical skipped files|Critical reduced-vector unmatched):.*?\(([0-9.]+)%\)',
+            content,
+            re.IGNORECASE,
+        )
+        if critical_matches:
+            critical_pct = max(float(val) for val in critical_matches)
         
         # Look for "Total files skipped: 1 (50.0%)"
         skipped_match = re.search(r'Total files skipped:.*?\(([0-9.]+)%\)', content, re.IGNORECASE)
@@ -9012,11 +9066,15 @@ def parse_similarity_output(similarity_dir: str) -> Tuple[int, int]:
         with open(summary_file, 'r') as f:
             content = f.read()
             
-            # Look for lines like "Critical skipped files: 0 (0.0%)"
+            # Critical count can come from skipped critical files or reduced-vector unmatched.
             import re
-            critical_match = re.search(r'Critical skipped files:\s*(\d+)', content, re.IGNORECASE)
-            if critical_match:
-                critical_count = int(critical_match.group(1))
+            critical_matches = re.findall(
+                r'(?:Critical skipped files|Critical reduced-vector unmatched):\s*(\d+)',
+                content,
+                re.IGNORECASE,
+            )
+            if critical_matches:
+                critical_count = max(int(val) for val in critical_matches)
             
             # Look for total skipped count like "Total files skipped: 97 (19.9%)"
             skipped_match = re.search(r'Total files skipped:\s*(\d+)', content, re.IGNORECASE)
@@ -13484,6 +13542,9 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         context.last_similarity_umotif_count = umotif_count
         context.last_similarity_input_count = sim_input_count if sim_input_count > 0 else None
         stage_total = (motif_count or 0) + (umotif_count or 0)
+        if stage_total > 0:
+            # Keep summary count stage-local to avoid carrying over previous similarity values.
+            context.sim_motifs_created = stage_total
         stage_key = getattr(context, 'current_stage_key', '')
         match = re.search(r'^similarity_(\d+)$', stage_key)
         if match:
