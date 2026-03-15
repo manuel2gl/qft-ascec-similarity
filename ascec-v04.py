@@ -2560,11 +2560,8 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
                         motifs_created = live_clusters if live_clusters is not None else result.get('motifs_created')
                         if motifs_created is not None:
                             motif_label = "Unique Motifs" if ('output_dir' in result and 'umotif' in str(result.get('output_dir', ''))) else "Motifs"
-                            input_cnt = result.get('input_count')
-                            if input_cnt:
-                                f.write(f"    {motif_label}:           {input_cnt}/{motifs_created} representatives\n")
-                            else:
-                                f.write(f"    {motif_label}:           {motifs_created} representatives\n")
+                            label_col = f"    {motif_label}:"
+                            f.write(f"{label_col:<22}{motifs_created} representatives\n")
                         
                         # Get threshold info for validation output
                         threshold_met = result.get('threshold_met', True)
