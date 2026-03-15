@@ -13402,9 +13402,6 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         print(f"\nRunning similarity analysis...")
         print(f"Using similarity script: {os.path.basename(similarity_script)}")
     
-    # Import re for pattern matching
-    import re
-    
     # Build command - pass '1' via stdin to auto-select the first folder
     cmd = ['python', similarity_script] + other_args
     
