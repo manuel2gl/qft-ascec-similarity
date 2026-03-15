@@ -8614,6 +8614,7 @@ class WorkflowContext:
     optimization_sim_folder: Optional[str] = None
     sim_folder: Optional[str] = None
     sim_motifs_created: Optional[int] = None
+    last_similarity_input_count: Optional[int] = None
     last_similarity_motif_count: Optional[int] = None
     last_similarity_umotif_count: Optional[int] = None
     similarity_stage_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> representative count
@@ -13481,6 +13482,7 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
         motif_count, umotif_count = _count_latest_similarity_representatives(similarity_base)
         context.last_similarity_motif_count = motif_count
         context.last_similarity_umotif_count = umotif_count
+        context.last_similarity_input_count = sim_input_count if sim_input_count > 0 else None
         stage_total = (motif_count or 0) + (umotif_count or 0)
         stage_key = getattr(context, 'current_stage_key', '')
         match = re.search(r'^similarity_(\d+)$', stage_key)
@@ -13489,6 +13491,14 @@ def execute_similarity_stage(context: WorkflowContext, stage: Dict[str, Any]) ->
             context.similarity_stage_counts[stage_num] = stage_total
             if sim_input_count > 0:
                 context.similarity_stage_input_counts[stage_num] = sim_input_count
+        else:
+            # Combined mode runs similarity while current_stage_key is still optimization/refinement.
+            prev_match = re.search(r'^(optimization|refinement)_(\d+)$', stage_key)
+            if prev_match:
+                stage_num = int(prev_match.group(2)) + 1
+                context.similarity_stage_counts[stage_num] = stage_total
+                if sim_input_count > 0:
+                    context.similarity_stage_input_counts[stage_num] = sim_input_count
         
         if verbose:
             print("\n✓ Similarity analysis completed")
