@@ -61,7 +61,7 @@ if __name__ == '__main__':
         pass
 
 # Global Constants
-ASCEC_VERSION = "0.4"  # ASCEC version string for display
+ASCEC_VERSION = "* ASCEC-v04: Feb 2026 *"  # ASCEC version string for display
 
 max_mole = 100  # Increase this if you have more than 100 molecules
 B2 = 3.166811563e-6   # Boltzmann constant in Hartree/K (approx. 3.166811563 × 10^-6 Hartree/K)
@@ -2368,14 +2368,14 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             f.write(center_text("Universidad de Antioquia - QFT") + "\n")
             f.write("=" * 75 + "\n\n")
             
-            f.write(center_text("PROTOCOL WORKFLOW SUMMARY") + "\n")
+            f.write(center_text("Protocol Workflow Summary") + "\n")
             f.write(center_text("-" * 30) + "\n\n")
             
             # ══════════════════════════════════════════════════════════════════════
             # EXECUTION OVERVIEW
             # ══════════════════════════════════════════════════════════════════════
             f.write("┌" + "─" * 73 + "┐\n")
-            f.write("│" + center_text("EXECUTION OVERVIEW", 73) + "│\n")
+            f.write("│" + center_text("Execution Overview", 73) + "│\n")
             f.write("└" + "─" * 73 + "┘\n\n")
             
             # Timing info
@@ -2413,7 +2413,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             # ══════════════════════════════════════════════════════════════════════
             if 'stages' in cache and total_wall_time > 0:
                 f.write("┌" + "─" * 73 + "┐\n")
-                f.write("│" + center_text("TIMING BREAKDOWN", 73) + "│\n")
+                f.write("│" + center_text("Timing Breakdown", 73) + "│\n")
                 f.write("└" + "─" * 73 + "┘\n\n")
                 
                 f.write(f"  {'Stage':<15} {'Duration':>15} {'% Total':>10}\n")
@@ -2461,7 +2461,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             # ══════════════════════════════════════════════════════════════════════
             if 'protocol_text' in cache:
                 f.write("┌" + "─" * 73 + "┐\n")
-                f.write("│" + center_text("PROTOCOL DEFINITION", 73) + "│\n")
+                f.write("│" + center_text("Protocol Definition", 73) + "│\n")
                 f.write("└" + "─" * 73 + "┘\n\n")
                 
                 protocol_lines = cache['protocol_text'].split(',')
@@ -2475,7 +2475,7 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
             # STAGE DETAILS
             # ══════════════════════════════════════════════════════════════════════
             f.write("┌" + "─" * 73 + "┐\n")
-            f.write("│" + center_text("STAGE DETAILS", 73) + "│\n")
+            f.write("│" + center_text("Stage Details", 73) + "│\n")
             f.write("└" + "─" * 73 + "┘\n\n")
             
             if 'stages' in cache:
