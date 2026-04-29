@@ -167,8 +167,10 @@ fi
 
 # Installs numpy, scipy, etc.
 conda install numpy scipy matplotlib scikit-learn -y
-# Installs openbabel and cclib from conda-forge
-conda install -c conda-forge cclib openbabel -y
+# Installs openbabel, cclib, and xtb from conda-forge.
+# xtb is the default annealing backend (standalone, no ORCA required for a
+# preliminary run). ORCA is optional and installed separately when needed.
+conda install -c conda-forge cclib openbabel xtb -y
 # Installs orca-pi parser via pip
 pip install orca-pi
 
