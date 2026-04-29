@@ -2650,7 +2650,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                         <div class="form-group" style="flex:1; min-width:120px; margin-bottom:0;">
                             <label>Theory</label>
                             <select id="smart-annealing-theory" onchange="updateSmartAnnealingMethod()">
-                                <option value="semiempirical" selected>Semiempirical</option>
+                                <option value="xtb" selected>Standalone xTB</option>
+                                <option value="semiempirical">Semiempirical</option>
                                 <option value="dft">DFT</option>
                                 <option value="post-hf">Post-HF</option>
                             </select>
@@ -3107,7 +3108,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                         <div class="form-group">
                             <label>Theory</label>
                             <select id="adv-annealing-theory" onchange="updateAdvAnnealingMethod(); updateAllPreviews();">
-                                <option value="semiempirical" selected>Semiempirical</option>
+                                <option value="xtb" selected>Standalone xTB</option>
+                                <option value="semiempirical">Semiempirical</option>
                                 <option value="dft">DFT</option>
                                 <option value="post-hf">Post-HF / Wavefunction</option>
                             </select>
@@ -3330,13 +3332,13 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <label>QM Program</label>
                             <select id="qm-program" onchange="updateQmCommandFromProgram(); updatePreview();">
                                 <option value="1">Gaussian (1)</option>
-                                <option value="2" selected>ORCA (2)</option>
-                                <option value="3">xTB (3)</option>
+                                <option value="2">ORCA (2)</option>
+                                <option value="3" selected>xTB (3)</option>
                             </select>
                         </div>
                         <div class="form-group" style="flex:1.3; min-width:170px; margin-bottom:0;">
                             <label>QM Command</label>
-                            <input type="text" id="qm-command" value="orca" placeholder="orca / g09 / custom" oninput="updatePreview();">
+                            <input type="text" id="qm-command" value="xtb" placeholder="xtb / orca / g09 / custom" oninput="updatePreview();">
                         </div>
                     </div>
                 </div>
@@ -4032,18 +4034,18 @@ H  -0.757000  0.586000  0.000000"></textarea>
             <div class="install-layout">
                 <div class="card">
                     <h2>⚙️ Installation</h2>
-                    <p><strong>Quick Start for Linux (bash):</strong> install once, then run your simulations with the configured aliases.</p>
-                    <p>ASCEC requires <strong>Python 3.9+</strong> (<strong>3.11 recommended</strong>) and uses <strong>ORCA</strong> as backend for the default workflow.</p>
+                    <p><strong>One-click install for Linux and Windows.</strong> The installer pulls Miniconda (if missing), the <code>py11</code> environment, and every dependency including <strong>standalone xTB</strong>, the new default annealing backend.</p>
+                    <p>ASCEC requires <strong>Python 3.9+</strong> (<strong>3.11 recommended</strong>). <strong>ORCA is optional</strong> — a preliminary run uses standalone xTB and needs no ORCA at all. Install ORCA only if you want DFT-level optimization or refinement stages.</p>
 
                     <div class="install-warning">
-                        <strong>Warning</strong><br>
-                        ORCA 6.0 is not supported due to parser limitations. Use the latest ORCA <strong>6.1.1</strong> (Linux).
-                        <br>The manual also includes ORCA installation instructions for Linux.
+                        <strong>If you do install ORCA:</strong> use ORCA <strong>6.1.1</strong> (Linux). ORCA 6.0 is not supported due to parser limitations. The User Manual includes ORCA installation instructions for Linux.
                     </div>
 
                     <h3>Option 1: Automatic "One-Click" Installation (Recommended)</h3>
-                    <p>What this script does automatically:</p>
-                    <p class="install-step-note">1) installs Miniconda if missing, 2) creates Python 3.11 environment (<code>py11</code>), 3) installs dependencies, 4) clones ASCEC into <code>~/software/ascec04</code>, and 5) updates aliases/variables in <code>~/.bashrc</code>.</p>
+                    <p>What the installer does: 1) installs Miniconda if missing, 2) creates the Python 3.11 <code>py11</code> environment, 3) installs all dependencies (numpy/scipy/matplotlib/scikit-learn, cclib, openbabel, <strong>xtb</strong>, orca-pi), 4) clones ASCEC + COSMIC, 5) wires up <code>ascec</code> / <code>cosmic</code> launchers on PATH.</p>
+
+                    <h4 style="margin-top:14px;">🐧 Linux (bash)</h4>
+                    <p class="install-step-note">Clones into <code>~/software/ascec04</code>, updates aliases in <code>~/.bashrc</code>.</p>
 
                     <div class="install-step">
                         <div class="install-step-title">1. Download the installation script</div>
@@ -4067,6 +4069,42 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         <div class="install-command-row">
                             <pre class="install-code">source ~/.bashrc</pre>
                             <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('source ~/.bashrc')">Copy</button>
+                        </div>
+                    </div>
+
+                    <h4 style="margin-top:18px;">🪟 Windows (PowerShell or cmd)</h4>
+                    <p class="install-step-note">Clones into <code>%USERPROFILE%\software\ascec04</code>, drops <code>ascec.cmd</code>/<code>cosmic.cmd</code> into <code>%USERPROFILE%\bin</code>, and adds that directory to your user PATH. Requires <a href="https://git-scm.com/download/win" target="_blank">Git for Windows</a>.</p>
+
+                    <div class="install-step">
+                        <div class="install-step-title">1. Download the installer (PowerShell)</div>
+                        <div class="install-command-row">
+                            <pre class="install-code">iwr -UseBasicParsing https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat -OutFile win_install.bat</pre>
+                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('iwr -UseBasicParsing https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat -OutFile win_install.bat')">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="install-step">
+                        <div class="install-step-title">…or with cmd (curl is available on Windows 10+)</div>
+                        <div class="install-command-row">
+                            <pre class="install-code">curl -L -o win_install.bat https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat</pre>
+                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('curl -L -o win_install.bat https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat')">Copy</button>
+                        </div>
+                    </div>
+
+                    <div class="install-step">
+                        <div class="install-step-title">2. Run the installer</div>
+                        <div class="install-command-row">
+                            <pre class="install-code">win_install.bat</pre>
+                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('win_install.bat')">Copy</button>
+                        </div>
+                        <p class="install-step-note" style="margin-top:6px;">Or just double-click the downloaded <code>win_install.bat</code> in File Explorer.</p>
+                    </div>
+
+                    <div class="install-step">
+                        <div class="install-step-title">3. Open a new terminal so the new PATH takes effect</div>
+                        <div class="install-command-row">
+                            <pre class="install-code">ascec your_input.asc</pre>
+                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('ascec your_input.asc')">Copy</button>
                         </div>
                     </div>
 
@@ -7012,9 +7050,9 @@ H  -0.757000  0.586000  0.000000"></textarea>
         function applySamplingPreset(mode) {
             const selectedMode = mode || 'preliminar';
 
-            // --- Annealing: GFN2-xTB, 1 proc for all presets ---
+            // --- Annealing: standalone xTB / GFN2-xTB, 1 proc for all presets ---
             const annealTheory = document.getElementById('smart-annealing-theory');
-            if (annealTheory) { annealTheory.value = 'semiempirical'; updateSmartAnnealingMethod(); }
+            if (annealTheory) { annealTheory.value = 'xtb'; updateSmartAnnealingMethod(); }
             const annealMethod = document.getElementById('smart-annealing-method');
             if (annealMethod) annealMethod.value = 'GFN2-xTB';
             const annealNprocs = document.getElementById('smart-annealing-nprocs');
@@ -7750,6 +7788,20 @@ end
                 if (advTheory) {
                     advTheory.value = annealingTheory;
                     updateAdvAnnealingMethod();
+                }
+                // Keep the QM program selector in lockstep with the annealing
+                // theory so the generated .asc has the matching program index.
+                // xtb theory -> standalone xtb (3); anything else -> ORCA (2).
+                const advProgram = document.getElementById('qm-program');
+                const advCommand = document.getElementById('qm-command');
+                if (advProgram) {
+                    if (annealingTheory === 'xtb') {
+                        advProgram.value = '3';
+                        if (advCommand) advCommand.value = 'xtb';
+                    } else if (advProgram.value === '3') {
+                        advProgram.value = '2';
+                        if (advCommand) advCommand.value = 'orca';
+                    }
                 }
             }
             if (annealingMethod) {
