@@ -12220,8 +12220,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
             _progress_stream = None
             _progress_file = _progress_legacy_file
 
-        # Survive SSH disconnect / terminal close
-        _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+        # Survive SSH disconnect / terminal close (POSIX only; Windows has no SIGHUP)
+        if hasattr(_signal, 'SIGHUP'):
+            try:
+                _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+            except (ValueError, OSError):
+                pass
 
         # Open a persistent log file for this run (used by 'ascec status' view)
         _state_dir = _ascec_state_dir()
