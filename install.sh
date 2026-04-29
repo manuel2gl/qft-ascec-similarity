@@ -46,18 +46,28 @@ fi
 # 2. Check for Conda (Install if missing)
 #-----------------------------------------
 
-MINICONDA_DIR="$HOME/miniconda3"
+# Default install location if no existing conda is found
+DEFAULT_MINICONDA_DIR="$HOME/miniconda3"
+
+# Detect any existing conda installation (common locations)
+MINICONDA_DIR=""
+for candidate in "$HOME/miniconda3" "$HOME/anaconda3" "$HOME/conda" "$HOME/miniforge3" "$HOME/mambaforge" "/opt/conda" "/opt/miniconda3" "/opt/anaconda3"; do
+    if [ -x "$candidate/bin/conda" ]; then
+        MINICONDA_DIR="$candidate"
+        break
+    fi
+done
 
 if ! command -v conda &> /dev/null; then
-    # Conda command not found - check if installation exists
-    if [ -d "$MINICONDA_DIR" ]; then
+    # Conda command not on PATH - check if any installation exists
+    if [ -n "$MINICONDA_DIR" ]; then
         echo "> Conda installation found at $MINICONDA_DIR. Initializing..."
         eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
         # Initialize conda in .bashrc if not already done
         "$MINICONDA_DIR/bin/conda" init bash > /dev/null 2>&1
-        # If still not working after init, try to update/repair
+        # If still not working after init, try to update/repair in place
         if ! command -v conda &> /dev/null; then
-            echo "> Updating existing Miniconda installation..."
+            echo "> Updating existing conda installation at $MINICONDA_DIR..."
             wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
             bash miniconda.sh -b -u -p "$MINICONDA_DIR"
             eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
@@ -65,7 +75,8 @@ if ! command -v conda &> /dev/null; then
             rm miniconda.sh
         fi
     else
-        echo "> Conda not found. Installing Miniconda..."
+        echo "> Conda not found. Installing Miniconda to $DEFAULT_MINICONDA_DIR..."
+        MINICONDA_DIR="$DEFAULT_MINICONDA_DIR"
         wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
         bash miniconda.sh -b -p "$MINICONDA_DIR"
         eval "$($MINICONDA_DIR/bin/conda shell.bash hook)"
@@ -74,7 +85,7 @@ if ! command -v conda &> /dev/null; then
         rm miniconda.sh
     fi
 else
-    echo "> Conda found. Proceeding..."
+    echo "> Conda found at $(command -v conda). Proceeding..."
     # Ensure conda hook is active for this script
     eval "$(conda shell.bash hook)"
     # Ensure conda is initialized in .bashrc
@@ -179,12 +190,15 @@ echo "" >> "$BASHRC"
 echo "# COSMIC ASCEC aliases" >> "$BASHRC"
 if [ "$INSTALL_PY11" = "TRUE" ]; then
     CONDA_BASE=$(conda info --base)
-    PYTHON_BIN="$CONDA_BASE/envs/py11/bin/python"
+    ENV_BIN="$CONDA_BASE/envs/py11/bin"
+    PYTHON_BIN="$ENV_BIN/python"
+    # Prepend env bin to PATH so obabel and other env tools are found at runtime
+    echo "alias ascec='PATH=\"$ENV_BIN:\$PATH\" $PYTHON_BIN $TARGET_DIR/ascec-v04.py'" >> "$BASHRC"
+    echo "alias cosmic='PATH=\"$ENV_BIN:\$PATH\" $PYTHON_BIN $TARGET_DIR/cosmic-v01.py'" >> "$BASHRC"
 else
-    PYTHON_BIN="python"
+    echo "alias ascec='python $TARGET_DIR/ascec-v04.py'" >> "$BASHRC"
+    echo "alias cosmic='python $TARGET_DIR/cosmic-v01.py'" >> "$BASHRC"
 fi
-echo "alias ascec='$PYTHON_BIN $TARGET_DIR/ascec-v04.py'" >> "$BASHRC"
-echo "alias cosmic='$PYTHON_BIN $TARGET_DIR/cosmic-v01.py'" >> "$BASHRC"
 
 echo "-------------------------------------------------------"
 echo "> INSTALLATION COMPLETE!"
