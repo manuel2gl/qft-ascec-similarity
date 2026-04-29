@@ -81,8 +81,9 @@ if (Test-Path $condaHook) {
 }
 
 Write-Host "> Accepting conda Terms of Service..."
-& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>$null
-& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>$null
+& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main  2>$null
+& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r     2>$null
+& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/msys2 2>$null
 
 $ENV_NAME = if ($INSTALL_PY11) { "py11" } else { "base" }
 
@@ -113,6 +114,7 @@ Write-Host "> Installing chemistry deps from conda-forge..."
 
 Write-Host "> Installing orca-pi parser via pip..."
 $ENV_PIP = Join-Path $ENV_SCRIPTS "pip.exe"
+& $CONDA_EXE install -n $ENV_NAME pip -y --override-channels -c conda-forge
 & $ENV_PIP install orca-pi
 
 $XTB_EXE = Join-Path $ENV_LIBBIN "xtb.exe"
