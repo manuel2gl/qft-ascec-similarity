@@ -1,0 +1,220 @@
+@echo off
+REM ==========================================
+REM  ASCEC ONE-CLICK INSTALLER (Windows)
+REM ==========================================
+REM Single-file installer. The batch portion below extracts the PowerShell
+REM payload at the bottom of this file and runs it with execution policy
+REM bypassed, so users can just double-click this file (or run it from cmd).
+REM
+REM What gets installed:
+REM   - Miniconda (if missing)
+REM   - py11 conda env (Python 3.11) with numpy/scipy/matplotlib/scikit-learn
+REM   - cclib, openbabel, xtb (conda-forge) + orca-pi (pip)
+REM   - ASCEC + COSMIC (cloned from GitHub)
+REM   - ascec.cmd / cosmic.cmd launchers in %USERPROFILE%\bin (added to PATH)
+REM
+REM ORCA is NOT installed. Standalone xTB is the default annealing backend,
+REM so a preliminary ASCEC run does not require ORCA. Install ORCA only if
+REM you need DFT-level optimization or refinement stages.
+REM ==========================================
+
+setlocal
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "& { $bat = [System.IO.File]::ReadAllText('%~f0'); $m = '#__PS__'; $i = $bat.IndexOf($m); if ($i -lt 0) { Write-Error 'PowerShell payload marker not found.'; exit 1 }; $ps = $bat.Substring($i + $m.Length); Invoke-Expression $ps }"
+set "EC=%ERRORLEVEL%"
+
+echo.
+echo Press any key to close this window...
+pause >nul
+exit /b %EC%
+
+REM ===== Lines below are NEVER read by cmd (exit /b above) =====
+REM ===== They are PowerShell, extracted and executed via iex. ==
+#__PS__
+$ErrorActionPreference = 'Stop'
+
+# ------------------------------------------
+# CONFIGURATION
+# ------------------------------------------
+$INSTALL_PY11           = $true                                                # $false -> install into base env
+$TARGET_DIR             = Join-Path $env:USERPROFILE 'software\ascec04'
+$DEFAULT_MINICONDA_DIR  = Join-Path $env:USERPROFILE 'Miniconda3'
+$REPO_URL               = 'https://github.com/manuel2gl/qft-cosmic-ascec.git'
+
+Write-Host "> Starting ASCEC 'One-Click' Installation (Windows)..." -ForegroundColor Cyan
+
+# ------------------------------------------
+# 1. Setup directory & download code
+# ------------------------------------------
+Write-Host "> Setting up directories at $TARGET_DIR..."
+New-Item -ItemType Directory -Path $TARGET_DIR -Force | Out-Null
+
+if (Test-Path (Join-Path $TARGET_DIR '.git')) {
+    Write-Host "> Repo exists, pulling latest updates..."
+    Push-Location $TARGET_DIR
+    git pull
+    Pop-Location
+} else {
+    Write-Host "> Cloning repository..."
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "  ERROR: 'git' is not on PATH." -ForegroundColor Red
+        Write-Host "  Install Git for Windows from https://git-scm.com/download/win and re-run."
+        exit 1
+    }
+    git clone $REPO_URL $TARGET_DIR
+}
+
+# ------------------------------------------
+# 2. Locate (or install) Miniconda
+# ------------------------------------------
+$MINICONDA_DIR = $null
+$candidates = @(
+    (Join-Path $env:USERPROFILE 'Miniconda3'),
+    (Join-Path $env:USERPROFILE 'Anaconda3'),
+    (Join-Path $env:USERPROFILE 'miniforge3'),
+    (Join-Path $env:USERPROFILE 'mambaforge'),
+    'C:\ProgramData\Miniconda3',
+    'C:\ProgramData\Anaconda3'
+)
+foreach ($c in $candidates) {
+    if (Test-Path (Join-Path $c 'Scripts\conda.exe')) { $MINICONDA_DIR = $c; break }
+}
+
+if (-not $MINICONDA_DIR) {
+    Write-Host "> Conda not found. Installing Miniconda to $DEFAULT_MINICONDA_DIR..."
+    $MINICONDA_DIR = $DEFAULT_MINICONDA_DIR
+    $installer = Join-Path $env:TEMP 'Miniconda3-latest-Windows-x86_64.exe'
+    $url = 'https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe'
+    Write-Host "  Downloading $url ..."
+    Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+    Write-Host "  Running silent install..."
+    Start-Process -FilePath $installer -ArgumentList '/S','/InstallationType=JustMe','/RegisterPython=0','/AddToPath=0',"/D=$MINICONDA_DIR" -Wait
+    Remove-Item $installer -Force
+} else {
+    Write-Host "> Conda installation found at $MINICONDA_DIR."
+}
+
+$CONDA_EXE = Join-Path $MINICONDA_DIR 'Scripts\conda.exe'
+if (-not (Test-Path $CONDA_EXE)) {
+    Write-Host "  ERROR: conda.exe not found at $CONDA_EXE after install attempt." -ForegroundColor Red
+    exit 1
+}
+
+# Activate conda for this PowerShell session
+$condaHook = Join-Path $MINICONDA_DIR 'shell\condabin\conda-hook.ps1'
+if (Test-Path $condaHook) {
+    & $condaHook
+} else {
+    $env:Path = "$MINICONDA_DIR;$MINICONDA_DIR\Scripts;$MINICONDA_DIR\Library\bin;$env:Path"
+}
+
+# ------------------------------------------
+# 3. Accept conda Terms of Service
+# ------------------------------------------
+Write-Host "> Accepting conda Terms of Service..."
+& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>$null
+& $CONDA_EXE tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r    2>$null
+
+# ------------------------------------------
+# 4. Environment setup
+# ------------------------------------------
+$ENV_NAME = if ($INSTALL_PY11) { 'py11' } else { 'base' }
+
+if ($INSTALL_PY11) {
+    Write-Host "> Creating/activating separate 'py11' environment with Python 3.11..."
+    $envList = & $CONDA_EXE env list
+    if ($envList -match '(?m)^\s*py11\s') {
+        Write-Host "> Environment 'py11' already exists. Skipping creation."
+    } else {
+        Write-Host "> Creating new environment 'py11'..."
+        & $CONDA_EXE create -n py11 python=3.11 -y
+    }
+    $ENV_PREFIX = Join-Path $MINICONDA_DIR 'envs\py11'
+} else {
+    Write-Host "> Using base environment for installation..."
+    $ENV_PREFIX = $MINICONDA_DIR
+}
+
+$ENV_PYTHON  = Join-Path $ENV_PREFIX 'python.exe'
+$ENV_SCRIPTS = Join-Path $ENV_PREFIX 'Scripts'
+$ENV_LIBBIN  = Join-Path $ENV_PREFIX 'Library\bin'
+
+# ------------------------------------------
+# 5. Install dependencies (incl. xtb)
+# ------------------------------------------
+Write-Host "> Installing core scientific deps (numpy/scipy/matplotlib/scikit-learn)..."
+& $CONDA_EXE install -n $ENV_NAME numpy scipy matplotlib scikit-learn -y
+
+Write-Host "> Installing chemistry deps from conda-forge (cclib, openbabel, xtb)..."
+& $CONDA_EXE install -n $ENV_NAME -c conda-forge cclib openbabel xtb -y
+
+Write-Host "> Installing orca-pi parser via pip..."
+$ENV_PIP = Join-Path $ENV_SCRIPTS 'pip.exe'
+& $ENV_PIP install orca-pi
+
+# ------------------------------------------
+# 6. Sanity check: xtb is callable
+# ------------------------------------------
+$XTB_EXE = Join-Path $ENV_LIBBIN 'xtb.exe'
+if (Test-Path $XTB_EXE) {
+    Write-Host "> xtb installed at $XTB_EXE"
+    & $XTB_EXE --version 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host "    $_" }
+} else {
+    Write-Host "  WARNING: xtb.exe not found at expected path $XTB_EXE." -ForegroundColor Yellow
+    Write-Host "  Try installing manually:  conda install -n $ENV_NAME -c conda-forge xtb"
+}
+
+# ------------------------------------------
+# 7. Create launcher scripts (ascec.cmd / cosmic.cmd)
+# ------------------------------------------
+$LAUNCHER_DIR = Join-Path $env:USERPROFILE 'bin'
+New-Item -ItemType Directory -Path $LAUNCHER_DIR -Force | Out-Null
+
+$ascecCmd  = Join-Path $LAUNCHER_DIR 'ascec.cmd'
+$cosmicCmd = Join-Path $LAUNCHER_DIR 'cosmic.cmd'
+
+$ascecBody = @"
+@echo off
+setlocal
+set "PATH=$ENV_PREFIX;$ENV_SCRIPTS;$ENV_LIBBIN;%PATH%"
+"$ENV_PYTHON" "$TARGET_DIR\ascec-v04.py" %*
+"@
+
+$cosmicBody = @"
+@echo off
+setlocal
+set "PATH=$ENV_PREFIX;$ENV_SCRIPTS;$ENV_LIBBIN;%PATH%"
+"$ENV_PYTHON" "$TARGET_DIR\cosmic-v01.py" %*
+"@
+
+Set-Content -Path $ascecCmd  -Value $ascecBody  -Encoding ASCII
+Set-Content -Path $cosmicCmd -Value $cosmicBody -Encoding ASCII
+
+Write-Host "> Launcher scripts written:"
+Write-Host "    $ascecCmd"
+Write-Host "    $cosmicCmd"
+
+# ------------------------------------------
+# 8. Add launcher dir to user PATH (persists)
+# ------------------------------------------
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not ($userPath -split ';' | Where-Object { $_ -ieq $LAUNCHER_DIR })) {
+    $newUserPath = if ($userPath) { "$userPath;$LAUNCHER_DIR" } else { $LAUNCHER_DIR }
+    [Environment]::SetEnvironmentVariable('Path', $newUserPath, 'User')
+    Write-Host "> Added $LAUNCHER_DIR to your user PATH (takes effect in new shells)."
+} else {
+    Write-Host "> $LAUNCHER_DIR is already on your user PATH."
+}
+
+# ------------------------------------------
+Write-Host "-------------------------------------------------------" -ForegroundColor Green
+Write-Host "> INSTALLATION COMPLETE!" -ForegroundColor Green
+Write-Host ">"
+Write-Host "> Open a NEW PowerShell or Command Prompt window, then run:"
+Write-Host "    ascec  your_input.asc"
+Write-Host "    cosmic ..."
+Write-Host ">"
+Write-Host "> Standalone xTB is the default annealing backend."
+Write-Host "> ORCA is optional - install separately if you need DFT-level"
+Write-Host "> optimization or refinement stages."
+Write-Host "-------------------------------------------------------" -ForegroundColor Green
