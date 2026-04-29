@@ -169,19 +169,22 @@ pip install orca-pi
 echo "> Configuring shortcuts in .bashrc..."
 BASHRC="$HOME/.bashrc"
 
+# Remove any existing ASCEC aliases before re-adding (ensures updates take effect)
+sed -i '/# COSMIC ASCEC aliases/d' "$BASHRC"
+sed -i '/alias ascec=/d' "$BASHRC"
+sed -i '/alias cosmic=/d' "$BASHRC"
+
 # Add ASCEC shortcuts
-if ! grep -q "alias ascec=" "$BASHRC"; then
-    echo "" >> "$BASHRC"
-    echo "# COSMIC ASCEC aliases" >> "$BASHRC"
-    if [ "$INSTALL_PY11" = "TRUE" ]; then
-        CONDA_BASE=$(conda info --base)
-        PYTHON_BIN="$CONDA_BASE/envs/py11/bin/python"
-    else
-        PYTHON_BIN="python"
-    fi
-    echo "alias ascec='$PYTHON_BIN $TARGET_DIR/ascec-v04.py'" >> "$BASHRC"
-    echo "alias cosmic='$PYTHON_BIN $TARGET_DIR/cosmic-v01.py'" >> "$BASHRC"
+echo "" >> "$BASHRC"
+echo "# COSMIC ASCEC aliases" >> "$BASHRC"
+if [ "$INSTALL_PY11" = "TRUE" ]; then
+    CONDA_BASE=$(conda info --base)
+    PYTHON_BIN="$CONDA_BASE/envs/py11/bin/python"
+else
+    PYTHON_BIN="python"
 fi
+echo "alias ascec='$PYTHON_BIN $TARGET_DIR/ascec-v04.py'" >> "$BASHRC"
+echo "alias cosmic='$PYTHON_BIN $TARGET_DIR/cosmic-v01.py'" >> "$BASHRC"
 
 echo "-------------------------------------------------------"
 echo "> INSTALLATION COMPLETE!"
