@@ -1533,10 +1533,15 @@ def read_input_file(state: SystemState, source) -> List[MoleculeData]:
             state.max_dihedral_angle_rad = np.radians(max_dihedral_degrees)  # Convert to radians
 
         elif config_lines_parsed == 8: # Line 9: QM Program Index & Alias (e.g., "1 g09")
-            state.ia = int(parts[0])      
-            state.qm_program = parts[1]   
-            state.alias = parts[1]        
-            state.jdum = state.alias      
+            state.ia = int(parts[0])
+            if state.ia not in qm_program_details:
+                raise ValueError(
+                    f"Unknown QM program index {state.ia} on line {line_num}. "
+                    f"Valid: 1 (Gaussian), 2 (ORCA), 3 (xtb)."
+                )
+            state.qm_program = parts[1]
+            state.alias = parts[1]
+            state.jdum = state.alias
 
         elif config_lines_parsed == 9: # Line 10: Hamiltonian & Basis Set (e.g., "pm3 zdo")
             state.qm_method = parts[0]      
@@ -2973,6 +2978,14 @@ qm_program_details = {
         "termination_string": "ORCA TERMINATED NORMALLY",
         "alternative_termination": ["****ORCA TERMINATED NORMALLY****", "OPTIMIZATION RUN DONE"],  # Additional termination patterns
     },
+    3: {
+        "name": "xtb",
+        "default_exe": "xtb",
+        "input_ext": ".xyz",
+        "output_ext": ".out",
+        "energy_regex": r"TOTAL ENERGY\s+([-+]?\d+\.\d+)\s*Eh",
+        "termination_string": "normal termination of xtb",
+    },
 }
 
 # Helper function to preserve QM files from last accepted configuration
@@ -3050,8 +3063,8 @@ def preserve_failed_initial_qm_files(state: SystemState, run_dir: str, attempt_n
     _print_verbose(f"", 0, state)
 
     
-    input_file = os.path.join(run_dir, "anneal.inp" if state.qm_program == "orca" else "anneal.com")
-    output_file = os.path.join(run_dir, "anneal.out")
+    input_file = os.path.join(run_dir, f"anneal{qm_program_details[state.ia]['input_ext']}")
+    output_file = os.path.join(run_dir, f"anneal{qm_program_details[state.ia]['output_ext']}")
     
     if os.path.exists(input_file):
         _print_verbose(f"  ✓ {os.path.basename(input_file)} (QM input file - check this for problematic geometry)", 0, state)
@@ -3059,9 +3072,9 @@ def preserve_failed_initial_qm_files(state: SystemState, run_dir: str, attempt_n
         _print_verbose(f"  ✗ {os.path.basename(input_file)} (NOT FOUND)", 0, state)
         
     if os.path.exists(output_file):
-        _print_verbose(f"  ✓ anneal.out (QM output file - check for error messages)", 0, state)
+        _print_verbose(f"  ✓ {os.path.basename(output_file)} (QM output file - check for error messages)", 0, state)
     else:
-        _print_verbose(f"  ✗ anneal.out (NOT FOUND - QM program failed to start or crashed immediately)", 0, state)
+        _print_verbose(f"  ✗ {os.path.basename(output_file)} (NOT FOUND - QM program failed to start or crashed immediately)", 0, state)
         _print_verbose(f"      This usually indicates:", 0, state)
         _print_verbose(f"      - QM program not found in PATH", 0, state)
         _print_verbose(f"      - Severe geometry problems (atoms too close)", 0, state)
@@ -3147,6 +3160,15 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     symbol = state.atomic_number_to_symbol.get(atomic_numbers[i], "X")
                     f.write(f"{symbol} {coords[i, 0]:.6f} {coords[i, 1]:.6f} {coords[i, 2]:.6f}\n")
                 f.write("*\n")
+            elif state.qm_program == "xtb":
+                # Standalone xTB single-point: plain XYZ file. Method/charge/spin
+                # are passed on the command line (no input-file directive needed).
+                # state.qm_basis_set is intentionally ignored for xtb.
+                f.write(f"{state.natom}\n")
+                f.write(f"ASCEC annealing SP, call {call_id}\n")
+                for i in range(state.natom):
+                    symbol = state.atomic_number_to_symbol.get(atomic_numbers[i], "X")
+                    f.write(f"{symbol} {coords[i, 0]:.6f} {coords[i, 1]:.6f} {coords[i, 2]:.6f}\n")
             else:
                 raise ValueError(f"QM input generation not implemented for program '{state.qm_program}'")
     except IOError as e:
@@ -3174,6 +3196,25 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
     elif state.qm_program == "orca":
         # For ORCA, we'll use subprocess to capture output properly
         qm_command = [qm_exe, qm_input_filename]
+    elif state.qm_program == "xtb":
+        # Pure single-point: no --opt, no --grad. ORCA's external-xtb interface
+        # always passes --grad even for SP, which is why we bypass ORCA entirely.
+        method_upper = (state.qm_method or "GFN2-xTB").upper()
+        if "GFN-FF" in method_upper or "GFNFF" in method_upper:
+            gfn_flags = ["--gfnff"]
+        elif "GFN0" in method_upper:
+            gfn_flags = ["--gfn", "0"]
+        elif "GFN1" in method_upper:
+            gfn_flags = ["--gfn", "1"]
+        else:
+            gfn_flags = ["--gfn", "2"]
+        qm_command = [qm_exe, qm_input_filename, *gfn_flags]
+        if state.charge != 0:
+            qm_command += ["--chrg", str(state.charge)]
+        if state.multiplicity > 1:
+            qm_command += ["--uhf", str(state.multiplicity - 1)]
+        if state.qm_nproc and state.qm_nproc > 0:
+            qm_command += ["--parallel", str(state.qm_nproc)]
     else:
         _print_verbose(f"Error: Unsupported QM program '{state.qm_program}' for command execution.", 0, state)
         return 0.0, 0
@@ -3205,6 +3246,18 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     check=False
                 )
             _print_verbose(f"ORCA process completed with return code: {process.returncode}", 2, state)
+        elif state.qm_program == "xtb":
+            _print_verbose(f"Executing xtb command: {' '.join(qm_command)} in directory: {run_dir}", 2, state)
+            with open(qm_output_path, 'w') as output_file:
+                process = subprocess.run(
+                    qm_command,
+                    cwd=run_dir,
+                    stdout=output_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False
+                )
+            _print_verbose(f"xtb process completed with return code: {process.returncode}", 2, state)
         else:
             # For Gaussian and other programs
             process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
