@@ -4072,32 +4072,18 @@ H  -0.757000  0.586000  0.000000"></textarea>
                         </div>
                     </div>
 
-                    <h4 style="margin-top:18px;">🪟 Windows (PowerShell or cmd)</h4>
+                    <h4 style="margin-top:18px;">🪟 Windows</h4>
                     <p class="install-step-note">Clones into <code>%USERPROFILE%\software\ascec04</code>, drops <code>ascec.cmd</code>/<code>cosmic.cmd</code> into <code>%USERPROFILE%\bin</code>, and adds that directory to your user PATH. Requires <a href="https://git-scm.com/download/win" target="_blank">Git for Windows</a>.</p>
 
                     <div class="install-step">
-                        <div class="install-step-title">1. Download the installer (PowerShell)</div>
+                        <div class="install-step-title">1. Download the installer</div>
                         <div class="install-command-row">
-                            <pre class="install-code">iwr -UseBasicParsing https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat -OutFile win_install.bat</pre>
-                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('iwr -UseBasicParsing https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat -OutFile win_install.bat')">Copy</button>
+                            <button class="btn btn-sm install-action-btn install-download-btn" onclick="downloadWinInstaller()">Download win_install.bat</button>
                         </div>
                     </div>
 
                     <div class="install-step">
-                        <div class="install-step-title">…or with cmd (curl is available on Windows 10+)</div>
-                        <div class="install-command-row">
-                            <pre class="install-code">curl -L -o win_install.bat https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat</pre>
-                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('curl -L -o win_install.bat https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat')">Copy</button>
-                        </div>
-                    </div>
-
-                    <div class="install-step">
-                        <div class="install-step-title">2. Run the installer</div>
-                        <div class="install-command-row">
-                            <pre class="install-code">win_install.bat</pre>
-                            <button class="btn btn-sm install-action-btn install-copy-btn" onclick="copyCommandText('win_install.bat')">Copy</button>
-                        </div>
-                        <p class="install-step-note" style="margin-top:6px;">Or just double-click the downloaded <code>win_install.bat</code> in File Explorer.</p>
+                        <div class="install-step-title">2. Double-click <code>win_install.bat</code> in File Explorer</div>
                     </div>
 
                     <div class="install-step">
@@ -4619,6 +4605,40 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 if (err && err.name === 'AbortError') return;
                 window.open(scriptUrl, '_blank', 'noopener');
                 toast('Browser blocked download. Opened install.sh page instead.', 'warning');
+            }
+        }
+
+        async function downloadWinInstaller() {
+            const scriptUrl = 'https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/win_install.bat';
+            try {
+                const handle = await getSaveFileHandle('win_install.bat', 'application/x-bat');
+
+                const response = await fetch(scriptUrl, { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const blob = await response.blob();
+
+                if (handle) {
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                    toast('win_install.bat saved', 'success');
+                    return;
+                }
+
+                const mode = await saveBlobWithPrompt(blob, 'win_install.bat');
+                if (mode === 'picker') {
+                    toast('win_install.bat saved', 'success');
+                } else if (mode === 'manual-tab') {
+                    toast('win_install.bat opened in a tab', 'info', 3500);
+                } else if (mode === 'fallback') {
+                    toast('win_install.bat downloaded', 'success');
+                }
+            } catch (err) {
+                if (err && err.name === 'AbortError') return;
+                window.open(scriptUrl, '_blank', 'noopener');
+                toast('Browser blocked download. Opened win_install.bat page instead.', 'warning');
             }
         }
 
