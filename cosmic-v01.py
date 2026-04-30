@@ -5280,7 +5280,6 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
             effective_t, _k_eff, t_source = resolve_clustering_threshold(
                 linkage_matrix, threshold, verbose=VERBOSE)
-            _persist_resolved_threshold(output_base_dir, effective_t, t_source)
             initial_cluster_labels = fcluster(linkage_matrix, t=effective_t, criterion='distance')
             vprint(f"Clustering threshold: τ={effective_t:.4f} ({t_source}), "
                    f"n_c={len(set(initial_cluster_labels))}")
@@ -5492,7 +5491,6 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             # --- Resolve threshold (auto-knee / legacy / user) and cluster ---
             effective_t, _k_eff, t_source = resolve_clustering_threshold(
                 linkage_matrix, threshold, verbose=VERBOSE)
-            _persist_resolved_threshold(output_base_dir, effective_t, t_source)
             initial_cluster_labels = fcluster(linkage_matrix, t=effective_t, criterion='distance')
             _main_optimal_k = len(set(initial_cluster_labels))
             _main_cut_height = effective_t
