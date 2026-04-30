@@ -3354,7 +3354,13 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     # Skip the main input and output files (already in temp_files_to_clean)
                     if orca_file not in temp_files_to_clean and os.path.isfile(orca_file):
                         temp_files_to_clean.append(orca_file)
-        
+
+        if state.qm_program == "xtb":
+            for xtb_scratch in ["xtbrestart", "xtbtopo"]:
+                fpath = os.path.join(run_dir, xtb_scratch)
+                if fpath not in temp_files_to_clean:
+                    temp_files_to_clean.append(fpath)
+
         # Clean up numbered QM files but keep the "anneal.*" versions for debugging
         for fpath in temp_files_to_clean:
             if os.path.exists(fpath):
