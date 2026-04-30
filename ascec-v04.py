@@ -3243,7 +3243,8 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     stdout=output_file,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    check=False
+                    check=False,
+                    preexec_fn=_pdeathsig_preexec,
                 )
             _print_verbose(f"ORCA process completed with return code: {process.returncode}", 2, state)
         elif state.qm_program == "xtb":
@@ -3255,12 +3256,13 @@ def calculate_energy(coords: np.ndarray, atomic_numbers: List[int], state: Syste
                     stdout=output_file,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    check=False
+                    check=False,
+                    preexec_fn=_pdeathsig_preexec,
                 )
             _print_verbose(f"xtb process completed with return code: {process.returncode}", 2, state)
         else:
             # For Gaussian and other programs
-            process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False)
+            process = subprocess.run(qm_command, shell=True, capture_output=True, text=True, cwd=run_dir, check=False, preexec_fn=_pdeathsig_preexec)
         
         # Check for non-zero exit code first
         # NOTE: ORCA 6 (and some ORCA 5 configurations) may return non-zero exit codes
@@ -11345,18 +11347,24 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
 
     _background_tty_launch = use_cache and os.environ.get("ASCEC_DETACHED_CHILD") != "1" and _is_background_tty_run()
 
-    # ── Duplicate-run guard (protocol/cached runs only) ─────────────────────
+    # ── Atomic duplicate-run guard + early job claim (protocol/cached runs) ──
+    # Combine the duplicate check and DB insert in one transaction so two
+    # ascecs launched simultaneously cannot both pass before either registers.
+    # The placeholder row gets its cache_file/log_file/progress_file filled in
+    # below at the registration finalization point.
+    _early_claimed_job_id = 0
     if use_cache and os.environ.get("ASCEC_DETACHED_CHILD") != "1":
-        _abs_input = os.path.abspath(input_file)
-        _dup = [j for j in _get_recent_jobs()
-                if j['status'] == 'running'
-                and j['input_file'] == _abs_input
-                and _is_pid_alive(j['pid'])]
-        if _dup:
-            _dj = _dup[0]
+        _early_claimed_job_id, _conflict = _atomic_claim_ascec_job(input_file, os.getcwd())
+        if _conflict:
             print(f"\nWARNING: '{input_file}' is already running")
-            print(f"  Job ID: {_dj['id']}  PID: {_dj['pid']}  Started: {_dj['started_at']}")
+            print(f"  Job ID: {_conflict['id']}  PID: {_conflict['pid']}  Started: {_conflict['started_at']}")
             print(f"  Run 'ascec status' to view or kill it.")
+            # Caller exits via os._exit which does not flush; flush now so the
+            # warning is visible when stdout is redirected to a file.
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
             return 1
 
     # If launched in the background from the shell, immediately re-exec as a
@@ -12312,20 +12320,26 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 pass
             _set_output_streams(log_only=True)
 
-        # Register (or rebind) job in the status database
+        # Register (or rebind) job in the status database. Priority order:
+        #   1. ASCEC_REUSE_JOB_ID — set by Ctrl+D detach handoff from a parent ascec
+        #   2. _early_claimed_job_id — placeholder row from atomic claim above
+        #   3. fresh INSERT — fallback if neither path applies
         _reuse_job_id = 0
         try:
             _reuse_job_id = int(os.environ.get("ASCEC_REUSE_JOB_ID", "0") or "0")
         except (TypeError, ValueError):
             _reuse_job_id = 0
 
-        if _reuse_job_id > 0 and _adopt_ascec_job(
-            _reuse_job_id,
+        _target_job_id = _reuse_job_id if _reuse_job_id > 0 else _early_claimed_job_id
+
+        if _target_job_id > 0 and _adopt_ascec_job(
+            _target_job_id,
             os.getpid(),
             _log_file if _log_fh is not None else "",
             _progress_file,
+            cache_file=cache_file or "",
         ):
-            _job_id = _reuse_job_id
+            _job_id = _target_job_id
         else:
             _job_id = _register_ascec_job(
                 os.path.abspath(input_file),
@@ -14201,7 +14215,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 cwd=run_dir,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                env={**os.environ, "ASCEC_DISABLE_EMBEDDED_PROTOCOL": "1"}
+                env={**os.environ, "ASCEC_DISABLE_EMBEDDED_PROTOCOL": "1"},
+                preexec_fn=_pdeathsig_preexec,
             )
 
             output_file = os.path.join(run_dir, os.path.splitext(input_basename)[0] + '.out')
@@ -15642,7 +15657,8 @@ def _run_single_qm_job(job_info: Dict[str, Any]) -> Dict[str, Any]:
             ['bash', script_name],
             cwd=calc_working_dir,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
+            preexec_fn=_pdeathsig_preexec,
         )
         elapsed_time = time.time() - start_time
 
@@ -16861,7 +16877,8 @@ def execute_cosmic_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int
                                text=True,
                                bufsize=1,
                                cwd=cosmic_base,
-                               universal_newlines=True)
+                               universal_newlines=True,
+                               preexec_fn=_pdeathsig_preexec)
 
         # Fallback auto-selection for interactive mode only.
         if use_stdin and proc.stdin:
@@ -18153,6 +18170,28 @@ def _is_pid_alive(pid: int) -> bool:
         return False
 
 
+def _pdeathsig_preexec() -> None:
+    """preexec_fn for subprocess: ask the kernel to SIGKILL this child when the
+    parent ascec dies. Linux-only; silently no-op elsewhere. Combined with the
+    SIGTERM handler, this makes orphan QM/replica processes impossible — even
+    SIGKILL of the main ascec immediately kills its children via the kernel.
+    """
+    try:
+        if sys.platform != "linux":
+            return
+        import ctypes
+        PR_SET_PDEATHSIG = 1
+        SIGKILL = 9
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0)
+        # Defensive: if the parent already died between fork() and now, exit
+        # immediately rather than running orphaned.
+        if os.getppid() == 1:
+            os._exit(0)
+    except Exception:
+        pass
+
+
 def _register_ascec_job(input_file: str, working_dir: str, cache_file: str,
                         log_file: str, progress_file: str) -> int:
     """Insert a new running-job entry; returns the new row ID (0 on failure)."""
@@ -18203,18 +18242,27 @@ def _remove_progress_artifacts(progress_file: str) -> None:
             pass
 
 
-def _adopt_ascec_job(job_id: int, pid: int, log_file: str = "", progress_file: str = "") -> bool:
-    """Rebind an existing job row to a new PID (used for detach handoff)."""
+def _adopt_ascec_job(job_id: int, pid: int, log_file: str = "", progress_file: str = "",
+                     cache_file: Optional[str] = None) -> bool:
+    """Rebind an existing job row to a new PID (used for detach handoff and
+    early-claim finalization). When cache_file is provided, it is also stored.
+    """
     if not job_id or pid <= 0:
         return False
     try:
         conn = _sqlite3.connect(str(_ascec_db_path()))
         _init_ascec_db(conn)
         now = time.strftime('%Y-%m-%d %H:%M:%S')
-        conn.execute(
-            "UPDATE jobs SET pid=?, log_file=?, progress_file=?, status='running', updated_at=? WHERE id=?",
-            (pid, log_file, progress_file, now, job_id),
-        )
+        if cache_file is None:
+            conn.execute(
+                "UPDATE jobs SET pid=?, log_file=?, progress_file=?, status='running', updated_at=? WHERE id=?",
+                (pid, log_file, progress_file, now, job_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET pid=?, log_file=?, progress_file=?, cache_file=?, status='running', updated_at=? WHERE id=?",
+                (pid, log_file, progress_file, cache_file, now, job_id),
+            )
         conn.commit()
         changed = conn.total_changes > 0
         conn.close()
@@ -18223,16 +18271,159 @@ def _adopt_ascec_job(job_id: int, pid: int, log_file: str = "", progress_file: s
         return False
 
 
+def _atomic_claim_ascec_job(input_file: str, working_dir: str) -> Tuple[int, Optional[Dict[str, Any]]]:
+    """Atomically check for a live duplicate and claim a job slot in one
+    SQLite transaction. Returns (job_id, conflict_info).
+
+    If conflict_info is non-None, NO slot was claimed — another live ascec is
+    already registered for this input. Otherwise job_id is the new row id with
+    placeholder cache/log/progress fields that the caller will fill in via
+    _adopt_ascec_job once those paths are known.
+
+    BEGIN IMMEDIATE serializes against any concurrent ascec running this same
+    function, closing the time-of-check / time-of-use race that the previous
+    two-step (read-then-insert-much-later) guard had.
+    """
+    abs_input = os.path.abspath(input_file)
+    try:
+        conn = _sqlite3.connect(str(_ascec_db_path()), timeout=10.0)
+        _init_ascec_db(conn)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            _cleanup_stale_jobs(conn)
+            row = conn.execute(
+                "SELECT id, pid, started_at FROM jobs "
+                "WHERE status='running' AND input_file=? "
+                "ORDER BY id ASC LIMIT 1",
+                (abs_input,),
+            ).fetchone()
+            if row:
+                existing_id, existing_pid, started_at = row
+                if _is_pid_alive(existing_pid):
+                    conn.rollback()
+                    conn.close()
+                    return 0, {
+                        'id': existing_id,
+                        'pid': existing_pid,
+                        'started_at': started_at,
+                    }
+            now = time.strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute(
+                "INSERT INTO jobs (pid,input_file,working_dir,cache_file,"
+                "log_file,progress_file,status,started_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (os.getpid(), abs_input, working_dir, "", "", "", 'running', now, now),
+            )
+            new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            conn.commit()
+            conn.close()
+            return int(new_id), None
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            return 0, None
+    except Exception:
+        return 0, None
+
+
+def _kill_orphaned_job_processes(working_dir: str, input_file: str) -> None:
+    """Kill QM and child ascec processes still running in a dead job's working directory.
+
+    Called when _cleanup_stale_jobs detects a job whose main PID has died, to prevent
+    orphaned subprocesses from interfering with a new run of the same input file.
+    Only operates on Linux (requires /proc).
+    """
+    if not working_dir:
+        return
+    try:
+        import signal as _sig
+        try:
+            wd_real = os.path.realpath(working_dir)
+        except Exception:
+            wd_real = working_dir
+
+        input_base = os.path.splitext(os.path.basename(input_file or ""))[0].lower()
+        qm_terms = (
+            'orca', 'xtb', 'crest', 'g16', 'gaussian', 'qchem', 'nwchem',
+            'psi4', 'cp2k', 'mopac', 'molpro', 'turbomole',
+        )
+
+        self_pid = os.getpid()
+        to_kill: List[int] = []
+
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            if pid == self_pid:
+                continue
+            try:
+                cwd = os.path.realpath(os.readlink(f'/proc/{pid}/cwd'))
+            except Exception:
+                continue
+            if not (cwd == wd_real or cwd.startswith(wd_real + os.sep)):
+                continue
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as cf:
+                    raw = cf.read().replace(b'\x00', b' ').strip().lower()
+                cmd = raw.decode('utf-8', errors='ignore')
+            except Exception:
+                cmd = ""
+            if any(t in cmd for t in qm_terms):
+                to_kill.append(pid)
+                continue
+            if 'ascec' in cmd:
+                to_kill.append(pid)
+                continue
+            if input_base and input_base in cmd:
+                to_kill.append(pid)
+                continue
+            try:
+                exe = os.path.basename(os.readlink(f'/proc/{pid}/exe')).lower()
+            except Exception:
+                exe = ""
+            if any(t in exe for t in qm_terms):
+                to_kill.append(pid)
+
+        killed_pgids: set = set()
+        for pid in set(to_kill):
+            try:
+                pgid = os.getpgid(pid)
+                if pgid > 0 and pgid != os.getpgrp() and pgid not in killed_pgids:
+                    killed_pgids.add(pgid)
+                    try:
+                        os.killpg(pgid, _sig.SIGKILL)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+            try:
+                os.kill(pid, _sig.SIGKILL)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _cleanup_stale_jobs(conn) -> None:
-    """Mark 'running' jobs whose PID no longer exists as 'crashed'."""
-    rows = conn.execute("SELECT id, pid, progress_file FROM jobs WHERE status='running'").fetchall()
+    """Mark 'running' jobs whose PID no longer exists as 'crashed' and kill orphaned children."""
+    rows = conn.execute(
+        "SELECT id, pid, progress_file, working_dir, input_file FROM jobs WHERE status='running'"
+    ).fetchall()
     now = time.strftime('%Y-%m-%d %H:%M:%S')
-    for job_id, pid, progress_file in rows:
+    for job_id, pid, progress_file, working_dir, input_file in rows:
         if not _is_pid_alive(pid):
             conn.execute(
                 "UPDATE jobs SET status='crashed', updated_at=? WHERE id=?", (now, job_id)
             )
             _remove_progress_artifacts(progress_file or "")
+            _kill_orphaned_job_processes(working_dir or "", input_file or "")
     conn.commit()
 
 
