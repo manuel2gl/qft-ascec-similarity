@@ -193,6 +193,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             justify-content: center;
             height: 100%;
             color: #999;
+            padding: 0 12px;
+            text-align: center;
         }
 
         /* Form elements */
@@ -625,11 +627,13 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             display: flex;
             gap: 10px;
             align-items: flex-end;
+            flex-wrap: wrap;
         }
 
         .inline-group .form-group {
             flex: 1;
             margin-bottom: 0;
+            min-width: 0;
         }
 
         /* Input name box */
@@ -2432,6 +2436,48 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             .smart-box-top-controls {
                 width: 100%;
             }
+
+            .inline-group {
+                gap: 6px;
+            }
+
+            .inline-group > .btn,
+            .inline-group > button {
+                min-width: 0 !important;
+                flex: 1 1 70px !important;
+                padding: 0 8px !important;
+                font-size: 0.9em !important;
+            }
+
+            #basic-mol-count {
+                width: 48px !important;
+                flex: 0 0 48px !important;
+            }
+
+            #basic-molecule-menu-btn {
+                flex: 0 0 38px !important;
+            }
+
+            #btn-basic-generate {
+                min-width: 100px !important;
+                font-size: 0.9em !important;
+            }
+
+            .quick-mol-btn {
+                font-size: 12px;
+                padding: 5px 6px;
+                white-space: normal;
+                line-height: 1.15;
+            }
+
+            .mol-info-bar {
+                flex-wrap: wrap !important;
+                gap: 10px !important;
+            }
+
+            .mol-info-separator {
+                display: none !important;
+            }
         }
     </style>
 </head>
@@ -2446,7 +2492,7 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             <button class="smart-header-item active" id="header-smart-btn" onclick="switchMainTab('basic')">Smart Mode</button>
             <button class="smart-header-item" id="header-advanced-btn" onclick="switchMainTab('advanced')">Advanced Generation</button>
             <a class="smart-header-item"
-                href="https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/manual.pdf"
+                href="https://manuel2gl.github.io/qft-cosmic-ascec/manual.pdf"
                 target="_blank">User Manual</a>
             <a class="smart-header-item" href="https://github.com/manuel2gl/qft-cosmic-ascec"
                 target="_blank">GitHub</a>
@@ -2586,17 +2632,17 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                         <button class="quick-mol-btn" onclick="basicLoadSmiles('CCCCCC', 'hexane')">Hexane</button>
                     </div>
                     <div style="margin-top: 12px; background: #f8f9fa; border-radius: 6px; padding: 12px 14px; font-size: 0.85em;">
-                        <div style="display: flex; gap: 0; align-items: flex-start;">
+                        <div class="mol-info-bar" style="display: flex; gap: 0; align-items: flex-start;">
                             <!-- Left section -->
-                            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px;">
-                                <div style="display: flex; gap: 15px; align-items: center;">
+                            <div style="flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0;">
+                                <div style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap;">
                                     <a href="https://pubchem.ncbi.nlm.nih.gov/" target="_blank" style="color: #3498db; text-decoration: none; font-weight: 500;">🔍 PubChem</a>
                                     <a href="https://www.novoprolabs.com/tools/smiles2pdb" target="_blank" style="color: #27ae60; text-decoration: none; font-weight: 500;">🧬 Novoprolabs 3D</a>
                                 </div>
                                 <div style="color: #666; font-size: 0.9em;">Download .mol from Novoprolabs and drop it on the preview.</div>
                             </div>
                             <!-- Vertical separator -->
-                            <div style="flex: 0 0 auto; width: 2px; height: 65px; background: #d0d5dd; margin: 0 20px;"></div>
+                            <div class="mol-info-separator" style="flex: 0 0 auto; width: 2px; height: 65px; background: #d0d5dd; margin: 0 20px;"></div>
                             <!-- Right section: Periodic Table -->
                             <div style="flex: 0 0 auto; display: flex; align-items: center; gap: 12px; color: #3f5b77; font-weight: 600; white-space: nowrap;">
                                 <span>Periodic Table</span>
@@ -4105,7 +4151,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     <h2>Protocol Builder</h2>
                     <p class="help-text" style="margin-bottom: 10px;">
                         Define the workflow stages. For docs, see the
-                        <a href="https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/manual.pdf" target="_blank">User Manual</a>.
+                        <a href="https://manuel2gl.github.io/qft-cosmic-ascec/manual.pdf" target="_blank">User Manual</a>.
                     </p>
 
                     <div class="protocol-builder" id="protocol-builder">
@@ -4185,7 +4231,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
                     </div>
 
                     <div class="install-callout">
-                        Manual setup: open the <a href="https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/manual.pdf" target="_blank">User Manual</a> and follow <strong>Step-by-Step Conda Installation</strong>.
+                        Manual setup: open the <a href="https://manuel2gl.github.io/qft-cosmic-ascec/manual.pdf" target="_blank">User Manual</a> and follow <strong>Step-by-Step Conda Installation</strong>.
                     </div>
                 </div>
 
