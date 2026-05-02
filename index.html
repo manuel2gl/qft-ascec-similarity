@@ -1338,6 +1338,29 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             width: 100%;
         }
 
+        .smart-box-canvas {
+            position: relative;
+        }
+
+        .smart-box-suggestion-overlay {
+            position: absolute;
+            bottom: 16px;
+            left: 16px;
+            z-index: 6;
+            font-size: 0.98em;
+            color: #c0392b;
+            pointer-events: none;
+        }
+
+        .smart-box-suggestion-overlay b {
+            font-weight: 700;
+        }
+
+        .smart-box-suggestion-overlay span {
+            font-weight: 400;
+            font-style: italic;
+        }
+
         .smart-sim-side {
             border: none;
             border-radius: 8px;
@@ -2343,6 +2366,26 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                 max-width: calc(100vw - 20px);
                 font-size: 0.88em;
             }
+
+            .container {
+                padding: 10px;
+            }
+
+            .smart-box-controls .form-group {
+                flex-basis: 100%;
+                min-width: 0 !important;
+            }
+
+            .smart-box-controls .btn-sm {
+                flex: 1 1 auto;
+                min-width: 0;
+            }
+
+            .smart-box-suggestion-overlay {
+                font-size: 0.85em;
+                bottom: 10px;
+                left: 10px;
+            }
         }
     </style>
 </head>
@@ -2424,16 +2467,17 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                                     <div id="smart-packing-assessment" class="smart-packing-assessment"></div>
                                 </div>
 
-                                <div id="basic-box-viewer" class="viewer-3d"></div>
+                                <div class="smart-box-canvas">
+                                    <div id="basic-box-viewer" class="viewer-3d"></div>
+                                    <div class="smart-box-suggestion-overlay">
+                                        <b>Box Suggestion</b> <span>— adjust as needed</span>
+                                    </div>
+                                </div>
 
                                 <aside class="smart-sim-side" aria-live="polite">
                                     <div class="smart-sim-side-head">Added molecules (<span id="basic-molecule-types-total">0</span>)</div>
                                     <div id="basic-molecule-type-list" class="smart-type-list"></div>
                                 </aside>
-
-                                <div class="smart-box-suggestion-overlay" style="position:absolute; bottom:55px; left:16px; z-index:6; font-size:0.98em; color:#c0392b; pointer-events:none;">
-                                    <b style="font-weight:700;">Box Suggestion</b> <span style="font-weight:400; font-style:italic;">— adjust as needed</span>
-                                </div>
 
                                 <div class="smart-box-controls">
                                     <button id="smart-box-refresh-btn" class="btn btn-sm btn-secondary" onclick="updateBasicBoxViewer()">Refresh</button>
