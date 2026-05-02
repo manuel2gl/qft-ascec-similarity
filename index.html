@@ -41,6 +41,11 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
             padding: 0;
         }
 
+        html, body {
+            overflow-x: hidden;
+            max-width: 100%;
+        }
+
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: var(--bg-color);
@@ -2371,6 +2376,43 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                 padding: 10px;
             }
 
+            .card {
+                padding: 12px;
+            }
+
+            .card h2 {
+                font-size: 1.1em;
+            }
+
+            .smart-header {
+                padding: 0 4px;
+            }
+
+            .smart-header-item {
+                padding: 10px 12px;
+                font-size: 0.85em;
+            }
+
+            .smart-header-item.install-tab {
+                margin-left: 4px;
+                margin-right: 8px;
+                padding: 8px 12px;
+            }
+
+            .smart-header-brand {
+                padding: 12px 8px;
+                font-size: 1.1em;
+            }
+
+            .smart-intro-bar {
+                padding: 12px 14px !important;
+                gap: 8px !important;
+            }
+
+            .smart-intro-bar span {
+                font-size: 0.82em !important;
+            }
+
             .smart-box-controls .form-group {
                 flex-basis: 100%;
                 min-width: 0 !important;
@@ -2385,6 +2427,10 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                 font-size: 0.85em;
                 bottom: 10px;
                 left: 10px;
+            }
+
+            .smart-box-top-controls {
+                width: 100%;
             }
         }
     </style>
