@@ -2819,30 +2819,69 @@ def write_cluster_dat_file(dat_file_prefix, cluster_members_data, output_base_di
                  if m.get('_pearson_n_eff')),
                 None,
             )
-            f.write("Pearson Similarity to Property-Cluster Representative\n")
-            f.write("  r = 1 - d^2/(2 n_eff); similarity = max(0, r) x 100%\n")
-            if rep_filename:
-                f.write(f"  Representative: {rep_filename}\n")
+
+            f.write("Pearson Similarity to Cluster Representative\n")
+            f.write("--------------------------------------------\n")
+            f.write("  Each cluster has a representative (the lowest-energy member).\n")
+            f.write("  For every member we measure how similar it is to that representative\n")
+            f.write("  using the Pearson identity derived from the weighted, z-standardised\n")
+            f.write("  feature vectors (see cosmic_methodology.tex, sec. 'Relationship to\n")
+            f.write("  Pearson Correlation'):\n")
+            f.write("\n")
+            f.write("      r          = 1 - d^2 / (2 * N_f)     (Pearson correlation)\n")
+            f.write("      similarity = max(0, r) x 100%        (clamped to [0, 100] %)\n")
+            f.write("\n")
+            f.write("  d       : weighted Euclidean distance between member and representative\n")
+            f.write("  N_f     : effective number of features (sum of squared weights after\n")
+            f.write("            z-standardisation; equals the feature count when all w_k=1).\n")
+            f.write("            Symbol chosen to avoid clash with the cluster count.\n")
+            f.write("  r       : Pearson correlation coefficient in [-1, 1]\n")
+            f.write("  t       : clustering threshold (cut height on the dendrogram)\n")
+            f.write("\n")
+
             if tau_val is not None and n_eff_val:
                 r_th = _pearson_r_from_distance(tau_val, n_eff_val)
                 pct_th = _pearson_similarity_pct(tau_val, n_eff_val)
-                if r_th is not None and pct_th is not None:
-                    f.write(
-                        f"  Cluster-boundary: tau = {tau_val:.3f}, "
-                        f"n_eff = {n_eff_val:.2f}, "
-                        f"r >= {r_th:.3f} ({pct_th:.1f}% similarity)\n"
-                    )
+            else:
+                r_th = None
+                pct_th = None
+
+            if tau_val is not None and n_eff_val and r_th is not None and pct_th is not None:
+                f.write("  Threshold (same for every cluster in this run):\n")
+                f.write(f"      t              = {tau_val:.3f}\n")
+                f.write(f"      N_f            = {n_eff_val:.2f}\n")
+                f.write(f"      Pearson r >=   = {r_th:.3f}     (boundary value implied by t)\n")
+                f.write(f"      Similarity >=  = {pct_th:.1f} %    <-- COSMIC Trust Score\n")
+                f.write("\n")
+                f.write(f"  Reading: every member of this cluster is expected to be\n")
+                f.write(f"  at least {pct_th:.1f} % similar to the representative.\n")
+                f.write(f"  This is the quantitative error margin of the clustering.\n")
+                f.write("\n")
+
+            if rep_filename:
+                f.write(f"  Representative   : {rep_filename}\n")
+                f.write("\n")
+
+            f.write("  Per-member similarity to representative:\n")
+            _name_w = max(
+                (len(m.get('filename', '') or '') for m in cluster_members_data),
+                default=16,
+            )
+            _name_w = max(_name_w, 16)
             for mol_data in cluster_members_data:
+                fname = mol_data.get('filename', '') or ''
                 pct = mol_data.get('_pearson_rep_pct')
                 d = mol_data.get('_pearson_rep_distance')
-                is_rep = mol_data.get('filename') == rep_filename
+                r_val = mol_data.get('_pearson_rep_r')
+                is_rep = fname == rep_filename
                 marker = "  (representative)" if is_rep else ""
-                if pct is None or d is None:
-                    f.write(f"    - {mol_data['filename']}: similarity = N/A{marker}\n")
+                if pct is None or d is None or r_val is None:
+                    f.write(f"    {fname:<{_name_w}} :  similarity = N/A{marker}\n")
                 else:
                     f.write(
-                        f"    - {mol_data['filename']}: "
-                        f"d = {d:.3f}, similarity = {pct:.1f}%{marker}\n"
+                        f"    {fname:<{_name_w}} :  "
+                        f"d = {d:6.3f}   r = {r_val:6.3f}   "
+                        f"similarity = {pct:6.1f} %{marker}\n"
                     )
             f.write("\n")
 
@@ -3649,7 +3688,7 @@ ROTATIONAL_CONSTANT_SUBFEATURES = [
 # Tuned feature weights for semiempirical / standalone xTB output.  Values < 1.0
 # down-weight noisy features that cause geometrically identical structures to
 # appear distinct in the Z-standardised feature space.  Activated via the
-# --semiweights flag; layer user overrides on top via --weights.
+# --partialweights flag; layer user overrides on top via --weights.
 SEMIEMPIRICAL_WEIGHTS = {
     'electronic_energy': 1.0,        # Direct SCF output, most reliable
     'gibbs_free_energy': 0.9,        # Thermal corrections add noise
@@ -3667,7 +3706,7 @@ SEMIEMPIRICAL_WEIGHTS = {
     'rotational_constants_C': 1.0,   # Geometric, index-independent
 }
 
-# Uniform default weights.  Used unless --semiweights is passed.  Keeps COSMIC
+# Uniform default weights.  Used unless --partialweights is passed.  Keeps COSMIC
 # method-agnostic by default so DFT / post-HF runs are not silently re-weighted.
 DEFAULT_WEIGHTS = {k: 1.0 for k in SEMIEMPIRICAL_WEIGHTS}
 
@@ -4426,7 +4465,8 @@ def resolve_clustering_threshold(linkage_matrix, user_threshold, verbose=False):
 
 def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
                                filename, title_suffix="", conf_labels=None,
-                               mojena_threshold=None, mojena_k=None):
+                               mojena_threshold=None, mojena_k=None,
+                               n_eff=None):
     """
     Save two plot files:
       1. Dendrogram with horizontal cut line → filename (e.g., dendrogram.png)
@@ -4445,6 +4485,12 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
         Mojena's recommended threshold for diagnostic comparison.
     mojena_k : int or None
         Number of clusters at the Mojena threshold.
+    n_eff : float or None
+        Effective number of features N_f (sum of squared feature weights
+        after z-standardisation). If provided (and > 0), the diagnostic
+        plot gets a second legend titled "COSMIC Trust Score" that
+        translates the applied threshold t and a reference threshold
+        into Pearson similarity. Suppressed if unavailable.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -4506,11 +4552,62 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
 
     ax2.set_xlabel("Merge Step (sorted)")
     ax2.set_ylabel("UPGMA Merge Height")
-    ax2.set_title("Threshold Diagnostic (Merge Height Distribution)")
-    ax2.legend(loc='upper left', fontsize=9)
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
-    fig2.tight_layout()
+
+    # COSMIC Trust Score (Pearson similarity for the applied threshold and a
+    # reference threshold). Suppressed if n_c is unavailable or non-positive.
+    trust_segments = []
+    if n_eff is not None and n_eff > 0:
+        STANDARD_T = 2.0
+        applied_is_standard = abs(cut_height - STANDARD_T) <= 1e-6
+
+        def _fmt_trust_segment(label, t_val):
+            pct = _pearson_similarity_pct(t_val, n_eff)
+            if pct is None:
+                return f"{label} τ={t_val:.2f} → N/A"
+            return f"{label} τ={t_val:.2f} → {pct:.1f}%"
+
+        if applied_is_standard:
+            # Applied cut IS the standard threshold → pair it with Mojena.
+            trust_segments.append(_fmt_trust_segment("standard", cut_height))
+            if mojena_threshold is not None:
+                trust_segments.append(_fmt_trust_segment("Mojena",
+                                                         float(mojena_threshold)))
+        else:
+            # Non-standard cut applied → pair applied with standard reference.
+            trust_segments.append(_fmt_trust_segment("applied", cut_height))
+            trust_segments.append(_fmt_trust_segment("standard", STANDARD_T))
+
+    trust_text = ""
+    if trust_segments:
+        trust_text = "COSMIC Trust Score — " + "   |   ".join(trust_segments)
+
+    # Reserve headroom above the axes for the legend + trust score row,
+    # then promote the title to a suptitle so it sits above them.
+    fig2.subplots_adjust(top=0.82)
+    fig2.suptitle("Threshold Diagnostic (Merge Height Distribution)",
+                  y=0.98, fontsize=10)
+
+    ax2.legend(
+        loc='lower left',
+        bbox_to_anchor=(0.0, 1.02),
+        ncol=4,
+        fontsize=9,
+        frameon=True,
+        borderaxespad=0.0,
+    )
+
+    if trust_text:
+        ax2.text(
+            1.0, 1.02, trust_text,
+            transform=ax2.transAxes,
+            ha='right', va='bottom',
+            fontsize=9,
+            bbox=dict(boxstyle='round,pad=0.4',
+                      facecolor='white', edgecolor='0.6', linewidth=0.8),
+        )
+
     fig2.savefig(diag_filename, dpi=150)
     plt.close(fig2)
 
@@ -4642,7 +4739,7 @@ def apply_composite_energies(dataset, prev_out_dir):
 
 
 # Modified to accept rmsd_threshold and output_base_dir
-def perform_clustering_and_analysis(input_source, threshold="auto", file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, num_cores=None, temperature_k=298.15, group_hb=False, prev_out_dir=None, semiweights=False):
+def perform_clustering_and_analysis(input_source, threshold="auto", file_extension_pattern=None, rmsd_threshold=None, output_base_dir=None, force_reprocess_cache=False, weights=None, is_compare_mode=False, min_std_threshold=1e-6, abs_tolerances=None, num_cores=None, temperature_k=298.15, group_hb=False, prev_out_dir=None, partialweights=False):
     """
     Performs hierarchical clustering and comprehensive analysis on molecular structures.
     This is the main analysis function that orchestrates the entire clustering workflow.
@@ -5130,18 +5227,18 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     
     # Conditional cosmic threshold display
     if is_compare_mode:
-        summary_file_content_lines.append(f"COSMIC threshold (distance): N/A")
+        summary_file_content_lines.append(f"COSMIC threshold (distance)   : N/A")
     elif threshold == "auto":
-        summary_file_content_lines.append(f"COSMIC threshold (distance): auto (per-case knee detection)")
+        summary_file_content_lines.append(f"COSMIC threshold (distance)   : auto (per-case knee detection)")
     else:
-        summary_file_content_lines.append(f"COSMIC threshold (distance): {threshold}")
+        summary_file_content_lines.append(f"COSMIC threshold (distance)   : {threshold}")
     summary_file_content_lines.append("<THRESHOLD_PEARSON_PLACEHOLDER>")
     
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"RMSD validation threshold: {rmsd_threshold:.3f} Å")
     # Report the active weight profile and any non-default weights
-    if semiweights:
-        summary_file_content_lines.append("Weight profile: semiempirical (--semiweights)")
+    if partialweights:
+        summary_file_content_lines.append("Weight profile: semiempirical (--partialweights)")
     else:
         summary_file_content_lines.append("Weight profile: uniform (1.0)")
     if weights:
@@ -5527,11 +5624,17 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             else:
                 dendrogram_filename = os.path.join(dendrogram_images_folder, f"dendrogram.png")
 
+            try:
+                _diag_n_eff = _effective_n_features(features_scaled)
+            except Exception:
+                _diag_n_eff = None
+
             plot_annotated_dendrogram(
                 linkage_matrix, _main_optimal_k, _main_cut_height,
                 dendrogram_filename, title_suffix=dendrogram_title_suffix,
                 conf_labels=conf_labels,
-                mojena_threshold=_mojena_t, mojena_k=_mojena_k)
+                mojena_threshold=_mojena_t, mojena_k=_mojena_k,
+                n_eff=_diag_n_eff)
             vprint(f"Dendrogram saved as '{os.path.basename(dendrogram_filename)}'")
 
             # --- Match reduced-tier structures against fullest-tier clusters ---
@@ -5808,31 +5911,35 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
         reduced_unmatched_str = str(len(reduced_unmatched_critical))
 
     if is_compare_mode or not resolved_threshold_entries:
-        _pearson_threshold_text = "COSMIC threshold (similarity): N/A"
+        _pearson_threshold_text = "COSMIC Trust Score (similarity floor): N/A"
     elif len(resolved_threshold_entries) == 1:
         _e = resolved_threshold_entries[0]
         if _e['r_thresh'] is not None and _e['pct_thresh'] is not None:
             _pearson_threshold_text = (
-                f"COSMIC threshold (similarity): "
-                f"r >= {_e['r_thresh']:.3f} ({_e['pct_thresh']:.1f}%) "
-                f"[tau = {_e['tau']:.3f}, n_eff = {_e['n_eff']:.2f}, source = {_e['source']}]"
+                f"COSMIC Trust Score (similarity floor): {_e['pct_thresh']:.1f} %\n"
+                f"  reading: every cluster member is expected to be at least "
+                f"{_e['pct_thresh']:.1f} % similar to its\n"
+                f"  representative -- the quantitative error margin of the clustering.\n"
+                f"  details: r >= {_e['r_thresh']:.3f}, "
+                f"N_f = {_e['n_eff']:.2f}, source = {_e['source']}"
             )
         else:
-            _pearson_threshold_text = "COSMIC threshold (similarity): N/A"
+            _pearson_threshold_text = "COSMIC Trust Score (similarity floor): N/A"
     else:
-        _lines = ["COSMIC threshold (similarity, per group):"]
+        _lines = ["COSMIC Trust Score (similarity floor, per H-bond group):"]
+        _lines.append("  reading: within each group, every cluster member is expected to be at least")
+        _lines.append("  the listed % similar to its representative (quantitative error margin).")
         for _e in resolved_threshold_entries:
-            _label = (f"H={_e['group_label']}" if _e['group_label'] is not None
+            _label = (f"H = {_e['group_label']}" if _e['group_label'] is not None
                       else "all")
             if _e['r_thresh'] is not None and _e['pct_thresh'] is not None:
                 _lines.append(
-                    f"  - {_label}: r >= {_e['r_thresh']:.3f} "
-                    f"({_e['pct_thresh']:.1f}%) "
-                    f"[tau = {_e['tau']:.3f}, n_eff = {_e['n_eff']:.2f}, "
-                    f"source = {_e['source']}]"
+                    f"  {_label:<6} : {_e['pct_thresh']:.1f} %   "
+                    f"(r >= {_e['r_thresh']:.3f}, "
+                    f"N_f = {_e['n_eff']:.2f}, source = {_e['source']})"
                 )
             else:
-                _lines.append(f"  - {_label}: N/A")
+                _lines.append(f"  {_label:<6} : N/A")
         _pearson_threshold_text = "\n".join(_lines)
 
     for i, line in enumerate(summary_file_content_lines):
@@ -6225,7 +6332,7 @@ MORE INFORMATION:
     parser.add_argument("--group-hb", action="store_true",
                         help="group structures by H-bond count before clustering (separate dendrograms per HB family)")
 
-    parser.add_argument("--semiweights", action="store_true",
+    parser.add_argument("--partialweights", action="store_true",
                         help="apply tuned weights for semiempirical / standalone xTB output "
                              "(down-weights noisy orbital, dipole, and H-bond features). "
                              "Recommended for PM3/AM1/xTB; leave off for DFT/post-HF.")
@@ -6293,9 +6400,9 @@ MORE INFORMATION:
     output_directory = args.output_dir
     force_reprocess_cache = args.reprocess_files
     user_weights_dict = parse_weights_argument(args.weights)
-    # Pick tuned semiempirical baseline only when --semiweights is passed;
+    # Pick tuned semiempirical baseline only when --partialweights is passed;
     # otherwise stay method-agnostic with a flat 1.0 baseline.
-    base_weights = SEMIEMPIRICAL_WEIGHTS if args.semiweights else DEFAULT_WEIGHTS
+    base_weights = SEMIEMPIRICAL_WEIGHTS if args.partialweights else DEFAULT_WEIGHTS
     weights_dict = dict(base_weights)
     weights_dict.update(user_weights_dict)  # user --weights override the baseline
     min_std_threshold_val = args.min_std_threshold
@@ -6370,7 +6477,7 @@ MORE INFORMATION:
             num_cores=num_cores,
             temperature_k=temperature_k,
             group_hb=args.group_hb,
-            semiweights=args.semiweights,
+            partialweights=args.partialweights,
         )
         print(f"\n--- Finished comparing {len(compare_files)} files: {', '.join(file_names)} ---\n")
 
@@ -6486,7 +6593,7 @@ MORE INFORMATION:
                 display_name = "./"
             print(f"\nProcessing folder: {display_name}\n")
 
-            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, num_cores=num_cores, temperature_k=temperature_k, group_hb=args.group_hb, prev_out_dir=args.prev_out_dir, semiweights=args.semiweights)
+            perform_clustering_and_analysis(folder_path, clustering_threshold, file_extension_pattern, rmsd_validation_threshold, output_directory, force_reprocess_cache, weights_dict, is_compare_mode=False, min_std_threshold=min_std_threshold_val, abs_tolerances=abs_tolerances_dict, num_cores=num_cores, temperature_k=temperature_k, group_hb=args.group_hb, prev_out_dir=args.prev_out_dir, partialweights=args.partialweights)
 
             print(f"\nFinished processing folder: {display_name}\n")
 
