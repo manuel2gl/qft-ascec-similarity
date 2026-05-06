@@ -4495,6 +4495,7 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
     from scipy.cluster.hierarchy import dendrogram
 
     # Check if all distances are effectively zero
@@ -4552,6 +4553,8 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
 
     ax2.set_xlabel("Merge Step (sorted)")
     ax2.set_ylabel("UPGMA Merge Height")
+    ax2.set_title("Threshold Diagnostic (Merge Height Distribution)")
+    leg_main = ax2.legend(loc='upper left', fontsize=9)
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
@@ -4579,33 +4582,34 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
             trust_segments.append(_fmt_trust_segment("applied", cut_height))
             trust_segments.append(_fmt_trust_segment("standard", STANDARD_T))
 
-    trust_text = ""
+    # Run tight_layout BEFORE measuring the main legend, otherwise its
+    # bbox shifts when tight_layout repositions the axes.
+    fig2.tight_layout()
+
     if trust_segments:
-        trust_text = "COSMIC Trust Score — " + "   |   ".join(trust_segments)
+        # Render a real Legend for the trust score so the title is auto-
+        # centered. Read the main legend's actual upper-right corner in
+        # axes coords after the layout has settled, then anchor the trust
+        # legend's upper-left exactly there + a tiny horizontal gap.
+        fig2.canvas.draw()
+        ax2.add_artist(leg_main)
+        leg_bbox_axes = leg_main.get_window_extent().transformed(
+            ax2.transAxes.inverted())
+        trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.55)
+        trust_anchor_y = leg_bbox_axes.y1
 
-    # Reserve headroom above the axes for the legend + trust score row,
-    # then promote the title to a suptitle so it sits above them.
-    fig2.subplots_adjust(top=0.82)
-    fig2.suptitle("Threshold Diagnostic (Merge Height Distribution)",
-                  y=0.98, fontsize=10)
-
-    ax2.legend(
-        loc='lower left',
-        bbox_to_anchor=(0.0, 1.02),
-        ncol=4,
-        fontsize=9,
-        frameon=True,
-        borderaxespad=0.0,
-    )
-
-    if trust_text:
-        ax2.text(
-            1.0, 1.02, trust_text,
-            transform=ax2.transAxes,
-            ha='right', va='bottom',
+        _trust_handles = [Patch(visible=False) for _ in trust_segments]
+        ax2.legend(
+            handles=_trust_handles, labels=trust_segments,
+            loc='upper left',
+            bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
+            bbox_transform=ax2.transAxes,
             fontsize=9,
-            bbox=dict(boxstyle='round,pad=0.4',
-                      facecolor='white', edgecolor='0.6', linewidth=0.8),
+            title='COSMIC Trust Score',
+            title_fontsize=9,
+            handlelength=0, handletextpad=0,
+            borderaxespad=0,
+            borderpad=0.4,
         )
 
     fig2.savefig(diag_filename, dpi=150)
