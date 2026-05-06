@@ -11492,9 +11492,8 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
           geom_ref_out/{motif,umotif}_NN/.
         - energy_refinement/: combined_results.*, *_summary.txt,
           energy_ref_out/{motif,umotif}_NN/.
-        - cosmic*/: boltzmann_distribution.txt, clustering_summary.txt,
-          *_summary.txt, motifs_*/, umotifs_*/, dendrogram_images/.
-          Intermediate caches, extracted_*, xtb_out_*/, orca_out_*/, etc. removed.
+        - cosmic*/: left untouched (miniprint never removes anything from
+          cosmic folders).
         - Root: final_ensemble.* or possible_final_ensemble.*, boltzmann_distribution.txt,
           protocol_summary.txt, protocol_*.pkl (kept for resume), .asc file.
         """
@@ -11815,36 +11814,12 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 label = "geometry_refinement" if is_ref else "geometry_optimization"
                 print(f"  Cleaned {calc_dir}/ ({label}): kept {len(kept_root_files)} items")
 
-        # --- Clean cosmic directories: keep final motifs and useful summaries only ---
-        for cosmic_dir_path, _ in cosmic_dirs:
-            if not os.path.isdir(cosmic_dir_path):
-                continue
-
-            kept_items = 0
-            removed_count = 0
-            for entry in os.listdir(cosmic_dir_path):
-                entry_path = os.path.join(cosmic_dir_path, entry)
-                keep = False
-                if os.path.isfile(entry_path):
-                    if (entry in ("boltzmann_distribution.txt", "clustering_summary.txt")
-                            or entry.endswith("_summary.txt")):
-                        keep = True
-                elif os.path.isdir(entry_path):
-                    if (entry.startswith("motifs_") or entry.startswith("umotifs_")
-                            or entry == "dendrogram_images"):
-                        keep = True
-
-                if keep:
-                    kept_items += 1
-                elif os.path.isdir(entry_path):
-                    shutil.rmtree(entry_path)
-                    removed_count += 1
-                else:
-                    os.remove(entry_path)
-                    removed_count += 1
-
-            if verbose and removed_count > 0:
-                print(f"  Cleaned {cosmic_dir_path}/: kept {kept_items} useful items")
+        # --- Cosmic directories are preserved as-is by miniprint ---
+        # Per project policy, --miniprint MUST NOT touch cosmic folders or
+        # remove anything from them. They are still scanned above to derive
+        # the final-motif mapping used to extract representative folders from
+        # the optimization/refinement stages, but their contents are not
+        # modified here.
 
         # --- Report final disk usage ---
         try:
