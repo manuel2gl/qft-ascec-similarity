@@ -3559,10 +3559,10 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                                 <option value="vtight">Very Tight</option>
                             </select>
                         </div>
-                        <div class="form-group" id="adv-opt-semiweights-group" style="display:flex; align-items:flex-end;">
+                        <div class="form-group" id="adv-opt-partialweights-group" style="display:flex; align-items:flex-end;">
                             <label class="auto-box-compact" title="Auto-enable for preliminar semiempirical/xTB optimization; disable for DFT or post-HF." style="white-space:nowrap; padding-bottom:8px;">
-                                <input type="checkbox" id="adv-cosmic-semiweights" checked onchange="toggleSemiweightsFlag()">
-                                Use semiempirical weights (<code>--semiweights</code>)
+                                <input type="checkbox" id="adv-cosmic-partialweights" checked onchange="togglePartialweightsFlag()">
+                                Use semiempirical weights (<code>--partialweights</code>)
                             </label>
                         </div>
                     </div>
@@ -7290,7 +7290,7 @@ H  -0.757000  0.586000  0.000000"></textarea>
                 if (erefTheory) { erefTheory.value = 'post-hf'; updateSmartEnergyRefMethod(); }
             }
 
-            syncSemiweightsFromTheory();
+            syncPartialweightsFromTheory();
 
             updateSamplingPresetUI();
             updateSmartPipeline();
@@ -8781,37 +8781,37 @@ end
             toggleCustomInput('adv-annealing-basis', 'adv-annealing-basis-custom');
         }
 
-        function applySemiweightsToExtraFlags() {
-            // Write or strip --semiweights inside the COSMIC 1 Extra Flags input,
+        function applyPartialweightsToExtraFlags() {
+            // Write or strip --partialweights inside the COSMIC 1 Extra Flags input,
             // mirroring the checkbox state so the flag is visible to the user.
-            const cb = document.getElementById('adv-cosmic-semiweights');
+            const cb = document.getElementById('adv-cosmic-partialweights');
             const extraInput = document.getElementById('adv-sim1-extra');
             if (!cb || !extraInput) return;
-            let current = (extraInput.value || '').replace(/\s*--semiweights\b/g, '').trim();
+            let current = (extraInput.value || '').replace(/\s*--partialweights\b/g, '').trim();
             if (cb.checked) {
-                current = current ? `--semiweights ${current}` : '--semiweights';
+                current = current ? `--partialweights ${current}` : '--partialweights';
             }
             extraInput.value = current;
         }
 
-        function toggleSemiweightsFlag() {
-            applySemiweightsToExtraFlags();
+        function togglePartialweightsFlag() {
+            applyPartialweightsToExtraFlags();
             updateAllPreviews();
         }
 
         // Remembers the last preset+theory combination that drove the auto-sync so
         // repeated syncs do not clobber a manual user toggle.
-        let lastSemiweightsSyncedKey = null;
-        function syncSemiweightsFromTheory() {
-            const cb = document.getElementById('adv-cosmic-semiweights');
+        let lastPartialweightsSyncedKey = null;
+        function syncPartialweightsFromTheory() {
+            const cb = document.getElementById('adv-cosmic-partialweights');
             if (!cb) return;
             const theory = document.getElementById('adv-opt-theory')?.value || null;
             const preset = getSamplingPresetFromState();
             const syncKey = `${preset}|${theory || ''}`;
-            if (syncKey === lastSemiweightsSyncedKey) return;
-            lastSemiweightsSyncedKey = syncKey;
+            if (syncKey === lastPartialweightsSyncedKey) return;
+            lastPartialweightsSyncedKey = syncKey;
             cb.checked = preset === 'preliminar' && (theory === 'semiempirical' || theory === 'xtb');
-            applySemiweightsToExtraFlags();
+            applyPartialweightsToExtraFlags();
         }
 
         function updateAdvOptMethod() {
@@ -8833,7 +8833,7 @@ end
             toggleCustomInput('adv-opt-basis', 'adv-opt-basis-custom');
             syncXtbOptLevelVisibility('adv-opt', theory);
             applyAdvancedOptRescueDefaults();
-            syncSemiweightsFromTheory();
+            syncPartialweightsFromTheory();
         }
 
         function updateAdvRefMethod() {
@@ -9242,7 +9242,7 @@ end
         // Update all previews and pipeline
         function updateAllPreviews() {
             updateAdvOrcaInput1();
-            syncSemiweightsFromTheory();
+            syncPartialweightsFromTheory();
             const refEnabled = document.getElementById('adv-ref-enabled')?.checked !== false
                 && document.getElementById('smart-ref-enabled')?.checked !== false;
             if (refEnabled) updateAdvOrcaInput2();
@@ -9506,10 +9506,10 @@ end
             const recoveryTh = document.getElementById('adv-recovery-th')?.value || '0';
             const recoveryRedo = document.getElementById('adv-recovery-redo')?.value || '3';
 
-            // Build cosmic args.  The --semiweights flag lives inside the COSMIC 1
+            // Build cosmic args.  The --partialweights flag lives inside the COSMIC 1
             // Extra Flags field (toggled by the checkbox) and is therefore only
             // applied to sim1.  The post-ref and post-eref cosmic stages run on
-            // DFT / higher-level output, so strip --semiweights from sim2Extra in
+            // DFT / higher-level output, so strip --partialweights from sim2Extra in
             // case "Same settings" is enabled and it inherited sim1's Extra Flags.
             let sim1Args = `-j${sim1J}`;
             if (sim1Th !== '') sim1Args = `--th=${sim1Th} ${sim1Args}`;
@@ -9517,7 +9517,7 @@ end
             if (advancedCOSMICFlags) sim1Args += ` ${advancedCOSMICFlags}`;
             if (sim1Extra) sim1Args += ' ' + sim1Extra;
 
-            const sim2ExtraClean = (sim2Extra || '').replace(/\s*--semiweights\b/g, '').trim();
+            const sim2ExtraClean = (sim2Extra || '').replace(/\s*--partialweights\b/g, '').trim();
             let sim2Args = `-j${sim2J}`;
             if (sim2Th !== '') sim2Args = `--th=${sim2Th} ${sim2Args}`;
             if (sim2Rmsd !== '') sim2Args += ` --rmsd=${sim2Rmsd}`;
