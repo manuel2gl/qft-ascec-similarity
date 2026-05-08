@@ -4531,8 +4531,8 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
 
     merge_indices = np.arange(1, n_merges + 1)
     ax2.fill_between(merge_indices, 0, heights_sorted, alpha=0.15, color='#3498db')
-    ax2.plot(merge_indices, heights_sorted, '-', color='#3498db', linewidth=1.2,
-             label='Merge heights')
+    ax2.plot(merge_indices, heights_sorted, 'o-', color='#3498db', linewidth=0.9,
+             markersize=3, label='Merge heights')
 
     # Applied cut (red dashed) — this is the threshold the run actually used.
     n_above_cut = int(np.sum(heights_sorted > cut_height))
@@ -4571,16 +4571,12 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
                 return f"{label} τ={t_val:.2f} → N/A"
             return f"{label} τ={t_val:.2f} → {pct:.1f}%"
 
-        if applied_is_standard:
-            # Applied cut IS the standard threshold → pair it with Mojena.
-            trust_segments.append(_fmt_trust_segment("standard", cut_height))
-            if mojena_threshold is not None:
-                trust_segments.append(_fmt_trust_segment("Mojena",
-                                                         float(mojena_threshold)))
-        else:
-            # Non-standard cut applied → pair applied with standard reference.
-            trust_segments.append(_fmt_trust_segment("applied", cut_height))
+        # Always show applied; show standard only when it differs; always show Mojena if available.
+        trust_segments.append(_fmt_trust_segment("applied", cut_height))
+        if not applied_is_standard:
             trust_segments.append(_fmt_trust_segment("standard", STANDARD_T))
+        if mojena_threshold is not None:
+            trust_segments.append(_fmt_trust_segment("Mojena", float(mojena_threshold)))
 
     # Run tight_layout BEFORE measuring the main legend, otherwise its
     # bbox shifts when tight_layout repositions the axes.
@@ -4598,9 +4594,7 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
         trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.55)
         trust_anchor_y = leg_bbox_axes.y1
 
-        _trust_handles = [Patch(visible=False) for _ in trust_segments]
-        ax2.legend(
-            handles=_trust_handles, labels=trust_segments,
+        _trust_kwargs = dict(
             loc='upper left',
             bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
             bbox_transform=ax2.transAxes,
@@ -4611,6 +4605,20 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
             borderaxespad=0,
             borderpad=0.4,
         )
+        _trust_handles = [Patch(visible=False) for _ in trust_segments]
+        trust_leg = ax2.legend(handles=_trust_handles, labels=trust_segments,
+                               **_trust_kwargs)
+
+        # Adjust borderpad so both boxes reach exactly the same pixel height.
+        fig2.canvas.draw()
+        delta_px = (leg_main.get_window_extent().height
+                    - trust_leg.get_window_extent().height)
+        if abs(delta_px) > 1:
+            fontsize_px = 9 * fig2.dpi / 72
+            trust_leg.remove()
+            _trust_kwargs['borderpad'] = max(0.1, 0.4 + delta_px / (2 * fontsize_px))
+            ax2.legend(handles=[Patch(visible=False) for _ in trust_segments],
+                       labels=trust_segments, **_trust_kwargs)
 
     fig2.savefig(diag_filename, dpi=150)
     plt.close(fig2)
