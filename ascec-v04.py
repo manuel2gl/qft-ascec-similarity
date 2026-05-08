@@ -6363,7 +6363,9 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
     elif qm_program == 'orca':
         import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
-            auto_launcher_tmp = create_auto_launcher(tmpdir, qm_program, qm_alias, quiet=workflow_mode)
+            # qm_alias on line 9 is for annealing only; ORCA stages always look
+            # up the standard "orca" binary unless a launcher template is given.
+            auto_launcher_tmp = create_auto_launcher(tmpdir, qm_program, "orca", quiet=workflow_mode)
             if auto_launcher_tmp and os.path.exists(auto_launcher_tmp):
                 with open(auto_launcher_tmp, 'r') as f:
                     launcher_base_content = f.read()
@@ -7708,33 +7710,54 @@ def detect_xtb_in_template(template_content: str) -> Optional[str]:
 def detect_orca_executable(alias: str = "orca") -> Optional[str]:
     """
     Detect ORCA executable path using 'which <alias>' or shutil.which.
-    
+
     Args:
         alias: The command alias to search for (default: "orca")
                This can come from line 9 of input.in (e.g., "orca", "orca6", etc.)
-    
+
     Returns:
         Full path to ORCA executable, or None if not found
     """
-    # Try shutil.which first (works cross-platform)
-    orca_path = shutil.which(alias)
-    if orca_path:
-        return orca_path
-    
-    # Fallback: try running 'which <alias>' in shell
-    try:
-        result = subprocess.run(
-            ["which", alias],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            path = result.stdout.strip()
-            if os.path.exists(path):
-                return path
-    except (FileNotFoundError, Exception):
-        pass
-    
+    # The alias on line 9 of input.in describes the *main* QM program. When the
+    # main program isn't ORCA (e.g. "xtb", "g16", "g09", "gaussian"), the alias
+    # must not be used to locate ORCA — it would resolve to the wrong binary
+    # and silently produce empty .out files. Fall back to the standard "orca".
+    non_orca_aliases = {"xtb", "g16", "g09", "g03", "gaussian"}
+    candidates = []
+    if alias and alias.lower() not in non_orca_aliases:
+        candidates.append(alias)
+    if "orca" not in candidates:
+        candidates.append("orca")
+
+    for cand in candidates:
+        # Try shutil.which first (works cross-platform)
+        orca_path = shutil.which(cand)
+        if not orca_path:
+            # Fallback: try running 'which <alias>' in shell
+            try:
+                result = subprocess.run(
+                    ["which", cand],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    candidate_path = result.stdout.strip()
+                    if os.path.exists(candidate_path):
+                        orca_path = candidate_path
+            except (FileNotFoundError, Exception):
+                pass
+
+        if not orca_path:
+            continue
+
+        # Validate the resolved binary actually looks like ORCA. The directory
+        # name is checked too because some sites install orca next to other
+        # tools and the basename alone could be ambiguous.
+        bn = os.path.basename(orca_path).lower()
+        parent = os.path.basename(os.path.dirname(orca_path)).lower()
+        if "orca" in bn or "orca" in parent:
+            return orca_path
+
     return None
 
 
@@ -7759,11 +7782,15 @@ def create_auto_launcher(output_dir: str, qm_program: str = "orca", orca_alias: 
             print(f"  Warning: Auto-launcher only supported for ORCA, not {qm_program}")
         return None
     
-    # Detect ORCA executable using the alias
+    # Detect ORCA executable using the alias. detect_orca_executable() ignores
+    # non-ORCA aliases (e.g. "xtb") to avoid pointing the launcher at the wrong
+    # binary, so the message below names what was actually searched for.
     orca_path = detect_orca_executable(orca_alias)
     if not orca_path:
         if not quiet:
-            print(f"  Warning: ORCA executable '{orca_alias}' not found in PATH. Please provide a launcher script.")
+            non_orca_aliases = {"xtb", "g16", "g09", "g03", "gaussian"}
+            searched = "orca" if (not orca_alias or orca_alias.lower() in non_orca_aliases) else f"{orca_alias}/orca"
+            print(f"  Warning: ORCA executable '{searched}' not found in PATH. Please provide a launcher script.")
         return None
     
     if not quiet:
@@ -12527,6 +12554,16 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     stage_total = int(m.group(2))
                     if stage_total > 0:
                         stage_fraction = min(max(done / stage_total, 0.0), 1.0)
+                        # For replication: blend in intra-replica step progress so the bar
+                        # moves continuously instead of jumping at replica completion.
+                        # sub_progress format: "N/M (step X/Y)"
+                        if active_stage_type == 'replication':
+                            m2 = re.search(r'step\s+(\d+)\s*/\s*(\d+)', sub_progress)
+                            if m2:
+                                step_done = int(m2.group(1))
+                                step_total = int(m2.group(2))
+                                if step_total > 0:
+                                    stage_fraction = min((done + step_done / step_total) / stage_total, 1.0)
 
         progress_units = min(completed_stages + stage_fraction, float(total))
         pct = ((progress_units / total) * 100.0) if total > 0 else 0.0
@@ -14175,8 +14212,13 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
         except OSError:
             return False
 
-    def _run_single_replica(input_file: str) -> Dict[str, Any]:
-        """Run a single annealing replica and return result dict."""
+    def _run_single_replica(input_file: str, on_step=None) -> Dict[str, Any]:
+        """Run a single annealing replica and return result dict.
+
+        on_step: optional callable(step_str) called ~every 2 s with "X/Y" progress
+                 while the replica is running. When provided, Popen is used instead
+                 of subprocess.run so the parent can poll without blocking.
+        """
         run_dir = os.path.dirname(input_file)
         run_name = os.path.basename(run_dir)
         input_basename = os.path.basename(input_file)
@@ -14189,16 +14231,45 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             'last_error': None,
         }
 
+        step_progress_file = os.path.join(run_dir, '.ascec_step')
+
         try:
             cmd = [sys.executable, os.path.abspath(sys.argv[0]), input_basename]
-            proc = subprocess.run(
-                cmd,
-                cwd=run_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                env={**os.environ, "ASCEC_DISABLE_EMBEDDED_PROTOCOL": "1"},
-                preexec_fn=_pdeathsig_preexec,
-            )
+            env = {**os.environ, "ASCEC_DISABLE_EMBEDDED_PROTOCOL": "1"}
+
+            if on_step is not None:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=run_dir,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    preexec_fn=_pdeathsig_preexec,
+                )
+                while proc.poll() is None:
+                    try:
+                        with open(step_progress_file, 'r') as _spf:
+                            line = _spf.readline().strip()
+                        if line:
+                            on_step(line)
+                    except OSError:
+                        pass
+                    time.sleep(2.0)
+                returncode = proc.returncode
+                try:
+                    os.unlink(step_progress_file)
+                except OSError:
+                    pass
+            else:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=run_dir,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                    preexec_fn=_pdeathsig_preexec,
+                )
+                returncode = proc.returncode
 
             output_file = os.path.join(run_dir, os.path.splitext(input_basename)[0] + '.out')
             artifacts_exist = bool(glob.glob(os.path.join(run_dir, 'result_*.xyz'))) and bool(
@@ -14223,8 +14294,8 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                     result_info['success'] = True
 
             if not result_info['success']:
-                if proc.returncode != 0:
-                    result_info['last_error'] = f"Exit code {proc.returncode}"
+                if returncode != 0:
+                    result_info['last_error'] = f"Exit code {returncode}"
                 elif not os.path.exists(output_file):
                     result_info['last_error'] = "Output file not created"
                 else:
@@ -14304,7 +14375,13 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             run_name = os.path.basename(os.path.dirname(input_file))
             if verbose:
                 print(f"\n  {run_name}...", end=" ", flush=True)
-            result_info = _run_single_replica(input_file)
+                result_info = _run_single_replica(input_file)
+            elif callable(progress_cb):
+                def _step_cb(step_str, _cr=completed_replicas, _nr=num_replicas, _pcb=progress_cb):
+                    _pcb(f"{_cr}/{_nr} (step {step_str})")
+                result_info = _run_single_replica(input_file, on_step=_step_cb)
+            else:
+                result_info = _run_single_replica(input_file)
             _process_replica_result(result_info)
     else:
         # Concurrent execution with staggered launches for seed uniqueness
@@ -17180,15 +17257,17 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
                 print("  Attempting to auto-detect ORCA installation...")
             launcher_sh = None
     
-    # Get QM alias from context (read from input.in line 9)
+    # The line-9 alias from input.in describes the *annealing* QM program only.
+    # Refinement templates (#orca/#xtb/#gaussian) declare their own program, so
+    # the ORCA auto-launcher must always look for the standard "orca" binary.
     qm_alias = getattr(context, 'qm_alias', 'orca')
-    
+
     if not launcher_sh:
         # Try to auto-create launcher
         ref_launcher_dir = _opt_dir_name
         if not os.path.exists(ref_launcher_dir):
             os.makedirs(ref_launcher_dir, exist_ok=True)
-        auto_launcher = create_auto_launcher(ref_launcher_dir, "orca", qm_alias, quiet=workflow_concise)
+        auto_launcher = create_auto_launcher(ref_launcher_dir, "orca", "orca", quiet=workflow_concise)
         if auto_launcher:
             launcher_sh = auto_launcher
             if not workflow_concise:
@@ -17493,8 +17572,10 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
     
     # Create launcher script if provided
     # If auto-generated launcher was created before directory reset, recreate it now.
+    # Use "orca" alias literally — line 9's alias is for annealing only; the
+    # template header (#orca) determines the program for this stage.
     if launcher_sh and not os.path.exists(launcher_sh):
-        auto_launcher = create_auto_launcher(opt_dir, "orca", qm_alias, quiet=workflow_concise)
+        auto_launcher = create_auto_launcher(opt_dir, "orca", "orca", quiet=workflow_concise)
         if auto_launcher and os.path.exists(auto_launcher):
             launcher_sh = auto_launcher
         else:
@@ -20349,7 +20430,9 @@ MORE INFORMATION:
                 total_annealing_steps = state.geom_num_steps
             else:
                 _print_verbose("Error: Invalid quenching_routine specified for annealing mode. Must be 1 (linear) or 2 (geometric).", 0, state)
-                return 
+                return
+
+            _step_progress_file = os.path.join(run_dir, '.ascec_step')
 
             # Add the initial successful QM calculation to history and tvse
             if initial_qm_calculation_succeeded:
@@ -20399,6 +20482,12 @@ MORE INFORMATION:
                         state.current_temp = max(state.current_temp - state.linear_temp_decrement, 0.001) 
                     elif state.quenching_routine == 2: # Geometric quenching
                         state.current_temp = max(state.current_temp * state.geom_temp_factor, 0.001)
+
+                try:
+                    with open(_step_progress_file, 'w') as _spf:
+                        _spf.write(f"{step_num + 1}/{total_annealing_steps}\n")
+                except OSError:
+                    pass
 
                 # Always print the start of a new annealing step if not very verbose (level 0 or 1)
                 if state.verbosity_level <= 1:
@@ -20561,6 +20650,11 @@ MORE INFORMATION:
                 # Dynamic max_cycle reduction
                 state.maxstep = max(state.max_cycle_floor, int(state.maxstep * 0.90)) # Reduce by 10% with user-defined floor
                 _print_verbose(f"  Max QM evaluations for next temperature step reduced to: {state.maxstep}", 1, state)
+
+            try:
+                os.unlink(_step_progress_file)
+            except OSError:
+                pass
 
             _print_verbose("\nAnnealing simulation finished.\n", 0, state)
             _print_verbose(f"Final lowest energy found: {state.lowest_energy:.8f} a.u.", 0, state)
