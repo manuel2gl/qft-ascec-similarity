@@ -12554,16 +12554,17 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     stage_total = int(m.group(2))
                     if stage_total > 0:
                         stage_fraction = min(max(done / stage_total, 0.0), 1.0)
-                        # For replication: blend in intra-replica step progress so the bar
-                        # moves continuously instead of jumping at replica completion.
-                        # sub_progress format: "N/M (step X/Y)"
+                        # For replication: when step info is provided it represents
+                        # OVERALL annealing-step progress aggregated across all
+                        # replicas (completed + running), so use it directly.
+                        # sub_progress format: "N/M (step total_done/total_steps)"
                         if active_stage_type == 'replication':
                             m2 = re.search(r'step\s+(\d+)\s*/\s*(\d+)', sub_progress)
                             if m2:
                                 step_done = int(m2.group(1))
                                 step_total = int(m2.group(2))
                                 if step_total > 0:
-                                    stage_fraction = min((done + step_done / step_total) / stage_total, 1.0)
+                                    stage_fraction = min(max(step_done / step_total, 0.0), 1.0)
 
         progress_units = min(completed_stages + stage_fraction, float(total))
         pct = ((progress_units / total) * 100.0) if total > 0 else 0.0
@@ -14378,7 +14379,17 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 result_info = _run_single_replica(input_file)
             elif callable(progress_cb):
                 def _step_cb(step_str, _cr=completed_replicas, _nr=num_replicas, _pcb=progress_cb):
-                    _pcb(f"{_cr}/{_nr} (step {step_str})")
+                    # step_str is "X/Y" (current step / total steps) for the active replica.
+                    # Encode OVERALL progress: completed replicas contribute Y each.
+                    try:
+                        x_str, y_str = step_str.split('/', 1)
+                        x = int(x_str.strip())
+                        y = int(y_str.strip())
+                    except (ValueError, AttributeError):
+                        return
+                    overall_done = _cr * y + x
+                    overall_total = _nr * y
+                    _pcb(f"{_cr}/{_nr} (step {overall_done}/{overall_total})")
                 result_info = _run_single_replica(input_file, on_step=_step_cb)
             else:
                 result_info = _run_single_replica(input_file)
@@ -14396,24 +14407,72 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                 time.sleep(delay)
             return _run_single_replica(input_file)
 
-        with ThreadPoolExecutor(max_workers=effective_concurrent) as executor:
-            # Stagger launches by 2 seconds each to ensure unique time-based seeds
-            futures = {}
-            for idx, input_file in enumerate(pending_replicas):
-                delay = idx * 2.0  # 2-second stagger between launches
-                future = executor.submit(_staggered_replica, input_file, delay)
-                futures[future] = input_file
+        # Background monitor: aggregate step progress across all running replicas
+        # by reading their .ascec_step files, and report overall progress.
+        _monitor_stop = threading.Event()
+        _replica_dirs_to_watch = [os.path.dirname(f) for f in pending_replicas]
 
-            for future in as_completed(futures):
-                try:
-                    result_info = future.result()
-                    _process_replica_result(result_info)
-                except Exception as e:
-                    input_file = futures[future]
-                    run_name = os.path.basename(os.path.dirname(input_file))
-                    if verbose:
-                        print(f"\n  {run_name}... ✗ (exception: {e})")
-                    failed_runs.append(run_name)
+        def _aggregate_step_monitor():
+            while not _monitor_stop.wait(2.0):
+                if not callable(progress_cb):
+                    continue
+                running_done_sum = 0
+                steps_total_each = 0
+                for d in _replica_dirs_to_watch:
+                    spf = os.path.join(d, '.ascec_step')
+                    try:
+                        with open(spf, 'r') as f:
+                            line = f.readline().strip()
+                    except OSError:
+                        continue
+                    if '/' not in line:
+                        continue
+                    try:
+                        x_str, y_str = line.split('/', 1)
+                        x = int(x_str.strip())
+                        y = int(y_str.strip())
+                    except ValueError:
+                        continue
+                    if y <= 0:
+                        continue
+                    running_done_sum += x
+                    if steps_total_each == 0:
+                        steps_total_each = y
+                if steps_total_each <= 0:
+                    continue
+                with _replica_lock:
+                    cr = completed_replicas
+                overall_done = cr * steps_total_each + running_done_sum
+                overall_total = num_replicas * steps_total_each
+                progress_cb(f"{cr}/{num_replicas} (step {overall_done}/{overall_total})")
+
+        _monitor_thread = threading.Thread(target=_aggregate_step_monitor, daemon=True)
+        if not verbose and callable(progress_cb):
+            _monitor_thread.start()
+
+        try:
+            with ThreadPoolExecutor(max_workers=effective_concurrent) as executor:
+                # Stagger launches by 2 seconds each to ensure unique time-based seeds
+                futures = {}
+                for idx, input_file in enumerate(pending_replicas):
+                    delay = idx * 2.0  # 2-second stagger between launches
+                    future = executor.submit(_staggered_replica, input_file, delay)
+                    futures[future] = input_file
+
+                for future in as_completed(futures):
+                    try:
+                        result_info = future.result()
+                        _process_replica_result(result_info)
+                    except Exception as e:
+                        input_file = futures[future]
+                        run_name = os.path.basename(os.path.dirname(input_file))
+                        if verbose:
+                            print(f"\n  {run_name}... ✗ (exception: {e})")
+                        failed_runs.append(run_name)
+        finally:
+            _monitor_stop.set()
+            if _monitor_thread.is_alive():
+                _monitor_thread.join(timeout=3.0)
     
     if failed_runs:
         print(f"\n✗ {len(failed_runs)} simulation(s) failed")
