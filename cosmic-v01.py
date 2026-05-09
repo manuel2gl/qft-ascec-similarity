@@ -4026,6 +4026,21 @@ def _effective_n_features(scaled_matrix):
     return float(np.sum(np.var(scaled_matrix, axis=0)))
 
 
+def _median_pairwise_distance(scaled_matrix):
+    """Median pairwise Euclidean distance over rows of *scaled_matrix*.
+    Used as a stage-invariant scale anchor for the --th=opt-spread transform:
+    refined data live in a tighter feature space, so the median pairwise
+    distance shrinks; rescaling τ by d̃_ref/d̃_opt preserves the cut as a
+    fraction of typical inter-structure separation."""
+    if scaled_matrix is None or scaled_matrix.size == 0 or scaled_matrix.shape[0] < 2:
+        return 0.0
+    from scipy.spatial.distance import pdist
+    d = pdist(scaled_matrix)
+    if d.size == 0:
+        return 0.0
+    return float(np.median(d))
+
+
 def _pearson_r_from_distance(d, n_eff):
     """Pearson correlation between two (weighted) z-standardised feature
     vectors, derived from their Euclidean distance d via
@@ -4075,11 +4090,14 @@ def _attach_pearson_to_rep(mols, scaled_matrix, cluster_labels, tau):
 
 
 def _threshold_entry(tau, scaled_matrix, source, group_label=None):
-    """Build a resolved-threshold summary entry with its Pearson equivalent."""
+    """Build a resolved-threshold summary entry with its Pearson equivalent
+    and the median pairwise distance (scale anchor for --th=opt-spread)."""
     n_eff = _effective_n_features(scaled_matrix)
+    d_med = _median_pairwise_distance(scaled_matrix)
     return {
         'tau': float(tau),
         'n_eff': n_eff,
+        'd_med': d_med,
         'r_thresh': _pearson_r_from_distance(tau, n_eff),
         'pct_thresh': _pearson_similarity_pct(tau, n_eff),
         'source': source,
@@ -4389,23 +4407,45 @@ def compute_knee_threshold(linkage_matrix, verbose=False):
     return t_cut, int(k_res), True, "ok", k_star, h_knee
 
 
-def _persist_resolved_threshold(output_base_dir, t_value, source):
-    """Write the resolved τ to a sidecar file so a later cosmic stage can
-    reuse it via --th=opt. Silent no-op on filesystem errors."""
-    if not output_base_dir:
-        return
+_OPT_DETAIL_RE = re.compile(
+    r"tau\s*=\s*([-+0-9.eE]+)\s*,\s*"
+    r"r\s*>=?\s*([-+0-9.eE]+)\s*,\s*"
+    r"N_f\s*=\s*([-+0-9.eE]+)\s*,\s*"
+    r"d_med\s*=\s*([-+0-9.eE]+)\s*,\s*"
+    r"source\s*=\s*([A-Za-z0-9_+\-]+)"
+)
+
+
+def _parse_opt_params_from_summary(summary_path):
+    """Pull (tau, r, N_f, d_med, source) out of a sibling cosmic's
+    clustering_summary.txt. Returns None if the file is missing or has no
+    parseable trust-score detail line. When multiple groups are present
+    (--group-hb), the first group's parameters are returned as a single-best
+    fallback; downstream code does not currently support per-group transfer."""
+    if not os.path.isfile(summary_path):
+        return None
     try:
-        with open(os.path.join(output_base_dir, "resolved_threshold.txt"), "w") as _rt:
-            _rt.write(f"{float(t_value):.6f}\n{source}\n")
+        with open(summary_path) as fh:
+            for line in fh:
+                m = _OPT_DETAIL_RE.search(line)
+                if m:
+                    return {
+                        "tau": float(m.group(1)),
+                        "r": float(m.group(2)),
+                        "n_eff": float(m.group(3)),
+                        "d_med": float(m.group(4)),
+                        "source": m.group(5),
+                    }
     except OSError:
-        pass
+        return None
+    return None
 
 
-def _resolve_opt_threshold_from_sibling_cosmic(current_cwd):
-    """Look for a sibling cosmic*/resolved_threshold.txt and return
-    (float_value, source_tag). Prefers the bare 'cosmic' directory (canonical
-    sim1 output); falls back to the lowest-numbered cosmic_N directory.
-    Returns None if no sibling is usable."""
+def _resolve_opt_params_from_sibling_cosmic(current_cwd):
+    """Look for the canonical post-opt cosmic dir as a sibling of *current_cwd*
+    and parse its clustering_summary.txt for the resolved threshold parameters.
+    Prefers the bare 'cosmic' directory (sim1 output); falls back to the
+    lowest-numbered cosmic_N. Returns the parsed dict or None."""
     try:
         parent = os.path.dirname(os.path.abspath(current_cwd))
         entries = sorted(
@@ -4425,30 +4465,67 @@ def _resolve_opt_threshold_from_sibling_cosmic(current_cwd):
         cand_dir = os.path.join(parent, name)
         if os.path.abspath(cand_dir) == self_abs:
             continue
-        rt_path = os.path.join(cand_dir, "resolved_threshold.txt")
-        if not os.path.isfile(rt_path):
-            continue
-        try:
-            with open(rt_path) as f:
-                lines = [l.strip() for l in f if l.strip()]
-            if lines:
-                return float(lines[0]), (lines[1] if len(lines) > 1 else "unknown")
-        except (OSError, ValueError):
-            continue
+        params = _parse_opt_params_from_summary(
+            os.path.join(cand_dir, "clustering_summary.txt"))
+        if params is not None:
+            params["source_dir"] = cand_dir
+            return params
     return None
 
 
-def resolve_clustering_threshold(linkage_matrix, user_threshold, verbose=False):
+def resolve_clustering_threshold(linkage_matrix, user_threshold,
+                                 scaled_matrix=None, verbose=False):
     """
     Decide the actual cut height for fcluster().
 
-    user_threshold is the string "auto" (default) or a float. Resolution
-    order: explicit user value -> auto-knee -> legacy τ=2.0.
+    *user_threshold* may be:
+      - "auto" (default): elbow-of-merge-heights detection.
+      - a float: used directly.
+      - ("opt-pearson", params): rebuild τ from the Pearson similarity floor
+        recorded by a prior cosmic stage. params dict needs "r" (and "tau"
+        as fallback when N_f cannot be computed). Uses the new dataset's
+        N_f via *scaled_matrix*.
+      - ("opt-spread", params): rescale τ by the ratio of median pairwise
+        distances. params dict needs "tau" and "d_med"; uses *scaled_matrix*
+        to derive d_med_ref.
+
     Returns (t_cut, k_resulting, source) where source is one of
-    "user", "knee", "legacy". Mojena is computed separately for the
-    diagnostic plot only and never drives the cut.
+    "user", "knee", "legacy", "opt-pearson", "opt-spread".
+    Mojena is computed separately for the diagnostic plot only.
     """
     from scipy.cluster.hierarchy import fcluster
+
+    if isinstance(user_threshold, tuple) and len(user_threshold) == 2:
+        mode, params = user_threshold
+        tau_opt = float(params.get("tau", 0.0))
+        if mode == "opt-pearson":
+            r_opt = float(params["r"])
+            n_eff_ref = (_effective_n_features(scaled_matrix)
+                         if scaled_matrix is not None else None)
+            if n_eff_ref is None or n_eff_ref <= 0:
+                t = tau_opt
+            else:
+                t = float(np.sqrt(max(0.0, 2.0 * n_eff_ref * (1.0 - r_opt))))
+            k = len(set(fcluster(linkage_matrix, t=t, criterion='distance')))
+            if verbose:
+                print(f"  --th=opt-pearson: r_opt={r_opt:.4f}, "
+                      f"N_f_ref={n_eff_ref:.2f} → τ_ref={t:.4f}, n_c={k}")
+            return t, k, "opt-pearson"
+        if mode == "opt-spread":
+            d_med_opt = float(params.get("d_med", 0.0))
+            d_med_ref = (_median_pairwise_distance(scaled_matrix)
+                         if scaled_matrix is not None else 0.0)
+            if d_med_opt > 0.0 and d_med_ref > 0.0:
+                t = tau_opt * (d_med_ref / d_med_opt)
+            else:
+                t = tau_opt
+            k = len(set(fcluster(linkage_matrix, t=t, criterion='distance')))
+            if verbose:
+                print(f"  --th=opt-spread: τ_opt={tau_opt:.4f}, "
+                      f"d_med_opt={d_med_opt:.4f}, d_med_ref={d_med_ref:.4f} "
+                      f"→ τ_ref={t:.4f}, n_c={k}")
+            return t, k, "opt-spread"
+
     if user_threshold != "auto":
         t = float(user_threshold)
         k = len(set(fcluster(linkage_matrix, t=t, criterion='distance')))
@@ -5242,6 +5319,18 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
         summary_file_content_lines.append(f"COSMIC threshold (distance)   : N/A")
     elif threshold == "auto":
         summary_file_content_lines.append(f"COSMIC threshold (distance)   : auto (per-case knee detection)")
+    elif isinstance(threshold, tuple) and len(threshold) == 2:
+        _mode, _params = threshold
+        if _mode == "opt-pearson":
+            summary_file_content_lines.append(
+                f"COSMIC threshold (distance)   : {_mode} "
+                f"(τ rebuilt from r_opt={_params.get('r', float('nan')):.4f})")
+        elif _mode == "opt-spread":
+            summary_file_content_lines.append(
+                f"COSMIC threshold (distance)   : {_mode} "
+                f"(τ_opt={_params.get('tau', float('nan')):.4f} rescaled by d_med ratio)")
+        else:
+            summary_file_content_lines.append(f"COSMIC threshold (distance)   : {_mode}")
     else:
         summary_file_content_lines.append(f"COSMIC threshold (distance)   : {threshold}")
     summary_file_content_lines.append("<THRESHOLD_PEARSON_PLACEHOLDER>")
@@ -5388,7 +5477,8 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
 
             linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
             effective_t, _k_eff, t_source = resolve_clustering_threshold(
-                linkage_matrix, threshold, verbose=VERBOSE)
+                linkage_matrix, threshold,
+                scaled_matrix=features_scaled, verbose=VERBOSE)
             initial_cluster_labels = fcluster(linkage_matrix, t=effective_t, criterion='distance')
             vprint(f"Clustering threshold: τ={effective_t:.4f} ({t_source}), "
                    f"n_c={len(set(initial_cluster_labels))}")
@@ -5597,9 +5687,10 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
 
             linkage_matrix = linkage(features_scaled, method='average', metric='euclidean')
 
-            # --- Resolve threshold (auto-knee / legacy / user) and cluster ---
+            # --- Resolve threshold (auto-knee / legacy / user / opt-*) and cluster ---
             effective_t, _k_eff, t_source = resolve_clustering_threshold(
-                linkage_matrix, threshold, verbose=VERBOSE)
+                linkage_matrix, threshold,
+                scaled_matrix=features_scaled, verbose=VERBOSE)
             initial_cluster_labels = fcluster(linkage_matrix, t=effective_t, criterion='distance')
             _main_optimal_k = len(set(initial_cluster_labels))
             _main_cut_height = effective_t
@@ -5932,8 +6023,9 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
                 f"  reading: every cluster member is expected to be at least "
                 f"{_e['pct_thresh']:.1f} % similar to its\n"
                 f"  representative -- the quantitative error margin of the clustering.\n"
-                f"  details: r >= {_e['r_thresh']:.3f}, "
-                f"N_f = {_e['n_eff']:.2f}, source = {_e['source']}"
+                f"  details: tau = {_e['tau']:.4f}, r >= {_e['r_thresh']:.3f}, "
+                f"N_f = {_e['n_eff']:.2f}, d_med = {_e['d_med']:.4f}, "
+                f"source = {_e['source']}"
             )
         else:
             _pearson_threshold_text = "COSMIC Trust Score (similarity floor): N/A"
@@ -5947,8 +6039,9 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             if _e['r_thresh'] is not None and _e['pct_thresh'] is not None:
                 _lines.append(
                     f"  {_label:<6} : {_e['pct_thresh']:.1f} %   "
-                    f"(r >= {_e['r_thresh']:.3f}, "
-                    f"N_f = {_e['n_eff']:.2f}, source = {_e['source']})"
+                    f"(tau = {_e['tau']:.4f}, r >= {_e['r_thresh']:.3f}, "
+                    f"N_f = {_e['n_eff']:.2f}, d_med = {_e['d_med']:.4f}, "
+                    f"source = {_e['source']})"
                 )
             else:
                 _lines.append(f"  {_label:<6} : N/A")
@@ -6306,14 +6399,19 @@ MORE INFORMATION:
 """)
     # Clustering threshold: default 'auto' detects the elbow of the merge-height
     # curve per case; pass a float to override (e.g. 2.0 for legacy 2-sigma rule).
-    parser.add_argument("--threshold", "--th", type=str, default="auto", metavar="FLOAT|auto|opt",
+    parser.add_argument("--threshold", "--th", type=str, default="auto",
+                        metavar="FLOAT|auto|opt|opt-pearson|opt-spread",
                         help="UPGMA distance threshold for dendrogram cut. Default 'auto' "
                              "detects the elbow of the merge-height curve per case "
                              "(recommended for atomic clusters and van der Waals systems). "
                              "Pass a float to override: 2.0 for the legacy 2-sigma rule, "
                              "0.5 for tight, 3.0-4.0 for loose clustering. "
-                             "'opt' reuses the threshold resolved by the earliest sibling "
-                             "cosmic run (post-opt sim1) — useful for post-refinement cosmic.")
+                             "'opt' reuses the raw τ resolved by the sibling post-opt cosmic "
+                             "(read from its clustering_summary.txt). "
+                             "'opt-pearson' rebuilds τ from the post-opt Pearson similarity "
+                             "floor using this run's N_f (recommended for post-refinement). "
+                             "'opt-spread' rescales τ by the ratio of median pairwise "
+                             "distances between the post-opt and current scaled matrices.")
 
     # Geometric validation
     parser.add_argument("--rmsd", type=float, nargs='?', const=1.0, default=None, metavar="FLOAT",
@@ -6382,32 +6480,43 @@ MORE INFORMATION:
     if args.data:
         sys.exit(run_data_extraction(args.data, out_dir=args.output_dir))
 
-    # Validate --threshold: accept the sentinels "auto" / "opt" or a float string.
+    # Validate --threshold: accept "auto", "opt", "opt-pearson", "opt-spread",
+    # or a float string.
+    _OPT_MODES = {"opt", "opt-pearson", "opt-spread"}
     if isinstance(args.threshold, str) and args.threshold.lower() == "auto":
         args.threshold = "auto"
-    elif isinstance(args.threshold, str) and args.threshold.lower() == "opt":
-        args.threshold = "opt"
+    elif isinstance(args.threshold, str) and args.threshold.lower() in _OPT_MODES:
+        args.threshold = args.threshold.lower()
     else:
         try:
             args.threshold = float(args.threshold)
         except (TypeError, ValueError):
-            parser.error("--threshold must be 'auto', 'opt', or a number")
+            parser.error("--threshold must be 'auto', 'opt', 'opt-pearson', "
+                         "'opt-spread', or a number")
 
     clustering_threshold = args.threshold
 
-    # Resolve the "opt" sentinel by reading a sibling cosmic's resolved_threshold.txt.
-    # This lets a post-refinement cosmic reuse whatever τ the post-opt cosmic chose,
-    # instead of re-deriving the knee on the refined (tighter) structures.
-    if clustering_threshold == "opt":
-        resolved = _resolve_opt_threshold_from_sibling_cosmic(os.getcwd())
-        if resolved is not None:
-            _opt_value, _opt_source = resolved
-            print(f"--th=opt resolved to τ={_opt_value:.4f} (from sibling cosmic, source={_opt_source})")
-            clustering_threshold = _opt_value
-        else:
-            print("WARNING: --th=opt requested but no sibling cosmic*/resolved_threshold.txt "
-                  "found; falling back to --th=auto.")
+    # Resolve any opt-* mode by parsing the sibling post-opt cosmic's
+    # clustering_summary.txt for (τ_opt, r_opt, N_f_opt, d_med_opt). The
+    # transform itself happens later in resolve_clustering_threshold once
+    # the new scaled matrix is available.
+    if isinstance(clustering_threshold, str) and clustering_threshold in _OPT_MODES:
+        _opt_params = _resolve_opt_params_from_sibling_cosmic(os.getcwd())
+        if _opt_params is None:
+            print(f"WARNING: --th={clustering_threshold} requested but no sibling "
+                  f"cosmic*/clustering_summary.txt with parseable trust-score details "
+                  f"was found; falling back to --th=auto.")
             clustering_threshold = "auto"
+        else:
+            _src_dir = os.path.basename(_opt_params.get("source_dir", "?"))
+            print(f"--th={clustering_threshold} reading from sibling '{_src_dir}': "
+                  f"τ_opt={_opt_params['tau']:.4f}, r_opt={_opt_params['r']:.4f}, "
+                  f"N_f_opt={_opt_params['n_eff']:.2f}, "
+                  f"d_med_opt={_opt_params['d_med']:.4f}, source={_opt_params['source']}")
+            if clustering_threshold == "opt":
+                clustering_threshold = float(_opt_params["tau"])
+            else:
+                clustering_threshold = (clustering_threshold, _opt_params)
     rmsd_validation_threshold = args.rmsd
     output_directory = args.output_dir
     force_reprocess_cache = args.reprocess_files
