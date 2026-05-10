@@ -13070,18 +13070,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         cosmic_args = cosmic_stage.get('args', [])
                         for arg in cosmic_args:
                             if arg.startswith('--th=') or arg.startswith('--threshold='):
-                                threshold_val = float(arg.split('=')[1])
-                                cosmic_result['threshold'] = threshold_val
+                                raw_val = arg.split('=', 1)[1]
+                                try:
+                                    cosmic_result['threshold'] = float(raw_val)
+                                except ValueError:
+                                    cosmic_result['threshold'] = raw_val
                             elif arg.startswith('--rmsd='):
                                 rmsd_val = float(arg.split('=')[1])
                                 cosmic_result['rmsd_threshold'] = rmsd_val
-                        
+
                         # Add cosmic folder and motifs info if available
                         if hasattr(context, 'cosmic_folder'):
                             cosmic_result['cosmic_folder'] = context.cosmic_folder
                         if hasattr(context, 'cosmic_motifs_created'):
                             cosmic_result['motifs_created'] = context.cosmic_motifs_created
-                        
+
                         # Add initial validation values (from first attempt)
                         if initial_critical is not None:
                             cosmic_result['initial_critical'] = initial_critical
@@ -13299,8 +13302,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     cosmic_args = stage.get('args', [])
                     for arg in cosmic_args:
                         if arg.startswith('--th=') or arg.startswith('--threshold='):
-                            threshold_val = float(arg.split('=')[1])
-                            cosmic_result['threshold'] = threshold_val
+                            raw_val = arg.split('=', 1)[1]
+                            try:
+                                cosmic_result['threshold'] = float(raw_val)
+                            except ValueError:
+                                cosmic_result['threshold'] = raw_val
                             break
 
                     # Flag opt-only mode so protocol summary suppresses critical/skipped display
@@ -13575,8 +13581,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         cosmic_args = cosmic_stage.get('args', [])
                         for arg in cosmic_args:
                             if arg.startswith('--th=') or arg.startswith('--threshold='):
-                                threshold_val = float(arg.split('=')[1])
-                                cosmic_result['threshold'] = threshold_val
+                                raw_val = arg.split('=', 1)[1]
+                                try:
+                                    cosmic_result['threshold'] = float(raw_val)
+                                except ValueError:
+                                    cosmic_result['threshold'] = raw_val
                             elif arg.startswith('--rmsd='):
                                 rmsd_val = float(arg.split('=')[1])
                                 cosmic_result['rmsd_threshold'] = rmsd_val
@@ -13963,7 +13972,11 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                         cosmic_args = cosmic_stage.get('args', [])
                         for arg in cosmic_args:
                             if arg.startswith('--th=') or arg.startswith('--threshold='):
-                                cosmic_result['threshold'] = float(arg.split('=')[1])
+                                raw_val = arg.split('=', 1)[1]
+                                try:
+                                    cosmic_result['threshold'] = float(raw_val)
+                                except ValueError:
+                                    cosmic_result['threshold'] = raw_val
                             elif arg.startswith('--rmsd='):
                                 cosmic_result['rmsd_threshold'] = float(arg.split('=')[1])
 
