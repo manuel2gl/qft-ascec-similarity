@@ -4191,6 +4191,53 @@ def cleanup_qm_files(files_to_clean: List[str], state: SystemState):
     if cleaned_count > 0:
         _print_verbose(f"Cleaned up {cleaned_count} leftover QM files during final cleanup.", 1, state)
 
+
+def cleanup_run_dir_keeplist(run_dir: str, state: SystemState) -> None:
+    """Remove all files in run_dir that are not in the annealing keep list.
+
+    Instead of tracking which scratch files to trash (error-prone), we define
+    what must survive and remove everything else.  Directories are never touched.
+
+    Keep patterns (fnmatch-style):
+        anneal.*         – preserved last QM input/output (anneal.out, anneal.xyz, …)
+        result_*         – result_NNNN.xyz / .mol
+        resultbox_*      – resultbox_NNNN.xyz / .mol
+        rless_*          – rless_NNNN.out
+        tvse_*.dat       – temperature-vs-energy data
+        tvse_*.png       – temperature-vs-energy plot
+        *.asc            – ASCEC input file
+        *.out            – main ASCEC output (same stem as input)
+    """
+    import fnmatch as _fnmatch
+
+    keep_patterns = [
+        "anneal.*",
+        "result_*",
+        "resultbox_*",
+        "rless_*",
+        "tvse_*.dat",
+        "tvse_*.png",
+        "*.asc",
+        "*.out",
+    ]
+
+    removed = 0
+    for entry in os.listdir(run_dir):
+        entry_path = os.path.join(run_dir, entry)
+        if not os.path.isfile(entry_path):
+            continue
+        if any(_fnmatch.fnmatch(entry, pat) for pat in keep_patterns):
+            continue
+        try:
+            os.remove(entry_path)
+            removed += 1
+            _print_verbose(f"  Removed scratch file: {entry}", 2, state)
+        except OSError as e:
+            _print_verbose(f"  Warning: could not remove {entry}: {e}", 0, state)
+    if removed:
+        _print_verbose(f"  Cleaned {removed} scratch file(s) from {os.path.basename(run_dir)}", 1, state)
+
+
 # Add this function somewhere in your script, e.g., near helper functions.
 def calculate_molecular_volume(mol_def, method='coordinate_based') -> float:
     """
@@ -8946,6 +8993,9 @@ def summarize_calculations(directory=".", file_types=None, actual_wall_time=None
                     # Skip rescue files - they are intermediate files from redo workflow
                     if '_rescue' in filename:
                         continue
+                    # Skip aggregate combined files (combined_results.out, combined_r*.out)
+                    if filename.startswith('combined_results') or filename.startswith('combined_r'):
+                        continue
                     filepath = os.path.join(root, filename)
                     # For .out files, disambiguate ORCA vs xTB by content
                     if file_extension == '.out':
@@ -11728,10 +11778,24 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 if os.path.exists(dest_path):
                     shutil.rmtree(dest_path)
                 shutil.copytree(src_path, dest_path)
-                # Remove temp files
-                for pat in ["*.tmp", "*.densitiesinfo", "*.xtbw"]:
-                    for tmp_file in glob.glob(os.path.join(dest_path, pat)):
-                        os.remove(tmp_file)
+                # Strip only non-output files: temp/intermediate, redo artifacts,
+                # and runtime scratch.  All genuine calculation outputs are kept.
+                strip_patterns = [
+                    # Temp / intermediate
+                    "*.tmp", "*.densitiesinfo", "*.xtbw",
+                    # Redo artifacts — not real calculation outputs
+                    "*.out.backup", "*_rescue.*",
+                    # ORCA runtime scratch (not scientific outputs)
+                    "*.bas[0-9]", "*.hostnames",
+                    # xTB runtime scratch (not scientific outputs)
+                    "*.xtbrestart", "*.xtbtopo.mol",
+                ]
+                for pat in strip_patterns:
+                    for f in glob.glob(os.path.join(dest_path, pat)):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
             return len(rep_folders)
 
         if final_cosmic_dir:
@@ -11847,6 +11911,36 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
         # the final-motif mapping used to extract representative folders from
         # the optimization/refinement stages, but their contents are not
         # modified here.
+
+        # --- Reduce annealing replica directories ---
+        # After optimization, all accepted configurations are captured in
+        # geometry_optimization/combined_r*.xyz.  The per-replica result_*
+        # and resultbox_* files are therefore redundant in miniprint mode.
+        # Keep: input (.asc), main log (.out), tvse data/plot, last QM
+        #        snapshot (anneal.*), and rless summary.
+        import fnmatch as _fnmatch
+        annealing_dir = os.path.join(input_root, "annealing")
+        if os.path.isdir(annealing_dir):
+            _ann_keep = ["*.asc", "*.out", "tvse_*.dat", "tvse_*.png",
+                         "anneal.*", "rless_*"]
+            _ann_removed = 0
+            for replica in sorted(os.listdir(annealing_dir)):
+                replica_path = os.path.join(annealing_dir, replica)
+                if not os.path.isdir(replica_path):
+                    continue
+                for entry in os.listdir(replica_path):
+                    entry_path = os.path.join(replica_path, entry)
+                    if not os.path.isfile(entry_path):
+                        continue
+                    if any(_fnmatch.fnmatch(entry, p) for p in _ann_keep):
+                        continue
+                    try:
+                        os.remove(entry_path)
+                        _ann_removed += 1
+                    except OSError:
+                        pass
+            if verbose and _ann_removed > 0:
+                print(f"  Cleaned annealing/: removed {_ann_removed} redundant file(s)")
 
         # --- Report final disk usage ---
         try:
@@ -15804,6 +15898,21 @@ def _run_single_qm_job(job_info: Dict[str, Any]) -> Dict[str, Any]:
                     shutil.rmtree(tmp_dir)
                 except:
                     pass
+            # Remove ORCA per-job .tmp files left in the job directory after success or failure
+            for tmp_f in glob.glob(os.path.join(calc_working_dir, f'{script_basename}.*.tmp')):
+                try:
+                    os.remove(tmp_f)
+                except:
+                    pass
+            # Remove stray ORCA .tmp.N files that land in the parent directory
+            parent_dir = os.path.dirname(calc_working_dir)
+            if parent_dir and parent_dir != calc_working_dir:
+                for tmp_f in glob.glob(os.path.join(parent_dir, f'{script_basename}*.tmp*')):
+                    if os.path.isfile(tmp_f):
+                        try:
+                            os.remove(tmp_f)
+                        except:
+                            pass
 
         # STEP 3: CHECK SUCCESS
         if os.path.exists(output_path):
@@ -17743,10 +17852,10 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
             """Check if file is a valid input file (not an ORCA intermediate or rescue file)"""
             if not filename.endswith(('.inp', '.com', '.gjf', '.xyz')):
                 return False
-            # Exclude ORCA intermediate files and rescue inputs (already processed)
-            excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.', '_rescue.']
+            # Exclude ORCA intermediate files, rescue inputs, and aggregate combined files
+            excluded_patterns = ['.scfgrad.', '.scfp.', '.tmp.', '.densities.', '.scfhess.', '_rescue.', 'combined_']
             return not any(pattern in filename for pattern in excluded_patterns)
-        
+
         input_files = sorted([f for f in os.listdir(opt_dir) if is_valid_input_file(f)], key=natural_sort_key)
         
         # If no files at root and sort command was used, check subdirectories
@@ -20893,7 +21002,12 @@ MORE INFORMATION:
                     _print_verbose(f"\nSkipping diagram generation (matplotlib not available)", 1, state)
 
         # Final cleanup of any lingering QM files (should be minimal with per-call cleanup)
-        cleanup_qm_files(qm_files_to_clean, state) 
+        cleanup_qm_files(qm_files_to_clean, state)
+
+        # Keep-list cleanup: remove any scratch files not in the expected output set.
+        # Only runs for annealing mode (random_generate_config == 1).
+        if state.random_generate_config == 1:
+            cleanup_run_dir_keeplist(run_dir, state)
 
 
 def analyze_box_length_from_xyz(xyz_file: str, num_molecules: int = 1) -> None:
