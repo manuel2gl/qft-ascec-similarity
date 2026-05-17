@@ -4565,9 +4565,9 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
     n_eff : float or None
         Effective number of features N_f (sum of squared feature weights
         after z-standardisation). If provided (and > 0), the diagnostic
-        plot gets a second legend titled "COSMIC Trust Score" that
-        translates the applied threshold t and a reference threshold
-        into Pearson similarity. Suppressed if unavailable.
+        plot gets a second legend with the Pearson similarity at the
+        applied threshold and at the standard / Mojena reference
+        thresholds. Suppressed if unavailable.
     """
     import matplotlib
     matplotlib.use('Agg')
@@ -4604,7 +4604,10 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
 
     diag_filename = os.path.join(os.path.dirname(filename), "threshold_diagnostic.png")
 
-    fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6))
+    # Match dpi to savefig dpi so on-canvas window_extent measurements
+    # reflect the size of the rendered image (otherwise the legend
+    # height-matching iteration converges to the wrong target).
+    fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
 
     merge_indices = np.arange(1, n_merges + 1)
     ax2.fill_between(merge_indices, 0, heights_sorted, alpha=0.15, color='#3498db')
@@ -4615,6 +4618,12 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
     n_above_cut = int(np.sum(heights_sorted > cut_height))
     ax2.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=2,
                 label=rf'Applied cut $\tau$={cut_height:.2f} ($n_c$={n_above_cut + 1})')
+
+    # Standard τ=2.0 reference — listed in the legend for comparison, not drawn.
+    STANDARD_T = 2.0
+    n_standard = int(np.sum(heights_sorted > STANDARD_T)) + 1
+    ax2.plot([], [], ' ',
+             label=rf'Standard $\tau$=2.00 ($n_c$={n_standard})')
 
     # Mojena reference — listed in the legend for comparison, not drawn on the axes.
     if mojena_threshold is not None:
@@ -4635,11 +4644,10 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
-    # COSMIC Trust Score (Pearson similarity for the applied threshold and a
+    # Pearson similarity (Pearson similarity for the applied threshold and a
     # reference threshold). Suppressed if n_c is unavailable or non-positive.
     trust_segments = []
     if n_eff is not None and n_eff > 0:
-        STANDARD_T = 2.0
         applied_is_standard = abs(cut_height - STANDARD_T) <= 1e-6
 
         def _fmt_trust_segment(label, t_val):
@@ -4649,9 +4657,9 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
             return f"{label} τ={t_val:.2f} → {pct:.1f}%"
 
         # Always show applied; show standard only when it differs; always show Mojena if available.
-        trust_segments.append(_fmt_trust_segment("applied", cut_height))
+        trust_segments.append(_fmt_trust_segment("Applied", cut_height))
         if not applied_is_standard:
-            trust_segments.append(_fmt_trust_segment("standard", STANDARD_T))
+            trust_segments.append(_fmt_trust_segment("Standard", STANDARD_T))
         if mojena_threshold is not None:
             trust_segments.append(_fmt_trust_segment("Mojena", float(mojena_threshold)))
 
@@ -4660,10 +4668,10 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
     fig2.tight_layout()
 
     if trust_segments:
-        # Render a real Legend for the trust score so the title is auto-
-        # centered. Read the main legend's actual upper-right corner in
-        # axes coords after the layout has settled, then anchor the trust
-        # legend's upper-left exactly there + a tiny horizontal gap.
+        # Anchor the second legend just to the right of the main legend.
+        # Read the main legend's actual upper-right corner in axes coords
+        # after the layout has settled, then anchor the second legend's
+        # upper-left exactly there + a tiny horizontal gap.
         fig2.canvas.draw()
         ax2.add_artist(leg_main)
         leg_bbox_axes = leg_main.get_window_extent().transformed(
@@ -4676,7 +4684,7 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
             bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
             bbox_transform=ax2.transAxes,
             fontsize=9,
-            title='COSMIC Trust Score',
+            title='Similarity floor',
             title_fontsize=9,
             handlelength=0, handletextpad=0,
             borderaxespad=0,
@@ -4686,16 +4694,30 @@ def plot_annotated_dendrogram(linkage_matrix, optimal_k, cut_height,
         trust_leg = ax2.legend(handles=_trust_handles, labels=trust_segments,
                                **_trust_kwargs)
 
-        # Adjust borderpad so both boxes reach exactly the same pixel height.
+        # Iterate the trust legend's borderpad until both boxes reach the
+        # same pixel height. Each pass measures the current rendered heights
+        # and recreates the trust legend with an adjusted borderpad. We need
+        # several passes because matplotlib's rendered line spacing isn't
+        # exactly fontsize_px, so the linear correction underestimates.
+        fontsize_px = 9 * fig2.dpi / 72
         fig2.canvas.draw()
-        delta_px = (leg_main.get_window_extent().height
-                    - trust_leg.get_window_extent().height)
-        if abs(delta_px) > 1:
-            fontsize_px = 9 * fig2.dpi / 72
+        trust_bp = 0.4
+        for _ in range(12):
+            h_main = leg_main.get_window_extent().height
+            h_trust = trust_leg.get_window_extent().height
+            delta_px = h_main - h_trust
+            if abs(delta_px) <= 0.5:
+                break
+            new_bp = max(0.1, trust_bp + delta_px / (2 * fontsize_px))
+            if abs(new_bp - trust_bp) < 0.002:
+                break
             trust_leg.remove()
-            _trust_kwargs['borderpad'] = max(0.1, 0.4 + delta_px / (2 * fontsize_px))
-            ax2.legend(handles=[Patch(visible=False) for _ in trust_segments],
-                       labels=trust_segments, **_trust_kwargs)
+            _trust_kwargs['borderpad'] = new_bp
+            trust_leg = ax2.legend(
+                handles=[Patch(visible=False) for _ in trust_segments],
+                labels=trust_segments, **_trust_kwargs)
+            trust_bp = new_bp
+            fig2.canvas.draw()
 
     fig2.savefig(diag_filename, dpi=150)
     plt.close(fig2)
