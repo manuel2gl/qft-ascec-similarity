@@ -11905,42 +11905,14 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                 label = "geometry_refinement" if is_ref else "geometry_optimization"
                 print(f"  Cleaned {calc_dir}/ ({label}): kept {len(kept_root_files)} items")
 
-        # --- Cosmic directories are preserved as-is by miniprint ---
-        # Per project policy, --miniprint MUST NOT touch cosmic folders or
-        # remove anything from them. They are still scanned above to derive
-        # the final-motif mapping used to extract representative folders from
-        # the optimization/refinement stages, but their contents are not
-        # modified here.
-
-        # --- Reduce annealing replica directories ---
-        # After optimization, all accepted configurations are captured in
-        # geometry_optimization/combined_r*.xyz.  The per-replica result_*
-        # and resultbox_* files are therefore redundant in miniprint mode.
-        # Keep: input (.asc), main log (.out), tvse data/plot, last QM
-        #        snapshot (anneal.*), and rless summary.
-        import fnmatch as _fnmatch
-        annealing_dir = os.path.join(input_root, "annealing")
-        if os.path.isdir(annealing_dir):
-            _ann_keep = ["*.asc", "*.out", "tvse_*.dat", "tvse_*.png",
-                         "anneal.*", "rless_*"]
-            _ann_removed = 0
-            for replica in sorted(os.listdir(annealing_dir)):
-                replica_path = os.path.join(annealing_dir, replica)
-                if not os.path.isdir(replica_path):
-                    continue
-                for entry in os.listdir(replica_path):
-                    entry_path = os.path.join(replica_path, entry)
-                    if not os.path.isfile(entry_path):
-                        continue
-                    if any(_fnmatch.fnmatch(entry, p) for p in _ann_keep):
-                        continue
-                    try:
-                        os.remove(entry_path)
-                        _ann_removed += 1
-                    except OSError:
-                        pass
-            if verbose and _ann_removed > 0:
-                print(f"  Cleaned annealing/: removed {_ann_removed} redundant file(s)")
+        # --- Annealing and cosmic directories are preserved as-is by miniprint ---
+        # Per project policy, --miniprint MUST NOT touch annealing/ or cosmic/
+        # folders.  Annealing produces the result_*/resultbox_*/anneal.*/tvse_*
+        # scientific outputs that must remain intact; per-run scratch is already
+        # removed during the run by cleanup_run_dir_keeplist().  Cosmic folders
+        # are scanned above only to derive the final-motif mapping used when
+        # extracting representative folders from optimization/refinement, but
+        # their contents are never modified here.
 
         # --- Report final disk usage ---
         try:
