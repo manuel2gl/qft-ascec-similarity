@@ -7,7 +7,7 @@ set -e  # Stop immediately if any command fails
 # Two ways to install:
 #
 #   (a) From GitHub (default):
-#       wget https://raw.githubusercontent.com/manuel2gl/ascec04/main/install.sh
+#       wget https://raw.githubusercontent.com/manuel2gl/qft-cosmic-ascec/main/install.sh
 #       bash install.sh
 #
 #   (b) From a local checkout (handy while developing):
@@ -71,7 +71,7 @@ elif [ -d "$TARGET_DIR/.git" ]; then
     cd "$TARGET_DIR" && git pull
 else
     echo "> Cloning repository..."
-    git clone https://github.com/manuel2gl/ascec04.git "$TARGET_DIR"
+    git clone https://github.com/manuel2gl/qft-cosmic-ascec.git "$TARGET_DIR"
 fi
 
 #-----------------------------------------
