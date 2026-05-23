@@ -1,0 +1,123 @@
+"""Trajectory writers — the accepted-configuration geometry outputs.
+
+:class:`TrajectoryWriter` is an :class:`~cosmic_ascec.annealing.AnnealingCallback`
+that reproduces three v04 geometry files:
+
+* ``result_<seed>.xyz``    — one XYZ frame per accepted configuration
+  (v04 ``write_accepted_xyz`` / ``write_single_xyz_configuration``,
+  ascec-v04.py lines 3517-3566).
+* ``resultbox_<seed>.xyz`` — the same frames plus eight ``X`` markers at the
+  cube corners, so a viewer can show the simulation box.
+* ``rless_<seed>.out``     — the single lowest-energy configuration, grouped
+  by molecule (v04 ``write_lowest_energy_config_file``, lines 4742-4770),
+  written once at the end of the run.
+
+The ``<seed>`` suffix matches v04's filename convention (accepted decision for
+Session 5): the run's RNG seed doubles as the output identifier.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from cosmic_ascec.annealing.engine import (
+    AnnealingCallback,
+    ConfigAccepted,
+    RunFinish,
+    RunStart,
+)
+from cosmic_ascec.elements import Z_TO_SYMBOL
+from cosmic_ascec.geometry.molecule import Cluster
+
+# Symbol used for the eight cube-corner markers in resultbox_<seed>.xyz
+# (v04 ``include_dummy_atoms`` path).
+_BOX_MARKER_SYMBOL = "X"
+
+
+def _atom_line(symbol: str, x: float, y: float, z: float) -> str:
+    """One XYZ coordinate row in v04's ``result.xyz`` spacing."""
+    return f"{symbol:<3}{x: 13.6f}{y: 13.6f}{z: 13.6f}"
+
+
+def _box_corner_coords(box_length: float) -> list[tuple[float, float, float]]:
+    """Eight cube corners at +/-box_length/2, x fastest then y then z (v04 order)."""
+    h = box_length / 2.0
+    return [
+        (sx * h, sy * h, sz * h)
+        for sz in (-1.0, 1.0)
+        for sy in (-1.0, 1.0)
+        for sx in (-1.0, 1.0)
+    ]
+
+
+class TrajectoryWriter(AnnealingCallback):
+    """Append accepted XYZ frames and write the final lowest-energy structure."""
+
+    def __init__(self, run_dir: Path, seed: int) -> None:
+        run_dir = Path(run_dir)
+        self.result_path = run_dir / f"result_{seed}.xyz"
+        self.resultbox_path = run_dir / f"resultbox_{seed}.xyz"
+        self.rless_path = run_dir / f"rless_{seed}.out"
+
+    # ------------------------------------------------------------------ #
+    # Hooks                                                              #
+    # ------------------------------------------------------------------ #
+
+    def on_run_start(self, event: RunStart) -> None:  # noqa: ARG002
+        """Truncate the trajectory files so a re-run never appends to stale data."""
+        self.result_path.write_text("")
+        self.resultbox_path.write_text("")
+
+    def on_config_accepted(self, event: ConfigAccepted) -> None:
+        """Append one frame to ``result`` and one (box-marked) to ``resultbox``."""
+        cluster = event.cluster
+        header = (
+            f"Configuration: {event.index} | E = {event.energy:.8f} a.u. "
+            f"| T = {event.temperature:.1f} K"
+        )
+        atom_lines = [
+            _atom_line(Z_TO_SYMBOL.get(z, "X"), x, y, zc)
+            for z, (x, y, zc) in zip(cluster.atomic_numbers, cluster.coords)
+        ]
+        with self.result_path.open("a") as fh:
+            fh.write(f"{cluster.num_atoms}\n{header}\n")
+            fh.write("\n".join(atom_lines) + "\n")
+
+        box_header = (
+            f"Configuration: {event.index} | E = {event.energy:.8f} a.u. "
+            f"| BoxL={cluster.box_length:.1f} A (X box markers)"
+        )
+        corner_lines = [
+            _atom_line(_BOX_MARKER_SYMBOL, x, y, z)
+            for x, y, z in _box_corner_coords(cluster.box_length)
+        ]
+        with self.resultbox_path.open("a") as fh:
+            fh.write(f"{cluster.num_atoms + len(corner_lines)}\n{box_header}\n")
+            fh.write("\n".join(atom_lines + corner_lines) + "\n")
+
+    def on_run_finish(self, event: RunFinish) -> None:
+        """Write the lowest-energy configuration, grouped by molecule."""
+        result = event.result
+        self._write_rless(result.lowest_cluster, result.lowest_energy,
+                          result.lowest_config_index)
+
+    # ------------------------------------------------------------------ #
+    # Helpers                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _write_rless(self, cluster: Cluster, energy: float, config_index: int) -> None:
+        lines = [f"# Configuration: {config_index} | Energy = {energy:.8f} u.a."]
+        for mol_idx, molecule in enumerate(cluster.molecules):
+            start = int(cluster.molecule_offsets[mol_idx])
+            end = int(cluster.molecule_offsets[mol_idx + 1])
+            lines.append(str(molecule.num_atoms))
+            lines.append(molecule.label)
+            for z, (x, y, zc) in zip(
+                cluster.atomic_numbers[start:end], cluster.coords[start:end]
+            ):
+                symbol = Z_TO_SYMBOL.get(z, "X")
+                lines.append(f"{symbol:<3} {x: 12.6f} {y: 12.6f} {zc: 12.6f}")
+        self.rless_path.write_text("\n".join(lines) + "\n")
+
+
+__all__ = ["TrajectoryWriter"]
