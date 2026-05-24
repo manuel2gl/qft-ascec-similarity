@@ -5915,9 +5915,18 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     pass
 
             # Relaunch same command fully detached from terminal/session.
+            # NB: ``__file__`` here is ``cosmic_ascec/workflow/stages.py`` —
+            # a library module, not a runnable entry point. Use ``sys.argv[0]``
+            # (the actual ``ascec``/``ascec-v04.py`` script the user invoked);
+            # fall back to ``python -m cosmic_ascec.command_line.ascec`` when
+            # argv[0] is missing (e.g. ``-c`` or stripped by a wrapper).
             _child_pid = 0
             try:
-                _cmd = [sys.executable, os.path.abspath(__file__)] + sys.argv[1:]
+                _entry = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+                if _entry and os.path.isfile(_entry):
+                    _cmd = [sys.executable, _entry] + sys.argv[1:]
+                else:
+                    _cmd = [sys.executable, "-m", "cosmic_ascec.command_line.ascec"] + sys.argv[1:]
                 _env = os.environ.copy()
                 _env["ASCEC_DETACHED_CHILD"] = "1"
                 if _job_id:
