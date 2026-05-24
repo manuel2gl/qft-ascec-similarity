@@ -193,6 +193,20 @@ def _preamble(config: AscConfig, seed: int) -> list[str]:
         f"Maximum rotation angle = {config.moves.max_rotation_radian:.2f} radians"
     )
 
+    # Conformational-sampling block — what v04 only prints to stderr
+    # (ascec-v04.py lines 20507-20513); we also persist it to the .out so
+    # the user can confirm dihedral moves were configured after the run.
+    conf_prob = config.moves.conformational_probability
+    if conf_prob > 0.0:
+        import math
+        max_dihedral_deg = math.degrees(config.moves.max_dihedral_radian)
+        lines.append(
+            f"Conformational sampling: {conf_prob * 100:.1f}% probability, "
+            f"max dihedral rotation = ±{max_dihedral_deg:.1f}°"
+        )
+    else:
+        lines.append("Conformational sampling: disabled (rigid-body moves only)")
+
     # --- QM block (v04 lines 1081-1085) ------------------------------------ #
     lines.append("")
     program = _PROGRAM_NAME.get(config.qm.program, "Unknown")

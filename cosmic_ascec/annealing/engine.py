@@ -53,14 +53,91 @@ from cosmic_ascec.monte_carlo import (
     EnergyFn,
     MoveParams,
     initialize_rotatable_bond_cache,
+    rotate_around_bond,
     trial,
 )
+from cosmic_ascec.geometry.overlap import check_intramolecular_overlap
 
 logger = logging.getLogger(__name__)
 
 # v04 shrinks the per-temperature QM budget by 10% after each temperature
 # (ascec-v04.py line 20804) and never lets it fall below ``max_cycle_floor``.
 MAXSTEP_REDUCTION_FACTOR: float = 0.90
+
+# Per-bond attempts to draw a clash-free random initial dihedral before
+# leaving that bond at its template angle. 20 attempts is far more than
+# enough — even a tight molecule like an ortho-substituted ring usually has
+# a clash-free angle in <5 draws.
+_INITIAL_DIHEDRAL_MAX_ATTEMPTS = 20
+
+
+def _randomize_initial_dihedrals(
+    cluster: Cluster,
+    *,
+    cache,
+    rng: np.random.RandomState,
+    logger=None,
+) -> Cluster:
+    """Apply one uniform full-circle dihedral rotation to every rotatable bond.
+
+    v04 starts every replica from the .asc template conformation, so a
+    bounded ±max_dihedral random walk frequently can't cross a high
+    cis→trans barrier inside one annealing trajectory. We randomize each
+    rotatable bond at startup (after placement, before the initial QM
+    call) so each replica explores a different basin from the first step.
+
+    Each bond is rotated by a uniform draw in [-π, +π]. If the resulting
+    intramolecular geometry clashes, we redraw up to
+    :data:`_INITIAL_DIHEDRAL_MAX_ATTEMPTS` times; on persistent clash that
+    bond is left untouched (we never return a geometry that fails the same
+    overlap gate the MC move enforces).
+    """
+    coords = np.array(cluster.coords, dtype=np.float64, copy=True)
+    offsets = cluster.molecule_offsets
+
+    for molecule_idx in range(cluster.num_molecules):
+        if molecule_idx >= len(cache.rotatable_bonds_by_molecule):
+            continue
+        bonds = cache.rotatable_bonds_by_molecule[molecule_idx]
+        if not bonds:
+            continue
+
+        start = int(offsets[molecule_idx])
+        end = int(offsets[molecule_idx + 1])
+        mol_atomic_numbers = [
+            int(cluster.atomic_numbers[i]) for i in range(start, end)
+        ]
+
+        for bond_atom1, bond_atom2, moving_atoms in bonds:
+            for _ in range(_INITIAL_DIHEDRAL_MAX_ATTEMPTS):
+                angle = (rng.rand() - 0.5) * 2.0 * np.pi
+                candidate = rotate_around_bond(
+                    coords[start:end, :],
+                    bond_atom1,
+                    bond_atom2,
+                    moving_atoms,
+                    angle,
+                )
+                if not check_intramolecular_overlap(candidate, mol_atomic_numbers):
+                    coords[start:end, :] = candidate
+                    break
+            else:
+                if logger is not None:
+                    logger.warning(
+                        "initial dihedral randomization: bond %d-%d in molecule "
+                        "%d could not find a clash-free angle in %d attempts; "
+                        "keeping the template angle",
+                        bond_atom1, bond_atom2, molecule_idx,
+                        _INITIAL_DIHEDRAL_MAX_ATTEMPTS,
+                    )
+
+    return Cluster(
+        coords=coords,
+        atomic_numbers=cluster.atomic_numbers,
+        molecule_offsets=np.array(cluster.molecule_offsets, copy=True),
+        molecules=cluster.molecules,
+        box_length=cluster.box_length,
+    )
 
 # v04's default floor when the ``.asc`` omits the line-6 floor value.
 DEFAULT_CYCLE_FLOOR: int = 10
@@ -265,20 +342,53 @@ def anneal(
 
     # ----- Initial placement + QM, with v04's retry loop -------------------- #
     # v04 redraws a fresh placement on every failed initial QM call and counts
-    # each attempt as a QM call (ascec-v04.py lines 20462-20557).
+    # each attempt as a QM call (ascec-v04.py lines 20462-20557). In addition
+    # to v04's rigid-body placement, when the system has rotatable bonds we
+    # also randomize each bond's dihedral (uniform 0..2π) on every attempt,
+    # so each replica starts from an independent conformational basin
+    # rather than the .asc template angle. The bounded ±max_dihedral move
+    # alone cannot reliably cross high barriers (e.g. cis→trans formic),
+    # so this is what makes single-replica runs actually explore both wells.
+    #
+    # We compute the rotatable-bond template once from the bare placement
+    # of the first attempt; atom indices are stable across replacements,
+    # so the same cache is reused for the live MC loop after the run starts.
+    placement_seed = initialize_cluster(
+        molecules,
+        box_length=config.box.cube_length_angstrom,
+        rng=rng,
+        settings=placement_settings,
+        logger=run_logger,
+    )
+    cache, effective_prob = initialize_rotatable_bond_cache(
+        placement_seed.cluster,
+        conformational_move_prob=move_params.conformational_move_prob,
+        max_dihedral_angle_rad=move_params.max_dihedral_angle_rad,
+        logger=run_logger,
+    )
+    if effective_prob != move_params.conformational_move_prob:
+        move_params = replace(move_params, conformational_move_prob=effective_prob)
+
     initial_cluster: Optional[Cluster] = None
     initial_energy = 0.0
     qm_call_count = 0
     last_initial_exc: Optional[QMError] = None
+    pending_placement: Optional[Cluster] = placement_seed.cluster
     for attempt in range(INITIAL_QM_RETRIES):
-        placement = initialize_cluster(
-            molecules,
-            box_length=config.box.cube_length_angstrom,
-            rng=rng,
-            settings=placement_settings,
-            logger=run_logger,
-        )
-        candidate = placement.cluster
+        if pending_placement is None:
+            pending_placement = initialize_cluster(
+                molecules,
+                box_length=config.box.cube_length_angstrom,
+                rng=rng,
+                settings=placement_settings,
+                logger=run_logger,
+            ).cluster
+        candidate = pending_placement
+        pending_placement = None
+        if cache.total_rotatable_bonds > 0:
+            candidate = _randomize_initial_dihedrals(
+                candidate, cache=cache, rng=rng, logger=run_logger
+            )
         qm_call_count += 1
         try:
             initial_energy = float(energy_fn(candidate))
@@ -298,17 +408,6 @@ def anneal(
             f"initial QM evaluation failed after {INITIAL_QM_RETRIES} attempts; "
             f"cannot start annealing: {last_initial_exc}"
         )
-
-    # v04 line 20502 — cache rotatable bonds; conformational sampling is
-    # auto-disabled here when the system has none (or the dihedral cap is 0).
-    cache, effective_prob = initialize_rotatable_bond_cache(
-        initial_cluster,
-        conformational_move_prob=move_params.conformational_move_prob,
-        max_dihedral_angle_rad=move_params.max_dihedral_angle_rad,
-        logger=run_logger,
-    )
-    if effective_prob != move_params.conformational_move_prob:
-        move_params = replace(move_params, conformational_move_prob=effective_prob)
 
     # v04 lines 20506-20513 — surface conformational-sampling status to the
     # terminal so the user can confirm the feature is active. v04 prints this
