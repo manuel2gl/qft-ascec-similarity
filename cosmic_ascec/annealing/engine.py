@@ -36,6 +36,7 @@ threaded into the engine. A given seed reproduces a given trajectory.
 from __future__ import annotations
 
 import logging
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from typing import Optional, Sequence
@@ -308,6 +309,32 @@ def anneal(
     )
     if effective_prob != move_params.conformational_move_prob:
         move_params = replace(move_params, conformational_move_prob=effective_prob)
+
+    # v04 lines 20506-20513 — surface conformational-sampling status to the
+    # terminal so the user can confirm the feature is active. v04 prints this
+    # via _print_verbose level 0 (always to stderr); we mirror that here.
+    if effective_prob > 0.0:
+        max_deg = float(np.degrees(move_params.max_dihedral_angle_rad))
+        print(
+            f"Conformational sampling enabled: {effective_prob * 100:.1f}% probability",
+            file=sys.stderr,
+        )
+        print(f"  Maximum dihedral rotation: ±{max_deg:.1f}°", file=sys.stderr)
+        print(
+            f"  Move types: {effective_prob * 100:.1f}% conformational (dihedral rotations), "
+            f"{(1 - effective_prob) * 100:.1f}% rigid-body (translation+rotation)",
+            file=sys.stderr,
+        )
+        print(
+            "  Note: Conformational moves with atom overlaps automatically "
+            "fall back to rigid-body moves",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Using rigid-body moves only (translation + rotation)",
+            file=sys.stderr,
+        )
 
     last_history_qm_call = qm_call_count
 
