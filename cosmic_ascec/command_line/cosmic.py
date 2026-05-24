@@ -204,7 +204,7 @@ CITATION:
   Manuel, G.; Sara, G.; Albeiro, R. Universidad de Antioquia (2026)
 
 MORE INFORMATION:
-  Repository:     https://github.com/manuel2gl/ascec04
+    Repository:     https://github.com/manuel2gl/qft-cosmic-ascec
   Documentation:  See user manual for theoretical background
   Support:        Química Física Teórica - Universidad de Antioquia
 """)

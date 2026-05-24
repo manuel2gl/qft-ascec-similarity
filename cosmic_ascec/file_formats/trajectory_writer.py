@@ -96,10 +96,41 @@ class TrajectoryWriter(AnnealingCallback):
             fh.write("\n".join(atom_lines + corner_lines) + "\n")
 
     def on_run_finish(self, event: RunFinish) -> None:
-        """Write the lowest-energy configuration, grouped by molecule."""
+        """Write the lowest-energy configuration, generate .mol siblings, clean xtb scratch."""
         result = event.result
         self._write_rless(result.lowest_cluster, result.lowest_energy,
                           result.lowest_config_index)
+        self._convert_xyz_results_to_mol()
+        self._clean_xtb_scratch()
+
+    def _convert_xyz_results_to_mol(self) -> None:
+        """Generate result_<seed>.mol and resultbox_<seed>.mol via obabel, matching mono."""
+        import shutil as _shutil
+        import subprocess as _subprocess
+        if not _shutil.which("obabel"):
+            return
+        for xyz_path in (self.result_path, self.resultbox_path):
+            if not xyz_path.exists() or xyz_path.stat().st_size == 0:
+                continue
+            mol_path = xyz_path.with_suffix(".mol")
+            try:
+                _subprocess.run(
+                    ["obabel", "-ixyz", str(xyz_path), "-omol", "-O", str(mol_path)],
+                    capture_output=True, check=False, timeout=60,
+                )
+            except (OSError, _subprocess.SubprocessError):
+                pass
+
+    def _clean_xtb_scratch(self) -> None:
+        """Remove xtb scratch artifacts (charges/wbo/xtbtopo.mol/xtbrestart) — mono parity."""
+        run_dir = self.result_path.parent
+        for name in ("charges", "wbo", "xtbtopo.mol", "xtbrestart"):
+            scratch = run_dir / name
+            try:
+                if scratch.exists():
+                    scratch.unlink()
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------ #
     # Helpers                                                            #

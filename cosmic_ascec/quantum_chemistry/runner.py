@@ -47,6 +47,17 @@ from cosmic_ascec.quantum_chemistry.base import (
     parse_energy_from_text,
 )
 
+# Cap BLAS/OpenMP thread fan-out for QM subprocesses. xtb's `--parallel 1` only
+# controls xtb's own thread pool; the underlying BLAS still uses all cores
+# unless these env vars are set. Mono sets them at runtime in
+# optimize_qm_execution_environment (ascec-v04.py:3383-3384); the modular
+# refactor missed that, so each xtb opt was spawning ~8 BLAS threads and the
+# whole opt stage ran 100× slower than expected. setdefault preserves any
+# explicit override the user may have set in their shell.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 
 # --------------------------------------------------------------------------- #
 # Subprocess hygiene                                                          #

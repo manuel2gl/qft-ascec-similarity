@@ -2262,7 +2262,12 @@ def parse_xtb_options_from_template(template_content: str) -> str:
     The parser is intentionally permissive and only extracts the minimum
     flags needed for geometry optimization workflows.
     """
-    content_upper = template_content.upper() if template_content else ""
+    # Strip #rescue(...) directives before keyword scanning — those describe
+    # rescue-mode parameters (e.g. "#rescue(GFN2-xTB/freq)") and must not
+    # leak into normal-opt flag detection (would otherwise force --hess /
+    # wrong --gfn level on every standard optimization).
+    template_for_keywords = re.sub(r'#\s*rescue\s*\([^)]*\)', '', template_content or '', flags=re.IGNORECASE)
+    content_upper = template_for_keywords.upper()
 
     flags: List[str] = []
 
@@ -2279,7 +2284,7 @@ def parse_xtb_options_from_template(template_content: str) -> str:
     else:
         flags.extend(['--gfn', '2'])
 
-    opt_level_match = re.search(r'\bOPT\b(?:\s+(NORMAL|TIGHT|VTIGHT|VERY\s+TIGHT))?', template_content or '', re.IGNORECASE)
+    opt_level_match = re.search(r'\bOPT\b(?:\s+(NORMAL|TIGHT|VTIGHT|VERY\s+TIGHT))?', template_for_keywords, re.IGNORECASE)
     if opt_level_match:
         opt_level = opt_level_match.group(1)
         if opt_level:
@@ -2732,7 +2737,11 @@ def calculate_input_files(template_file: str, launcher_template: Optional[str] =
         try:
             with open(launcher_path, 'w') as f:
                 f.write('#!/bin/bash\n')
-                f.write('set -e\n\n')
+                f.write('set -e\n')
+                # Cap BLAS threads so --parallel 1 actually means one thread per xtb.
+                f.write('export OMP_NUM_THREADS=1\n')
+                f.write('export MKL_NUM_THREADS=1\n')
+                f.write('export OPENBLAS_NUM_THREADS=1\n\n')
                 for i, input_file in enumerate(launcher_input_files):
                     output_file = input_file.replace(input_ext, output_ext)
                     xtb_namespace = os.path.splitext(input_file)[0]
