@@ -322,7 +322,9 @@ def propose_unified_move(
                 bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[
                     rng.randint(len(rotatable_bonds))
                 ]
-                # v04 lines 3835-3836 — signed dihedral angle.
+                # v04 lines 3835-3836 — signed dihedral angle uniform on
+                # [-max, +max]. Symmetric proposal: required for detailed
+                # balance under plain Metropolis (no Hastings correction).
                 max_rotation = params.max_dihedral_angle_rad
                 rotation_angle = (rng.rand() - 0.5) * 2.0 * max_rotation
 
