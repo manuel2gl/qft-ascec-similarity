@@ -3333,7 +3333,7 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                         </div>
                         <div class="form-group">
                             <label>Maximum Dihedral (deg)</label>
-                            <input type="number" id="max-dihedral" value="60" min="0" max="180" oninput="updatePreview()">
+                            <input type="number" id="max-dihedral" value="120" min="0" max="180" oninput="updatePreview()">
                         </div>
                     </div>
                     <div class="form-row-4">
@@ -10685,7 +10685,7 @@ H   1.981282  0.134064  0.000000`;
             const maxDisp = document.getElementById('max-disp')?.value || '1.0';
             const maxRot = document.getElementById('max-rot')?.value || '1.0';
             const confSampling = document.getElementById('conf-sampling')?.value || '0';
-            const maxDihedral = document.getElementById('max-dihedral')?.value || '60';
+            const maxDihedral = document.getElementById('max-dihedral')?.value || '120';
 
             // Map QM Program value to alias and format
             const qmProgramVal = document.getElementById('qm-program')?.value || '2';
