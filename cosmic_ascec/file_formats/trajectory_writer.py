@@ -34,6 +34,24 @@ from cosmic_ascec.geometry.molecule import Cluster
 _BOX_MARKER_SYMBOL = "X"
 
 
+def _restore_dummy_atom_symbol(mol_path: Path) -> None:
+    # obabel writes the non-standard 'X' element as '*' in the MOL atom block;
+    # restore it so viewers don't choke on the placeholder.
+    try:
+        text = mol_path.read_text()
+    except OSError:
+        return
+    fixed_lines = []
+    for line in text.splitlines(keepends=True):
+        if len(line) >= 34 and line[31] == "*" and line[32] == " ":
+            line = line[:31] + _BOX_MARKER_SYMBOL + line[32:]
+        fixed_lines.append(line)
+    try:
+        mol_path.write_text("".join(fixed_lines))
+    except OSError:
+        pass
+
+
 def _atom_line(symbol: str, x: float, y: float, z: float) -> str:
     """One XYZ coordinate row in v04's ``result.xyz`` spacing."""
     return f"{symbol:<3}{x: 13.6f}{y: 13.6f}{z: 13.6f}"
@@ -119,7 +137,9 @@ class TrajectoryWriter(AnnealingCallback):
                     capture_output=True, check=False, timeout=60,
                 )
             except (OSError, _subprocess.SubprocessError):
-                pass
+                continue
+            if mol_path.exists():
+                _restore_dummy_atom_symbol(mol_path)
 
     def _clean_xtb_scratch(self) -> None:
         """Remove xtb scratch artifacts (charges/wbo/xtbtopo.mol/xtbrestart) — mono parity."""
