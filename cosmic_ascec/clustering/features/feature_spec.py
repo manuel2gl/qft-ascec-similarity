@@ -159,12 +159,20 @@ def labelled_column(name: str) -> str:
 
 SEMIEMPIRICAL_WEIGHTS: Mapping[str, float] = MappingProxyType(
     {
+        # Reliability-based partial weights. The axis is *measurement noise of the
+        # feature*, not dataset-specific correlations: a feature is only down-
+        # weighted if its computation is method-dependent, indexing-sensitive,
+        # or cutoff-driven. Correlations observed in any specific dataset
+        # (e.g. VNN ↔ rotC ≈ 0.94 in W5) are properties of that chemistry, not
+        # of the features themselves — VNN is Coulombic Σ Z_i Z_j / r_ij while
+        # rotational constants are eigenvalues of the mass-weighted inertia
+        # tensor; they share only the geometry, not the mathematical object.
         "electronic_energy": 1.0,        # Direct SCF output, most reliable
         "gibbs_free_energy": 0.9,        # Thermal corrections add noise
         "homo_energy": 0.85,             # Semi-empirical methods show variance
-        "homo_lumo_gap": 0.9,            # Correlated with homo noise
+        "homo_lumo_gap": 0.9,            # Orbital-spread observable
         "dipole_moment": 0.6,            # Sensitive to atom indexing and coord frame
-        "vnn_nuclear_repulsion": 1.0,    # Pure geometry+Z, index-independent
+        "vnn_nuclear_repulsion": 1.0,    # Pure geometry+Z, deterministic, no method dependence
         "first_vib_freq": 0.9,           # Generally stable
         "last_vib_freq": 0.85,           # High-freq modes vary with method/basis
         "num_hydrogen_bonds": 0.7,       # Depends on H-bond detection cutoffs
