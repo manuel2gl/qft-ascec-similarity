@@ -349,20 +349,21 @@ MORE INFORMATION:
     # Set default absolute tolerances if not provided via command line
     if not abs_tolerances_dict:
         abs_tolerances_dict = {
-            "electronic_energy": 5e-6,  # Tighter, was 1e-6
-            "gibbs_free_energy": 5e-6,  # Tighter, was 1e-6
-            "homo_energy": 3e-4,        # Increased from 1e-4
-            "lumo_energy": 2e-4,        # Keep as is
-            "homo_lumo_gap": 3e-4,      # Increased from 1e-4
-            "dipole_moment": 1.5e-3,    # Keep as is
-            "radius_of_gyration": 1.5e-4, # Keep as is
-            "rotational_constants_A": 7e-5, # Keep as is
-            "rotational_constants_B": 3.5e-4, # Keep as is
-            "rotational_constants_C": 3e-4, # Keep as is
-            "first_vib_freq": 1e-2,     # Keep as is
-            "last_vib_freq": 0.3,      # Keep as is
-            "average_hbond_distance": 1e-3, # Keep as is
-            "average_hbond_angle": 0.1    # Increased from 1e-2 to avoid boundary cases
+            "electronic_energy": 5e-6,
+            "gibbs_free_energy": 5e-6,
+            "homo_energy": 3e-4,
+            "homo_lumo_gap": 3e-4,
+            "dipole_moment": 1.5e-3,
+            "vnn_nuclear_repulsion": 1e-4,   # V_NN is in Hartree, geometry-driven
+            "rotational_constants_A": 7e-5,
+            "rotational_constants_B": 3.5e-4,
+            "rotational_constants_C": 3e-4,
+            "first_vib_freq": 1e-2,
+            "last_vib_freq": 0.3,
+            "num_hydrogen_bonds": 0.5,        # integer-valued in practice
+            "average_hbond_distance": 1e-3,
+            "std_hbond_distance": 1e-3,
+            "average_hbond_angle": 0.1
         }
 
     current_dir = os.getcwd()

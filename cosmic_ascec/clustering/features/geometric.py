@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import numpy as np
 
+# Bohr↔Angstrom conversion. Mirrors the constant in parsers.py.
+BOHR_TO_ANGSTROM = 0.529177210903
+
 # Element masses dictionary (in atomic mass units) — cosmic-v01.py lines 236-255.
 element_masses = {
     "H": 1.008, "He": 4.0026, "Li": 6.94, "Be": 9.012, "B": 10.81,
@@ -197,6 +200,33 @@ def calculate_radius_of_gyration(atomnos, atomcoords):
         return np.sqrt(rg_squared)
     except Exception as e:
         print(f"Error in calculate_radius_of_gyration: {e}")
+        return None
+
+
+def calculate_nuclear_repulsion(atomnos, atomcoords):
+    """Calculate V_NN = Σ_{i<j} Z_i Z_j / r_ij in Hartree.
+
+    Args:
+        atomnos (array): Atomic numbers (Z) for each atom.
+        atomcoords (array): Atomic coordinates (N, 3) in Angstroms.
+
+    Returns:
+        float: Nuclear repulsion energy in Hartree, or None on error.
+    """
+    try:
+        Z = np.asarray(atomnos, dtype=float)
+        coords = np.asarray(atomcoords, dtype=float)
+        if coords.ndim != 2 or coords.shape[1] != 3 or coords.shape[0] != Z.shape[0]:
+            return None
+        if Z.size < 2:
+            return 0.0
+        coords_bohr = coords / BOHR_TO_ANGSTROM
+        diff = coords_bohr[:, None, :] - coords_bohr[None, :, :]
+        r = np.linalg.norm(diff, axis=-1)
+        iu = np.triu_indices(Z.size, k=1)
+        return float(np.sum(Z[iu[0]] * Z[iu[1]] / r[iu]))
+    except Exception as e:
+        print(f"Error in calculate_nuclear_repulsion: {e}")
         return None
 
 
@@ -430,6 +460,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
 
 __all__ = [
     "atomic_number_to_symbol",
+    "calculate_nuclear_repulsion",
     "calculate_radius_of_gyration",
     "calculate_rotational_constants",
     "detect_hydrogen_bonds",

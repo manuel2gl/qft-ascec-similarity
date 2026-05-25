@@ -336,9 +336,10 @@ def create_unique_motifs_folder(
 
             _freq_dep = {'gibbs_free_energy', 'first_vib_freq', 'last_vib_freq'}
             _all_num_features = [
-                'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
-                'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
-                'first_vib_freq', 'last_vib_freq', 'average_hbond_distance',
+                'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'homo_lumo_gap',
+                'dipole_moment', 'vnn_nuclear_repulsion',
+                'first_vib_freq', 'last_vib_freq',
+                'num_hydrogen_bonds', 'average_hbond_distance', 'std_hbond_distance',
                 'average_hbond_angle'
             ]
             all_potential_numerical_features = _all_num_features if dataset_has_freq else [f for f in _all_num_features if f not in _freq_dep]

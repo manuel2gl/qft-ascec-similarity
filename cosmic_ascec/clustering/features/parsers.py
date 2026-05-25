@@ -37,6 +37,7 @@ import numpy as np
 from cosmic_ascec.clustering import console
 from cosmic_ascec.clustering.console import vprint
 from cosmic_ascec.clustering.features.geometric import (
+    calculate_nuclear_repulsion,
     calculate_radius_of_gyration,
     calculate_rotational_constants,
     detect_hydrogen_bonds,
@@ -84,6 +85,7 @@ def extract_properties_with_xtb(logfile_path):
         'dipole_moment': None,
         'rotational_constants': None,
         'radius_of_gyration': None,
+        'vnn_nuclear_repulsion': None,
         'num_imaginary_freqs': None,
         'first_vib_freq': None,
         'last_vib_freq': None,
@@ -350,6 +352,14 @@ def extract_properties_with_xtb(logfile_path):
             except Exception:
                 pass
 
+            # xTB does not print V_NN directly; compute it from geometry+Z.
+            try:
+                extracted_props['vnn_nuclear_repulsion'] = calculate_nuclear_repulsion(
+                    extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords']
+                )
+            except Exception:
+                pass
+
             try:
                 hbond_results = detect_hydrogen_bonds(
                     extracted_props['final_geometry_atomnos'], extracted_props['final_geometry_coords']
@@ -424,6 +434,7 @@ def extract_properties_with_cclib(logfile_path):
         'dipole_moment': None,
         'rotational_constants': None,
         'radius_of_gyration': None,
+        'vnn_nuclear_repulsion': None,
         'num_imaginary_freqs': None,  # Changed default to None
         'first_vib_freq': None,
         'last_vib_freq': None,
@@ -684,6 +695,26 @@ def extract_properties_with_cclib(logfile_path):
                     extracted_props['radius_of_gyration'] = radius_gyr
                 except Exception:
                     pass
+
+                # V_NN nuclear repulsion: try cclib attribute first, fall back to geometric.
+                vnn = None
+                for attr in ("nuclear_repulsion", "nuclear_repulsion_energy"):
+                    val = getattr(data, attr, None)
+                    if val is not None:
+                        try:
+                            vnn = float(val)
+                            break
+                        except (TypeError, ValueError):
+                            pass
+                if vnn is None:
+                    try:
+                        vnn = calculate_nuclear_repulsion(
+                            extracted_props['final_geometry_atomnos'],
+                            extracted_props['final_geometry_coords'],
+                        )
+                    except Exception:
+                        vnn = None
+                extracted_props['vnn_nuclear_repulsion'] = vnn
             # Silently skip if empty atomnos or coords (expected for incomplete calculations)
 
         # Extract vibrational frequencies
@@ -768,6 +799,7 @@ def extract_properties_with_opi(logfile_path):
         'dipole_moment': None,
         'rotational_constants': None,
         'radius_of_gyration': None,
+        'vnn_nuclear_repulsion': None,
         'num_imaginary_freqs': None,
         'first_vib_freq': None,
         'last_vib_freq': None,
@@ -1022,6 +1054,19 @@ def extract_properties_with_opi(logfile_path):
                 except Exception:
                     pass
 
+                # V_NN nuclear repulsion: ORCA prints "Nuclear Repulsion ... ENuc ..." — try
+                # the text first, fall back to geometric computation.
+                vnn = _extract_nuclear_repulsion_from_file_opi(lines)
+                if vnn is None:
+                    try:
+                        vnn = calculate_nuclear_repulsion(
+                            extracted_props['final_geometry_atomnos'],
+                            extracted_props['final_geometry_coords'],
+                        )
+                    except Exception:
+                        vnn = None
+                extracted_props['vnn_nuclear_repulsion'] = vnn
+
         # --- Detect Hydrogen Bonds ---
         if extracted_props['final_geometry_atomnos'] is not None and extracted_props['final_geometry_coords'] is not None:
             if len(extracted_props['final_geometry_atomnos']) > 0 and extracted_props['final_geometry_coords'].shape[0] > 0:
@@ -1168,6 +1213,25 @@ def _extract_rotconsts_from_file_opi(lines):
     except:
         pass
     return None
+
+
+def _extract_nuclear_repulsion_from_file_opi(lines):
+    """Extract V_NN (Hartree) from an ORCA output. Returns the last match or None.
+
+    ORCA prints lines such as ``Nuclear Repulsion      ENuc            ...   Eh``.
+    """
+    try:
+        nuc_re = re.compile(
+            r"Nuclear\s+Repulsion[^:\n]*?(-?\d+\.\d+)\s*Eh", re.IGNORECASE
+        )
+        last_match = None
+        for line in lines:
+            m = nuc_re.search(line)
+            if m:
+                last_match = float(m.group(1))
+        return last_match
+    except Exception:
+        return None
 
 
 def extract_homo_lumo_from_orca_text(lines):

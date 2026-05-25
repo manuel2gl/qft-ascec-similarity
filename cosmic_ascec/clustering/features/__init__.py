@@ -43,6 +43,7 @@ from cosmic_ascec.clustering.features.feature_spec import (
 )
 from cosmic_ascec.clustering.features.geometric import (
     atomic_number_to_symbol,
+    calculate_nuclear_repulsion,
     calculate_radius_of_gyration,
     calculate_rotational_constants,
     detect_hydrogen_bonds,
@@ -63,6 +64,7 @@ __all__ = [
     "ROTATIONAL_CONSTANT_SUBFEATURES",
     "SEMIEMPIRICAL_WEIGHTS",
     "atomic_number_to_symbol",
+    "calculate_nuclear_repulsion",
     "calculate_radius_of_gyration",
     "calculate_rotational_constants",
     "choose_parser",

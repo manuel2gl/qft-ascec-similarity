@@ -188,30 +188,31 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     # - electronic_energy: Final electronic energy (Hartree)
     # - gibbs_free_energy: Gibbs free energy (Hartree)
     # - homo_energy: HOMO energy (Hartree)
-    # - lumo_energy: LUMO energy (Hartree)
     # - homo_lumo_gap: HOMO-LUMO gap (Hartree)
     # - dipole_moment: Dipole moment (Debye)
-    # - radius_of_gyration: Radius of gyration (Å)
+    # - vnn_nuclear_repulsion: Nuclear-nuclear repulsion energy V_NN (Hartree)
     # - rotational_constants_A/B/C: Rotational constants (cm^-1)
     # - first_vib_freq: First vibrational frequency (cm⁻¹)
     # - last_vib_freq: Last vibrational frequency (cm⁻¹)
+    # - num_hydrogen_bonds: Number of hydrogen bonds
     # - average_hbond_distance: Average hydrogen bond distance (Å)
+    # - std_hbond_distance: Std-dev of hydrogen bond distances (Å)
     # - average_hbond_angle: Average hydrogen bond angle (degrees)
-    # - num_hydrogen_bonds: Number of hydrogen bonds (not used for clustering but mapped)
     default_weights = {
         'electronic_energy': 1.0,          # Final electronic energy
         'gibbs_free_energy': 1.0,          # Gibbs free energy
         'homo_energy': 1.0,                # HOMO energy
-        'lumo_energy': 1.0,                # LUMO energy
         'homo_lumo_gap': 1.0,              # HOMO-LUMO gap
         'dipole_moment': 1.0,              # Dipole moment
-        'radius_of_gyration': 1.0,         # Radius of gyration
+        'vnn_nuclear_repulsion': 1.0,      # V_NN nuclear repulsion
         'rotational_constants_A': 1.0,     # Rotational constant A
         'rotational_constants_B': 1.0,     # Rotational constant B
         'rotational_constants_C': 1.0,     # Rotational constant C
         'first_vib_freq': 1.0,             # First vibrational frequency
         'last_vib_freq': 1.0,              # Last vibrational frequency
+        'num_hydrogen_bonds': 1.0,         # Number of hydrogen bonds
         'average_hbond_distance': 1.0,     # Average hydrogen bond distance
+        'std_hbond_distance': 1.0,         # Std-dev of hydrogen bond distances
         'average_hbond_angle': 1.0,        # Average hydrogen bond angle
     }
 
@@ -699,12 +700,13 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     all_skipped_need_recalc = []
     all_non_converged_critical = []
 
-    # --- Dynamic feature vector: all 14 features are always candidates ---
+    # --- Dynamic feature vector: all 15 features are always candidates ---
     # Per-structure availability determines the actual vector used.
     _all_scalar_features = [
-        'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'lumo_energy',
-        'radius_of_gyration', 'dipole_moment', 'homo_lumo_gap',
-        'first_vib_freq', 'last_vib_freq', 'average_hbond_distance', 'average_hbond_angle'
+        'electronic_energy', 'gibbs_free_energy', 'homo_energy', 'homo_lumo_gap',
+        'dipole_moment', 'vnn_nuclear_repulsion',
+        'first_vib_freq', 'last_vib_freq',
+        'num_hydrogen_bonds', 'average_hbond_distance', 'std_hbond_distance', 'average_hbond_angle'
     ]
     _scalar_features = list(_all_scalar_features)
 

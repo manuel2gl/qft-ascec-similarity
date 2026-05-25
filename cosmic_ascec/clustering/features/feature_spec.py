@@ -7,21 +7,20 @@ folders are only reproducible if every run builds the matrix with the same
 columns in the same order. This module is the single source of truth for that
 contract.
 
-Everything here is ported verbatim (values, names, ordering) from
-``cosmic-v01.py``:
+**v04 column-set revision (deliberate deviation from cosmic-v01.py).**
+The set below is a non-redundant rework, not the verbatim cosmic-v01 list:
 
-* :data:`FEATURE_MAPPING` — cosmic-v01.py lines 3614-3630.
-* :data:`CLUSTERING_NUMERICAL_FEATURES` — cosmic-v01.py lines 3672-3684.
-* :data:`ROTATIONAL_CONSTANT_SUBFEATURES` — cosmic-v01.py lines 3686-3691.
-* :data:`SEMIEMPIRICAL_WEIGHTS` / :data:`DEFAULT_WEIGHTS` — lines 3697-3712.
-* :data:`FEATURE_UNITS` — cosmic-v01.py ``_EXTRACT_FEATURE_UNITS`` lines 3717-3733.
-* :func:`parse_weights_argument` — cosmic-v01.py lines 3632-3648.
+* Dropped ``lumo_energy`` — recoverable as ``homo_energy + homo_lumo_gap``;
+  also the noisiest orbital energy in semi-empirical methods.
+* Dropped ``radius_of_gyration`` — its information is folded into the
+  nuclear-repulsion / rotational-constant block.
+* Added ``vnn_nuclear_repulsion`` — Coulomb shape descriptor V_NN.
+* Added ``num_hydrogen_bonds`` and ``std_hbond_distance`` — counts and spread
+  of the H-bond network, already parsed by cosmic-v01 but never exposed as
+  clustering columns.
 
-:data:`FEATURE_COLUMNS` is the new name for cosmic-v01's local
-``feature_columns = CLUSTERING_NUMERICAL_FEATURES + ROTATIONAL_CONSTANT_SUBFEATURES``
-(``run_data_extraction``, cosmic-v01.py line 3780). It is the pinned column
-order of the DataFrame :mod:`cosmic_ascec.clustering.features.extractor`
-produces (**D-027**).
+The mechanics (:func:`parse_weights_argument`, :func:`labelled_column`, the
+``(key=value)`` weights syntax) still trace back to cosmic-v01.py 3632-3648.
 """
 
 from __future__ import annotations
@@ -50,20 +49,19 @@ FEATURE_MAPPING: Mapping[str, str] = MappingProxyType(
         "electronic_energy": "final_electronic_energy",
         "gibbs_free_energy": "gibbs_free_energy",
         "homo_energy": "homo_energy",
-        "lumo_energy": "lumo_energy",
         "homo_lumo_gap": "homo_lumo_gap",
         "dipole_moment": "dipole_moment",
-        "radius_of_gyration": "radius_of_gyration",
+        "vnn_nuclear_repulsion": "vnn_nuclear_repulsion",
         # Array elements — special-cased in the extractor (see ``rotational_constants``).
         "rotational_constants_A": "rotational_constants_0",
         "rotational_constants_B": "rotational_constants_1",
         "rotational_constants_C": "rotational_constants_2",
         "first_vib_freq": "first_vib_freq",
         "last_vib_freq": "last_vib_freq",
-        "average_hbond_distance": "average_hbond_distance",
-        "average_hbond_angle": "average_hbond_angle",
-        # Mapped for completeness; not a clustering feature column.
         "num_hydrogen_bonds": "num_hydrogen_bonds",
+        "average_hbond_distance": "average_hbond_distance",
+        "std_hbond_distance": "std_hbond_distance",
+        "average_hbond_angle": "average_hbond_angle",
     }
 )
 
@@ -76,16 +74,17 @@ CLUSTERING_NUMERICAL_FEATURES: Tuple[str, ...] = (
     "electronic_energy",
     "gibbs_free_energy",
     "homo_energy",
-    "lumo_energy",
     "homo_lumo_gap",
     "dipole_moment",
-    "radius_of_gyration",
+    "vnn_nuclear_repulsion",
     "first_vib_freq",
     "last_vib_freq",
+    "num_hydrogen_bonds",
     "average_hbond_distance",
+    "std_hbond_distance",
     "average_hbond_angle",
 )
-"""The 11 scalar clustering features, in cosmic-v01's declared order."""
+"""The 12 scalar clustering features, v04 non-redundant ordering."""
 
 ROTATIONAL_CONSTANT_SUBFEATURES: Tuple[str, ...] = (
     "rotational_constants_A",
@@ -99,10 +98,10 @@ FEATURE_COLUMNS: Tuple[str, ...] = (
 )
 """Pinned feature-DataFrame column order (**D-027**).
 
-This is cosmic-v01's local ``feature_columns`` (``run_data_extraction``,
-cosmic-v01.py line 3780). The extractor builds every DataFrame with exactly
-these 14 columns in this order; the clustering stage (Session 8) and any
-parity check against a v04-cosmic reference depend on it not drifting.
+15 columns. The extractor builds every DataFrame with exactly these columns
+in this order; the clustering stage (Session 8) depends on it not drifting.
+Drops ``lumo_energy`` and ``radius_of_gyration`` from cosmic-v01; adds
+``vnn_nuclear_repulsion``, ``num_hydrogen_bonds``, ``std_hbond_distance``.
 """
 
 
@@ -123,13 +122,14 @@ FEATURE_UNITS: Mapping[str, str] = MappingProxyType(
         "electronic_energy": "Hartree",
         "gibbs_free_energy": "Hartree",
         "homo_energy": "Hartree",
-        "lumo_energy": "Hartree",
         "homo_lumo_gap": "Hartree",
         "dipole_moment": "Debye",
-        "radius_of_gyration": "A",
+        "vnn_nuclear_repulsion": "Hartree",
         "first_vib_freq": "cm^-1",
         "last_vib_freq": "cm^-1",
+        "num_hydrogen_bonds": "count",
         "average_hbond_distance": "A",
+        "std_hbond_distance": "A",
         "average_hbond_angle": "deg",
         "rotational_constants_A": "cm^-1",
         "rotational_constants_B": "cm^-1",
@@ -162,13 +162,14 @@ SEMIEMPIRICAL_WEIGHTS: Mapping[str, float] = MappingProxyType(
         "electronic_energy": 1.0,        # Direct SCF output, most reliable
         "gibbs_free_energy": 0.9,        # Thermal corrections add noise
         "homo_energy": 0.85,             # Semi-empirical methods show variance
-        "lumo_energy": 0.7,              # Noisiest orbital energy, method-dependent
-        "homo_lumo_gap": 0.9,            # Correlated with homo/lumo noise
+        "homo_lumo_gap": 0.9,            # Correlated with homo noise
         "dipole_moment": 0.6,            # Sensitive to atom indexing and coord frame
-        "radius_of_gyration": 1.0,       # Purely geometric, index-independent
+        "vnn_nuclear_repulsion": 1.0,    # Pure geometry+Z, index-independent
         "first_vib_freq": 0.9,           # Generally stable
         "last_vib_freq": 0.85,           # High-freq modes vary with method/basis
+        "num_hydrogen_bonds": 0.7,       # Depends on H-bond detection cutoffs
         "average_hbond_distance": 0.7,   # Depends on H-bond detection cutoffs
+        "std_hbond_distance": 0.7,       # Depends on H-bond detection cutoffs
         "average_hbond_angle": 0.7,      # Sensitive to H-bond detection geometry
         "rotational_constants_A": 1.0,   # Geometric, index-independent
         "rotational_constants_B": 1.0,   # Geometric, index-independent
