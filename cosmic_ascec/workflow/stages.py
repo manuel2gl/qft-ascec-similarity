@@ -4918,16 +4918,21 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
     # ─────────────────────────────────────────────────────────────────────────
 
     def format_compact_wall_time(seconds: float) -> str:
-        total_seconds = max(0, int(seconds))
+        seconds = max(0.0, float(seconds))
+        total_seconds = int(seconds)
         days = total_seconds // 86400
         hours = (total_seconds % 86400) // 3600
         minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
 
         if days > 0:
             return f"{days}d {hours}h"
         if hours > 0:
             return f"{hours}h {minutes}m"
-        return f"{minutes}m"
+        if minutes > 0:
+            return f"{minutes}m {secs}s"
+        millis = int(round((seconds - total_seconds) * 1000))
+        return f"{secs}s {millis}ms"
 
     def render_final_workflow_summary() -> None:
         nonlocal progress_lines, last_progress_render
@@ -9436,6 +9441,8 @@ def _run_qm_calculations_with_concurrency(
                                              'num_completed': num_completed},
                                       cache_file=cache_file)
                 current_total = initial_completed_count + num_completed
+                if current_total > num_inputs:
+                    current_total = num_inputs
                 progress_cb = context.update_progress
                 if workflow_concise and callable(progress_cb):
                     progress_cb(f"{current_total}/{num_inputs} ...")
@@ -9470,7 +9477,10 @@ def _run_qm_calculations_with_concurrency(
             else:
                 progress_cb = getattr(context, 'update_progress', None)
                 if callable(progress_cb):
-                    progress_cb(f"{initial_completed_count + num_completed}/{num_inputs} ...")
+                    _curr = initial_completed_count + num_completed
+                    if _curr > num_inputs:
+                        _curr = num_inputs
+                    progress_cb(f"{_curr}/{num_inputs} ...")
             result = _run_single_qm_job(job)
             _process_result(result)
     else:
@@ -11591,23 +11601,40 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             # Count total inputs (including those already completed and cached)
             # This should be the TOTAL expected calculations, not just new ones
             all_input_basenames = set()
-            
+
             # Add basenames from input files (pending calculations)
             for f in input_files:
                 if not match_exclusion(f, excluded_numbers):
                     # Handle both simple filenames and paths like "opt_conf_1/opt_conf_1.inp"
                     basename = os.path.splitext(os.path.basename(f))[0]
                     all_input_basenames.add(basename)
-            
+
             # Add basenames from already completed files (CRITICAL for correct count)
             for f in completed_calcs:
                 # completed_calcs contains basenames, not full paths
                 all_input_basenames.add(f)
-            
+
             num_inputs = len(all_input_basenames)
-            
+
+            # Lock the maximum across redo attempts so the live N/M display does
+            # not grow when redos rerun a subset of structures. Redo should drop
+            # the completed count back and rebuild up to the same maximum.
+            _opt_stage_key = getattr(context, 'current_stage_key', '')
+            if _opt_stage_key:
+                _locked_totals = getattr(context, '_opt_locked_totals', None)
+                if _locked_totals is None:
+                    _locked_totals = {}
+                    context._opt_locked_totals = _locked_totals
+                _prev_locked = _locked_totals.get(_opt_stage_key, 0)
+                if _prev_locked > num_inputs:
+                    num_inputs = _prev_locked
+                else:
+                    _locked_totals[_opt_stage_key] = num_inputs
+
             # Store initial completed count (before loop may modify completed_calcs)
             initial_completed_count = len(completed_calcs)
+            if initial_completed_count > num_inputs:
+                initial_completed_count = num_inputs
 
             progress_cb = context.update_progress
             if workflow_concise and callable(progress_cb):
@@ -11692,6 +11719,14 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                 # Print status (not "results" - that's redundant)
                 # Recalculate num_inputs from the updated set to reflect newly completed calculations
                 num_inputs = len(all_input_basenames)
+                # Keep the redo-locked maximum so subsequent redo attempts do not inflate the total.
+                if _opt_stage_key:
+                    _locked_totals = getattr(context, '_opt_locked_totals', {})
+                    _prev_locked = _locked_totals.get(_opt_stage_key, 0)
+                    if _prev_locked > num_inputs:
+                        num_inputs = _prev_locked
+                    else:
+                        _locked_totals[_opt_stage_key] = num_inputs
                 # Total completed = initial completed + newly completed in this run
                 total_completed = initial_completed_count + num_completed
                 # Ensure we don't show more completed than total inputs (can happen if files are removed)
@@ -11699,7 +11734,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
                     total_completed = num_inputs
                 if not workflow_concise:
                     print(f"\nStatus: {total_completed}/{num_inputs} calculations completed")
-                
+
                 # Store for protocol summary (use total)
                 context.optimization_completed = total_completed
                 context.optimization_total = num_inputs
@@ -13050,23 +13085,40 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
         # Count total inputs (including those already completed and cached)
         # This should be the TOTAL expected optimizations, not just new ones
         all_input_basenames = set()
-        
+
         # Add basenames from input files (pending optimizations)
         for f in input_files:
             if not match_exclusion(f, excluded_numbers):
                 # Handle both simple filenames and paths like "motif_01/motif_01_opt.inp"
                 basename = os.path.splitext(os.path.basename(f))[0]
                 all_input_basenames.add(basename)
-        
+
         # Add basenames from already completed files (CRITICAL for correct count)
         for f in completed_opts:
             # completed_opts contains basenames, not full paths
             all_input_basenames.add(f)
-        
+
         num_inputs = len(all_input_basenames)
-        
+
+        # Lock the maximum total across redo attempts so the live N/M display does
+        # not grow when redos rerun a subset. Redos drop completed back, then
+        # rebuild up to the locked maximum.
+        _ref_stage_key = getattr(context, 'current_stage_key', '')
+        if _ref_stage_key:
+            _locked_totals = getattr(context, '_opt_locked_totals', None)
+            if _locked_totals is None:
+                _locked_totals = {}
+                context._opt_locked_totals = _locked_totals
+            _prev_locked = _locked_totals.get(_ref_stage_key, 0)
+            if _prev_locked > num_inputs:
+                num_inputs = _prev_locked
+            else:
+                _locked_totals[_ref_stage_key] = num_inputs
+
         # Store initial completed count (before loop may modify completed_opts)
         initial_completed_count = len(completed_opts)
+        if initial_completed_count > num_inputs:
+            initial_completed_count = num_inputs
 
         progress_cb = context.update_progress
         if workflow_concise and callable(progress_cb):
@@ -13172,6 +13224,14 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
         # Print status
         # Recalculate num_inputs from the updated set to reflect newly completed optimizations
         num_inputs = len(all_input_basenames)
+        # Keep the redo-locked maximum so subsequent redo attempts do not inflate the total.
+        if _ref_stage_key:
+            _locked_totals = getattr(context, '_opt_locked_totals', {})
+            _prev_locked = _locked_totals.get(_ref_stage_key, 0)
+            if _prev_locked > num_inputs:
+                num_inputs = _prev_locked
+            else:
+                _locked_totals[_ref_stage_key] = num_inputs
         # Total completed = initial completed + newly completed in this run
         total_completed = initial_completed_count + num_completed
         # Ensure we don't show more completed than total inputs (can happen if files are removed)
