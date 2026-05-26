@@ -183,11 +183,17 @@ fi
 # 6. Install Dependencies
 #----------------------------------------------
 
-# Core scientific stack used by the annealing engine and the clustering pipeline.
-conda install numpy scipy matplotlib scikit-learn -y
-# cclib parses ORCA<=5 / Gaussian output; openbabel writes .mol files; xtb is
-# the default annealing backend (no ORCA or Gaussian required for a run).
-conda install -c conda-forge cclib openbabel xtb -y
+# Use libmamba solver — the classic conda solver can hang for 10+ minutes
+# when solving conda-forge packages like openbabel/xtb. libmamba is the
+# default in conda >= 23.10 but we set it explicitly for older installs.
+conda install -n base -c conda-forge conda-libmamba-solver -y 2>/dev/null || true
+conda config --set solver libmamba 2>/dev/null || true
+
+# Single combined solve (one solver pass instead of two) with conda-forge
+# as the primary channel. cclib parses ORCA<=5 / Gaussian output; openbabel
+# writes .mol files; xtb is the default annealing backend.
+conda install -c conda-forge --solver=libmamba -y \
+    numpy scipy matplotlib scikit-learn cclib openbabel xtb
 # orca-pi parses ORCA 6.1+ structured property output. Optional: only used
 # when ORCA 6.1+ is the QM backend; safe to skip on a pure-xtb workflow.
 pip install orca-pi || echo "  (orca-pi install failed; ORCA 6.1+ parsing will fall back to text scrape)"
