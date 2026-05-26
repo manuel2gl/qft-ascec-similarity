@@ -45,7 +45,7 @@ from typing import List, Optional
 _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-_ASCEC_SCRIPT = os.path.join(_REPO_ROOT, "ascec.py")
+_ASCEC_SCRIPT = os.path.join(_REPO_ROOT, "ascec-v04.py")
 
 # v04 line 99-102: supports the placeholder marker (``.asc,``) and explicit
 # input-file markers ending with ``.asc`` (e.g. ``formic_annealing.asc,``).
@@ -181,7 +181,7 @@ def create_launcher_script(replicated_files: List[str], input_dir: str, script_n
                     output_name = os.path.splitext(rel_path)[0] + ".out"
                     if i > 0:
                         f.write('echo ==================================================================\r\n')
-                    f.write(f'python "{ascec_script_path}" "{rel_path}" > "{output_name}"\r\n')
+                    f.write(f'python "{ascec_script_path}" "{rel_path}" > "{output_name}" 2>&1\r\n')
             else:
                 f.write("#!/bin/bash\n\n")
                 f.write("# Configuration for ASCEC v04\n")
@@ -200,7 +200,7 @@ def create_launcher_script(replicated_files: List[str], input_dir: str, script_n
                     output_name = os.path.splitext(rel_path)[0] + ".out"
                     if i > 0:
                         commands.append('echo "=================================================================="')
-                    commands.append(f"python {ascec_script_path} {rel_path} > {output_name}")
+                    commands.append(f"python {ascec_script_path} {rel_path} > {output_name} 2>&1")
                 f.write(" ; \\\n".join(commands))
                 f.write("\n")
 
@@ -262,7 +262,7 @@ def merge_launcher_scripts(working_dir: str = ".") -> str:
             commands = []
             for line in lines:
                 line = line.strip()
-                if line and 'python' in line and 'ascec.py' in line:
+                if line and 'python' in line and 'ascec-v04.py' in line:
                     # Remove trailing " ; \\" if present (bash style)
                     line = line.rstrip(' \\;').strip()
                     commands.append(line)
