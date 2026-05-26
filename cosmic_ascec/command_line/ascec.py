@@ -159,7 +159,11 @@ def _run_single_simulation(input_file: str, args: argparse.Namespace,
         print(f"ascec: failed to parse {input_path}: {exc}", file=sys.stderr)
         return 2
 
-    run_dir = Path.cwd()
+    # v04 lines 20269-20273: outputs land next to the input file, not in the
+    # caller's cwd. The launcher script runs replicas via relative paths from
+    # the parent dir, so without this every replica would spill its result_*,
+    # rless_*, tvse_*, anneal.* into the parent.
+    run_dir = input_path.resolve().parent
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # --box<percent> override for single-run mode (v04 lines 20325-20347).
