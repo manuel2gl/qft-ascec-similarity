@@ -62,6 +62,11 @@ from cosmic_ascec.file_formats import (
 )
 from cosmic_ascec.geometry.molecule import Molecule
 from cosmic_ascec.geometry.placement import initialize_cluster
+from cosmic_ascec.monte_carlo import (
+    MoveParams,
+    initialize_rotatable_bond_cache,
+    propose_unified_move,
+)
 from cosmic_ascec.logging_setup import ROOT_LOGGER_NAME, configure_logging
 from cosmic_ascec.quantum_chemistry import get_adapter, list_adapters
 from cosmic_ascec.random_numbers import make_rng, resolve_run_seed
@@ -149,12 +154,17 @@ def _run_random_configurations(
 ) -> int:
     """Mode-0 path: emit N random placements without any QM call.
 
-    Verbatim of v04's mode-0 branch (ascec-v04.py lines 20412-20447): pick
-    ``num_configurations`` independent random placements in the configured
-    cube and write each as one frame of ``mto_<seed>.xyz``. No energy is
-    evaluated, no Metropolis criterion is applied, no annealing schedule is
-    walked.
+    Each frame is built by (1) ``initialize_cluster`` for a random
+    box-wide placement, then (2) one ``propose_unified_move`` on top so
+    the same annealing move logic (per-molecule conformational draw +
+    translation/rotation) shapes the conformer distribution. Two
+    trajectories are emitted: ``mto_<seed>.xyz`` (atoms only) and
+    ``mtobox_<seed>.xyz`` (atoms + eight ``X`` markers at the cube
+    corners), mirroring the annealing pair ``result_*`` / ``resultbox_*``.
+    No QM call, no Metropolis criterion, no annealing schedule.
     """
+    from dataclasses import replace as _replace
+
     n_configs = int(config.num_configurations)
     if n_configs <= 0:
         print(
@@ -166,15 +176,58 @@ def _run_random_configurations(
     molecules = [Molecule.from_spec(spec) for spec in config.molecules]
     box_length = float(config.box.cube_length_angstrom)
     xyz_path = run_dir / f"mto_{run_seed}.xyz"
+    box_path = run_dir / f"mtobox_{run_seed}.xyz"
+
+    # Move knobs come straight from line 7+8 of the .asc — same source as the
+    # annealing path consumes via MoveParams.from_config.
+    move_params = MoveParams.from_config(config)
+
+    # Seed the rotatable-bond cache from one placement; atom indices are
+    # stable across re-placements of the same templates, so the cache stays
+    # valid for every subsequent draw.
+    seed_placement = initialize_cluster(
+        molecules,
+        box_length=box_length,
+        rng=rng,
+        logger=logger,
+    )
+    cache, effective_prob = initialize_rotatable_bond_cache(
+        seed_placement.cluster,
+        conformational_move_prob=move_params.conformational_move_prob,
+        max_dihedral_angle_rad=move_params.max_dihedral_angle_rad,
+        logger=logger,
+    )
+    if effective_prob != move_params.conformational_move_prob:
+        move_params = _replace(move_params, conformational_move_prob=effective_prob)
 
     print(
         f"Generating {n_configs} random configurations on {input_path.name} "
         f"(no energy evaluation)..."
     )
+    if effective_prob > 0.0:
+        import math as _math
+        max_deg = _math.degrees(move_params.max_dihedral_angle_rad)
+        print(
+            f"  Conformational sampling: {effective_prob * 100:.1f}% probability, "
+            f"max dihedral ±{max_deg:.1f}°"
+        )
+    else:
+        print("  Conformational sampling: disabled (no rotatable bonds or max dihedral = 0)")
 
-    # Truncate any stale file from a previous run with the same seed.
+    # Eight cube-corner markers for the box file (v04 dummy-atom convention).
+    half_box = box_length / 2.0
+    corners = [
+        (sx * half_box, sy * half_box, sz * half_box)
+        for sz in (-1.0, 1.0)
+        for sy in (-1.0, 1.0)
+        for sx in (-1.0, 1.0)
+    ]
+
+    move_counts = {"conformational": 0, "translate_rotate": 0}
+
     xyz_path.write_text("")
-    with xyz_path.open("a") as fh:
+    box_path.write_text("")
+    with xyz_path.open("a") as fh, box_path.open("a") as fhb:
         for i in range(1, n_configs + 1):
             placement = initialize_cluster(
                 molecules,
@@ -182,29 +235,59 @@ def _run_random_configurations(
                 rng=rng,
                 logger=logger,
             )
-            cluster = placement.cluster
-            fh.write(f"{cluster.num_atoms}\n")
-            fh.write(f"Configuration: {i} | random placement (mode 0)\n")
-            for z, (x, y, zc) in zip(cluster.atomic_numbers, cluster.coords):
-                symbol = Z_TO_SYMBOL.get(int(z), "X")
-                fh.write(f"{symbol:<3}{x: 13.6f}{y: 13.6f}{zc: 13.6f}\n")
+            move = propose_unified_move(
+                placement.cluster, rng=rng, params=move_params, cache=cache
+            )
+            cluster = move.cluster
+            move_counts[move.move_type] = move_counts.get(move.move_type, 0) + 1
 
-    # Mirror the annealing path's behavior — convert the multi-frame xyz to
-    # mol via obabel for downstream viewers. Silent no-op when obabel isn't
-    # on PATH (same policy as TrajectoryWriter._convert_xyz_results_to_mol).
+            atom_lines = [
+                f"{Z_TO_SYMBOL.get(int(z), 'X'):<3}{x: 13.6f}{y: 13.6f}{zc: 13.6f}"
+                for z, (x, y, zc) in zip(cluster.atomic_numbers, cluster.coords)
+            ]
+            header = (
+                f"Configuration: {i} | random placement (mode 0) | "
+                f"last move: {move.move_type}"
+            )
+            fh.write(f"{cluster.num_atoms}\n{header}\n")
+            fh.write("\n".join(atom_lines) + "\n")
+
+            corner_lines = [
+                f"X  {x: 13.6f}{y: 13.6f}{z: 13.6f}" for x, y, z in corners
+            ]
+            box_header = (
+                f"Configuration: {i} | random placement (mode 0) | "
+                f"BoxL={box_length:.1f} A (X box markers)"
+            )
+            fhb.write(f"{cluster.num_atoms + len(corner_lines)}\n{box_header}\n")
+            fhb.write("\n".join(atom_lines + corner_lines) + "\n")
+
+    # Mirror the annealing path: convert each multi-frame xyz to mol via obabel
+    # so downstream viewers (and the COSMIC stage) have the .mol siblings.
+    # Silent no-op when obabel isn't on PATH.
     import shutil as _shutil
     import subprocess as _subprocess
-    if _shutil.which("obabel") and xyz_path.stat().st_size > 0:
-        mol_path = xyz_path.with_suffix(".mol")
-        try:
-            _subprocess.run(
-                ["obabel", "-ixyz", str(xyz_path), "-omol", "-O", str(mol_path)],
-                capture_output=True, check=False, timeout=60,
-            )
-        except (OSError, _subprocess.SubprocessError):
-            pass
+    if _shutil.which("obabel"):
+        for path in (xyz_path, box_path):
+            if not path.exists() or path.stat().st_size == 0:
+                continue
+            mol_path = path.with_suffix(".mol")
+            try:
+                _subprocess.run(
+                    ["obabel", "-ixyz", str(path), "-omol", "-O", str(mol_path)],
+                    capture_output=True, check=False, timeout=60,
+                )
+            except (OSError, _subprocess.SubprocessError):
+                continue
 
-    print(f"Done. {n_configs} configurations written to {xyz_path.name}.")
+    print(
+        f"Done. {n_configs} configurations written to "
+        f"{xyz_path.name} (+ {box_path.name})."
+    )
+    print(
+        f"  Move breakdown: {move_counts['conformational']} conformational, "
+        f"{move_counts['translate_rotate']} rigid-body."
+    )
     print(f"Output written to {run_dir}/")
     return 0
 
