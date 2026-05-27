@@ -189,6 +189,21 @@ def _run_random_configurations(
                 symbol = Z_TO_SYMBOL.get(int(z), "X")
                 fh.write(f"{symbol:<3}{x: 13.6f}{y: 13.6f}{zc: 13.6f}\n")
 
+    # Mirror the annealing path's behavior — convert the multi-frame xyz to
+    # mol via obabel for downstream viewers. Silent no-op when obabel isn't
+    # on PATH (same policy as TrajectoryWriter._convert_xyz_results_to_mol).
+    import shutil as _shutil
+    import subprocess as _subprocess
+    if _shutil.which("obabel") and xyz_path.stat().st_size > 0:
+        mol_path = xyz_path.with_suffix(".mol")
+        try:
+            _subprocess.run(
+                ["obabel", "-ixyz", str(xyz_path), "-omol", "-O", str(mol_path)],
+                capture_output=True, check=False, timeout=60,
+            )
+        except (OSError, _subprocess.SubprocessError):
+            pass
+
     print(f"Done. {n_configs} configurations written to {xyz_path.name}.")
     print(f"Output written to {run_dir}/")
     return 0
