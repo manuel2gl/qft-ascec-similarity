@@ -65,7 +65,8 @@ from cosmic_ascec.geometry.placement import initialize_cluster
 from cosmic_ascec.monte_carlo import (
     MoveParams,
     initialize_rotatable_bond_cache,
-    propose_unified_move,
+    trial,
+    zero_energy,
 )
 from cosmic_ascec.logging_setup import ROOT_LOGGER_NAME, configure_logging
 from cosmic_ascec.quantum_chemistry import get_adapter, list_adapters
@@ -112,14 +113,6 @@ _PROGRAM_TO_ADAPTER = {
     QMProgram.XTB: "xtb",
 }
 
-# Mixture-proposal flip probability used in mode-0 random sampling. Concentrates
-# dihedral draws into "small nudge" + "near full flip" instead of the uniform
-# [-max, +max] used by v04, so the saved trajectory shows visible conformer
-# diversity (e.g., cis ↔ trans for formic acid OH) with .asc max_dihedral=180°.
-# Set to 0 to reproduce verbatim v04 mode-0 dihedral statistics.
-_MODE0_FLIP_PROBABILITY: float = 0.20
-
-
 class _AscecStepWriter(AnnealingCallback):
     """Write the current temperature step into ``run_dir/.ascec_step``.
 
@@ -159,16 +152,24 @@ def _run_random_configurations(
     rng,
     logger: logging.Logger,
 ) -> int:
-    """Mode-0 path: emit N random placements without any QM call.
+    """Mode-0 path: same MC code as annealing, minus QM and the schedule.
 
-    Each frame is built by (1) ``initialize_cluster`` for a random
-    box-wide placement, then (2) one ``propose_unified_move`` on top so
-    the same annealing move logic (per-molecule conformational draw +
-    translation/rotation) shapes the conformer distribution. Two
-    trajectories are emitted: ``mto_<seed>.xyz`` (atoms only) and
+    Mode 0 reuses the annealing trial code exactly:
+    :func:`~cosmic_ascec.monte_carlo.trial.trial` with
+    :data:`~cosmic_ascec.monte_carlo.trial.zero_energy` as the energy
+    function. With zero energies the Metropolis criterion always returns
+    ``LwE`` (downhill accept), so every proposed geometry becomes the
+    next current geometry and the trajectory chains exactly like
+    annealing would — only without spending QM calls and without a
+    temperature schedule wrapping the loop.
+
+    One ``initialize_cluster`` seeds the trajectory (the big-bang
+    scatter), then ``n_configs`` ``trial(...)`` calls produce the output
+    frames.
+
+    Two trajectories are emitted: ``mto_<seed>.xyz`` (atoms only) and
     ``mtobox_<seed>.xyz`` (atoms + eight ``X`` markers at the cube
     corners), mirroring the annealing pair ``result_*`` / ``resultbox_*``.
-    No QM call, no Metropolis criterion, no annealing schedule.
     """
     from dataclasses import replace as _replace
 
@@ -185,19 +186,15 @@ def _run_random_configurations(
     xyz_path = run_dir / f"mto_{run_seed}.xyz"
     box_path = run_dir / f"mtobox_{run_seed}.xyz"
 
-    # Move knobs come straight from line 7+8 of the .asc — same source as the
-    # annealing path consumes via MoveParams.from_config. Mode 0 is meant for
-    # broad conformational sampling (no Metropolis to filter proposals), so
-    # we turn on the symmetric mixture proposal by default: most draws are
-    # small refinements, a meaningful minority are near-full flips. Set to 0
-    # here to reproduce the verbatim v04 uniform behavior in mode 0.
-    move_params = _replace(
-        MoveParams.from_config(config), flip_probability=_MODE0_FLIP_PROBABILITY
-    )
+    # Move knobs come straight from line 7+8 of the .asc — exactly the same
+    # MoveParams the annealing path builds. Mode 0 must run the same move
+    # code as annealing, only without the QM cost and the temperature schedule.
+    move_params = MoveParams.from_config(config)
 
-    # Seed the rotatable-bond cache from one placement; atom indices are
-    # stable across re-placements of the same templates, so the cache stays
-    # valid for every subsequent draw.
+    # One big-bang scatter: doubles as the rotatable-bond cache seed and as
+    # the starting state for the chained trajectory below. Atom indices are
+    # stable across the templates, so the cache stays valid for every
+    # subsequent trial() call.
     seed_placement = initialize_cluster(
         molecules,
         box_length=box_length,
@@ -219,22 +216,11 @@ def _run_random_configurations(
     )
     if effective_prob > 0.0:
         import math as _math
-        from cosmic_ascec.monte_carlo.moves import (
-            FLIP_BAND_FRACTION,
-            SMALL_BAND_FRACTION,
-        )
         max_deg = _math.degrees(move_params.max_dihedral_angle_rad)
         print(
             f"  Conformational sampling: {effective_prob * 100:.1f}% probability, "
             f"max dihedral ±{max_deg:.1f}°"
         )
-        if move_params.flip_probability > 0.0:
-            print(
-                f"  Mixture proposal: {move_params.flip_probability * 100:.1f}% flip band "
-                f"±[{FLIP_BAND_FRACTION * max_deg:.1f}°, {max_deg:.1f}°], "
-                f"{(1.0 - move_params.flip_probability) * 100:.1f}% small band "
-                f"±[0°, {SMALL_BAND_FRACTION * max_deg:.1f}°]"
-            )
     else:
         print("  Conformational sampling: disabled (no rotatable bonds or max dihedral = 0)")
 
@@ -249,21 +235,33 @@ def _run_random_configurations(
 
     move_counts = {"conformational": 0, "translate_rotate": 0}
 
+    # Mode 0 = mode 1 minus the QM call and the temperature schedule. Every
+    # frame is one ``trial(...)`` call against the previous frame's cluster
+    # with ``energy_fn=zero_energy``: delta is identically 0 so the Metropolis
+    # criterion always returns ``LwE`` (downhill accept) and the proposed
+    # geometry becomes the next current geometry. Same propose + accept code
+    # path as annealing — the only thing that changes between modes is the
+    # energy function and whether a temperature schedule wraps the loop.
+    current_cluster = seed_placement.cluster
+    current_energy = 0.0
+    dummy_temperature = 1.0  # any T > 0; delta == 0 makes the value irrelevant
+
     xyz_path.write_text("")
     box_path.write_text("")
     with xyz_path.open("a") as fh, box_path.open("a") as fhb:
         for i in range(1, n_configs + 1):
-            placement = initialize_cluster(
-                molecules,
-                box_length=box_length,
+            result = trial(
+                current_cluster,
+                current_energy=current_energy,
+                energy_fn=zero_energy,
                 rng=rng,
-                logger=logger,
+                temperature_kelvin=dummy_temperature,
+                params=move_params,
+                cache=cache,
             )
-            move = propose_unified_move(
-                placement.cluster, rng=rng, params=move_params, cache=cache
-            )
-            cluster = move.cluster
-            move_counts[move.move_type] = move_counts.get(move.move_type, 0) + 1
+            current_cluster = result.cluster
+            cluster = current_cluster
+            move_counts[result.move_type] = move_counts.get(result.move_type, 0) + 1
 
             atom_lines = [
                 f"{Z_TO_SYMBOL.get(int(z), 'X'):<3}{x: 13.6f}{y: 13.6f}{zc: 13.6f}"
@@ -271,7 +269,7 @@ def _run_random_configurations(
             ]
             header = (
                 f"Configuration: {i} | random placement (mode 0) | "
-                f"last move: {move.move_type}"
+                f"last move: {result.move_type}"
             )
             fh.write(f"{cluster.num_atoms}\n{header}\n")
             fh.write("\n".join(atom_lines) + "\n")
