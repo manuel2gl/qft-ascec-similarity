@@ -264,9 +264,13 @@ def _run_random_configurations(
 
     # Mirror the annealing path: convert each multi-frame xyz to mol via obabel
     # so downstream viewers (and the COSMIC stage) have the .mol siblings.
-    # Silent no-op when obabel isn't on PATH.
+    # The box file holds non-standard 'X' markers — obabel emits those as '*'
+    # in the MOL atom block, so we patch them back via the trajectory_writer
+    # helper that TrajectoryWriter uses for resultbox_*.mol. Silent no-op when
+    # obabel isn't on PATH.
     import shutil as _shutil
     import subprocess as _subprocess
+    from cosmic_ascec.file_formats.trajectory_writer import _restore_dummy_atom_symbol
     if _shutil.which("obabel"):
         for path in (xyz_path, box_path):
             if not path.exists() or path.stat().st_size == 0:
@@ -279,6 +283,8 @@ def _run_random_configurations(
                 )
             except (OSError, _subprocess.SubprocessError):
                 continue
+            if path is box_path and mol_path.exists():
+                _restore_dummy_atom_symbol(mol_path)
 
     print(
         f"Done. {n_configs} configurations written to "
