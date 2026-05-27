@@ -6392,14 +6392,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if _skipped_set:
                         max_critical = None
 
-                    # Prompt for concurrent jobs if not specified
-                    if not _concurrent_given:
-                        try:
-                            _ans = input("  Concurrent QM jobs for optimization [1]: ").strip()
-                            concurrent_jobs = max(1, int(_ans)) if _ans else 1
-                        except (EOFError, ValueError):
-                            concurrent_jobs = 1
-                        context._concurrent_prompted = concurrent_jobs
+                    # No --concurrent= in stage args ⇒ silent default of 1.
 
                     # Show redo configuration
                     if max_redos > 1:
@@ -6908,14 +6901,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if _skipped_set:
                         max_critical = None
 
-                    # Prompt for concurrent jobs if not specified
-                    if not _concurrent_given:
-                        try:
-                            _ans = input("  Concurrent QM jobs for refinement [1]: ").strip()
-                            concurrent_jobs = max(1, int(_ans)) if _ans else 1
-                        except (EOFError, ValueError):
-                            concurrent_jobs = 1
-                        context._concurrent_prompted = concurrent_jobs
+                    # No --concurrent= in stage args ⇒ silent default of 1.
 
                     # Show redo configuration
                     if max_redos > 1:
@@ -7276,14 +7262,7 @@ def execute_workflow_stages(input_file: str, stages: List[Dict[str, Any]],
                     if _skipped_set:
                         max_critical = None
 
-                    # Prompt for concurrent jobs if not specified
-                    if not _concurrent_given:
-                        try:
-                            _ans = input("  Concurrent QM jobs for energy refinement [1]: ").strip()
-                            concurrent_jobs = max(1, int(_ans)) if _ans else 1
-                        except (EOFError, ValueError):
-                            concurrent_jobs = 1
-                        context._concurrent_prompted = concurrent_jobs
+                    # No --concurrent= in stage args ⇒ silent default of 1.
 
                     if max_redos > 1:
                         if context.workflow_verbose_level >= 1:
@@ -11210,21 +11189,7 @@ def execute_optimization_stage(context: WorkflowContext, stage: Dict[str, Any]) 
             print("Error: No template file specified for optimization stage (.inp/.com/.gjf/.xtb or embedded label)")
         return 1
 
-    # Prompt for concurrent jobs if not set via --concurrent and not already prompted.
-    # The value is cached by the workflow redo loop to avoid re-prompting.
-    prompted_concurrent = getattr(context, '_concurrent_prompted', None)
-    if not _concurrent_given and prompted_concurrent is None:
-        try:
-            _ans = input("  Concurrent QM jobs for optimization [1]: ").strip()
-            concurrent_jobs = max(1, int(_ans)) if _ans else 1
-        except (EOFError, ValueError):
-            concurrent_jobs = 1
-        setattr(context, '_concurrent_prompted', concurrent_jobs)
-    elif not _concurrent_given and prompted_concurrent is not None:
-        try:
-            concurrent_jobs = max(1, int(prompted_concurrent))
-        except (TypeError, ValueError):
-            concurrent_jobs = 1
+    # No --concurrent= in stage args ⇒ silent default of 1.
 
     context.max_tries = max_stage_redos  # For compatibility with existing code
 
@@ -12416,8 +12381,18 @@ def execute_cosmic_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int
         
     except subprocess.CalledProcessError as e:
         print(f"Error: cosmic analysis failed with code {e.returncode}")
-        if e.stderr:
-            print(f"Error output: {e.stderr}")
+        # stderr was merged into stdout (subprocess.STDOUT), so the captured
+        # cosmic output — including any argparse "usage:/error:" lines that
+        # caused an exit-2 — lives on e.output. Print the tail so the failure
+        # reason is visible even when the workflow ran cosmic in non-verbose
+        # mode.
+        captured = e.output or e.stderr
+        if captured:
+            tail = captured.splitlines()[-30:]
+            print("--- cosmic output (tail) ---")
+            for tail_line in tail:
+                print(tail_line)
+            print("--- end cosmic output ---")
         # Cleanup temp file if it exists
         if update_list_file and os.path.exists(update_list_file):
             try:
@@ -12501,24 +12476,7 @@ def execute_refinement_stage(context: WorkflowContext, stage: Dict[str, Any], _s
     if _skipped_set and not _critical_set:
         max_critical = None
 
-    # Inherit concurrency picked by the workflow orchestrator (or earlier prompt)
-    # when --concurrent= wasn't passed explicitly; otherwise prompt once. Matches
-    # execute_optimization_stage so refinement/energy_refinement actually dispatch
-    # jobs in parallel instead of silently falling back to serial execution.
-    prompted_concurrent = getattr(context, '_concurrent_prompted', None)
-    if not _concurrent_given and prompted_concurrent is not None:
-        try:
-            concurrent_jobs = max(1, int(prompted_concurrent))
-        except (TypeError, ValueError):
-            concurrent_jobs = 1
-    elif not _concurrent_given and prompted_concurrent is None:
-        _prompt_label = 'energy refinement' if _stage_kind == 'energy_refinement' else 'refinement'
-        try:
-            _ans = input(f"  Concurrent QM jobs for {_prompt_label} [1]: ").strip()
-            concurrent_jobs = max(1, int(_ans)) if _ans else 1
-        except (EOFError, ValueError):
-            concurrent_jobs = 1
-        setattr(context, '_concurrent_prompted', concurrent_jobs)
+    # No --concurrent= in stage args ⇒ silent default of 1.
 
     # Store threshold mode in context for redo logic
     # --critical: only retry structures with imaginary freqs (need_recalculation)
