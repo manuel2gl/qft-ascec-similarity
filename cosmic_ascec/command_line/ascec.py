@@ -50,14 +50,18 @@ from cosmic_ascec.annealing import (
     TemperatureStart,
     anneal,
 )
+from cosmic_ascec.elements import Z_TO_SYMBOL
 from cosmic_ascec.exceptions import CosmicAscecError
 from cosmic_ascec.file_formats import (
     QMProgram,
+    SimulationMode,
     SummaryWriter,
     TrajectoryWriter,
     TvseWriter,
     parse_asc,
 )
+from cosmic_ascec.geometry.molecule import Molecule
+from cosmic_ascec.geometry.placement import initialize_cluster
 from cosmic_ascec.logging_setup import ROOT_LOGGER_NAME, configure_logging
 from cosmic_ascec.quantum_chemistry import get_adapter, list_adapters
 from cosmic_ascec.random_numbers import make_rng, resolve_run_seed
@@ -135,6 +139,61 @@ def _resolve_adapter_name(alias: str, program: QMProgram) -> str:
     return _PROGRAM_TO_ADAPTER.get(program, alias.lower() if alias else "")
 
 
+def _run_random_configurations(
+    config,
+    input_path: Path,
+    run_dir: Path,
+    run_seed: int,
+    rng,
+    logger: logging.Logger,
+) -> int:
+    """Mode-0 path: emit N random placements without any QM call.
+
+    Verbatim of v04's mode-0 branch (ascec-v04.py lines 20412-20447): pick
+    ``num_configurations`` independent random placements in the configured
+    cube and write each as one frame of ``mto_<seed>.xyz``. No energy is
+    evaluated, no Metropolis criterion is applied, no annealing schedule is
+    walked.
+    """
+    n_configs = int(config.num_configurations)
+    if n_configs <= 0:
+        print(
+            f"ascec: random mode requires num_configurations > 0, got {n_configs}",
+            file=sys.stderr,
+        )
+        return 2
+
+    molecules = [Molecule.from_spec(spec) for spec in config.molecules]
+    box_length = float(config.box.cube_length_angstrom)
+    xyz_path = run_dir / f"mto_{run_seed}.xyz"
+
+    print(
+        f"Generating {n_configs} random configurations on {input_path.name} "
+        f"(no energy evaluation)..."
+    )
+
+    # Truncate any stale file from a previous run with the same seed.
+    xyz_path.write_text("")
+    with xyz_path.open("a") as fh:
+        for i in range(1, n_configs + 1):
+            placement = initialize_cluster(
+                molecules,
+                box_length=box_length,
+                rng=rng,
+                logger=logger,
+            )
+            cluster = placement.cluster
+            fh.write(f"{cluster.num_atoms}\n")
+            fh.write(f"Configuration: {i} | random placement (mode 0)\n")
+            for z, (x, y, zc) in zip(cluster.atomic_numbers, cluster.coords):
+                symbol = Z_TO_SYMBOL.get(int(z), "X")
+                fh.write(f"{symbol:<3}{x: 13.6f}{y: 13.6f}{zc: 13.6f}\n")
+
+    print(f"Done. {n_configs} configurations written to {xyz_path.name}.")
+    print(f"Output written to {run_dir}/")
+    return 0
+
+
 def _run_single_simulation(input_file: str, args: argparse.Namespace,
                             unknown_args, logger: logging.Logger) -> int:
     """Bare-input-file single annealing run (v04 main_ascec_integrated 20257-20982).
@@ -192,6 +251,14 @@ def _run_single_simulation(input_file: str, args: argparse.Namespace,
     run_seed = resolve_run_seed()
     rng = make_rng(run_seed)
     print(f"Seed = {run_seed}")
+
+    # v04 lines 20412-20447 — mode 0 generates N random placements and exits
+    # without any QM call, MC loop, or annealing. The port never branched on
+    # mode, so mode-0 inputs silently ran annealing instead.
+    if config.mode == SimulationMode.RANDOM:
+        return _run_random_configurations(
+            config, input_path, run_dir, run_seed, rng, logger
+        )
 
     adapter_name = _resolve_adapter_name(config.qm.alias, config.qm.program)
     try:
