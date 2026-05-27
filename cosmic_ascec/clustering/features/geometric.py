@@ -311,7 +311,7 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
     """
     Detect hydrogen bonds based on distance and angle criteria.
 
-    Distance criterion: 1.2-3.2 Å between H and acceptor
+    Distance criterion: 1.4-3.2 Å between H and acceptor
     Angle criterion: D-H...A angle >= 30°
 
     Args:
@@ -330,9 +330,9 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         # Hydrogen bond criteria
         potential_donor_acceptor_z = {7, 8, 9}  # N, O, F
         hydrogen_atom_num = 1
-        HB_min_dist_actual = 1.2  # Minimum H...A distance (Å)
+        HB_min_dist_actual = 1.4  # Minimum H...A distance (Å)
         HB_max_dist_actual = 3.2  # Maximum H...A distance (Å)
-        COVALENT_DH_SEARCH_DIST = 1.5  # D-H covalent bond search limit (Å)
+        COVALENT_DH_SEARCH_DIST = 1.4  # D-H covalent bond search limit (Å)
         HB_min_angle_actual = 30.0  # Minimum D-H...A angle (degrees)
         HB_max_angle_actual = 180.0  # Maximum D-H...A angle (degrees)
 
