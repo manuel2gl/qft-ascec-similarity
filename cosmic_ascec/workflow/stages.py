@@ -7754,7 +7754,16 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     completed_replicas = 0
 
     def _replica_already_completed(replica_dir: str, replica_input_name: str) -> bool:
-        """Return True when a replica has a completed annealing result set."""
+        """Return True when a replica has a completed result set.
+
+        Mode 1 (annealing) emits result_*.xyz + tvse_*.dat + a .out file with a
+        normal-termination marker. Mode 0 (random configurations) emits only
+        mto_*.xyz / mtobox_*.xyz and no .out file, so a mode-0 replica counts
+        as completed as soon as the mto_*.xyz output exists.
+        """
+        if glob.glob(os.path.join(replica_dir, 'mto_*.xyz')):
+            return True
+
         output_file = os.path.join(replica_dir, os.path.splitext(replica_input_name)[0] + '.out')
         has_result = bool(glob.glob(os.path.join(replica_dir, 'result_*.xyz')))
         has_tvse = bool(glob.glob(os.path.join(replica_dir, 'tvse_*.dat')))
@@ -7832,6 +7841,10 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
             artifacts_exist = bool(glob.glob(os.path.join(run_dir, 'result_*.xyz'))) and bool(
                 glob.glob(os.path.join(run_dir, 'tvse_*.dat'))
             )
+            # Mode 0 (random configurations) emits mto_*.xyz only, no .out file
+            # and no tvse. A mode-0 replica is successful as soon as mto_*.xyz
+            # exists with a non-zero return code from the subprocess.
+            mode0_artifacts_exist = bool(glob.glob(os.path.join(run_dir, 'mto_*.xyz')))
 
             if os.path.exists(output_file):
                 with open(output_file, 'r') as f:
@@ -7840,6 +7853,9 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
                         result_info['success'] = True
 
             if not result_info['success'] and artifacts_exist:
+                result_info['success'] = True
+
+            if not result_info['success'] and mode0_artifacts_exist and returncode == 0:
                 result_info['success'] = True
 
             if not result_info['success']:
