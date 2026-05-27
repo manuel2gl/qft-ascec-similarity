@@ -112,6 +112,13 @@ _PROGRAM_TO_ADAPTER = {
     QMProgram.XTB: "xtb",
 }
 
+# Mixture-proposal flip probability used in mode-0 random sampling. Concentrates
+# dihedral draws into "small nudge" + "near full flip" instead of the uniform
+# [-max, +max] used by v04, so the saved trajectory shows visible conformer
+# diversity (e.g., cis ↔ trans for formic acid OH) with .asc max_dihedral=180°.
+# Set to 0 to reproduce verbatim v04 mode-0 dihedral statistics.
+_MODE0_FLIP_PROBABILITY: float = 0.20
+
 
 class _AscecStepWriter(AnnealingCallback):
     """Write the current temperature step into ``run_dir/.ascec_step``.
@@ -179,8 +186,14 @@ def _run_random_configurations(
     box_path = run_dir / f"mtobox_{run_seed}.xyz"
 
     # Move knobs come straight from line 7+8 of the .asc — same source as the
-    # annealing path consumes via MoveParams.from_config.
-    move_params = MoveParams.from_config(config)
+    # annealing path consumes via MoveParams.from_config. Mode 0 is meant for
+    # broad conformational sampling (no Metropolis to filter proposals), so
+    # we turn on the symmetric mixture proposal by default: most draws are
+    # small refinements, a meaningful minority are near-full flips. Set to 0
+    # here to reproduce the verbatim v04 uniform behavior in mode 0.
+    move_params = _replace(
+        MoveParams.from_config(config), flip_probability=_MODE0_FLIP_PROBABILITY
+    )
 
     # Seed the rotatable-bond cache from one placement; atom indices are
     # stable across re-placements of the same templates, so the cache stays
@@ -206,11 +219,22 @@ def _run_random_configurations(
     )
     if effective_prob > 0.0:
         import math as _math
+        from cosmic_ascec.monte_carlo.moves import (
+            FLIP_BAND_FRACTION,
+            SMALL_BAND_FRACTION,
+        )
         max_deg = _math.degrees(move_params.max_dihedral_angle_rad)
         print(
             f"  Conformational sampling: {effective_prob * 100:.1f}% probability, "
             f"max dihedral ±{max_deg:.1f}°"
         )
+        if move_params.flip_probability > 0.0:
+            print(
+                f"  Mixture proposal: {move_params.flip_probability * 100:.1f}% flip band "
+                f"±[{FLIP_BAND_FRACTION * max_deg:.1f}°, {max_deg:.1f}°], "
+                f"{(1.0 - move_params.flip_probability) * 100:.1f}% small band "
+                f"±[0°, {SMALL_BAND_FRACTION * max_deg:.1f}°]"
+            )
     else:
         print("  Conformational sampling: disabled (no rotatable bonds or max dihedral = 0)")
 

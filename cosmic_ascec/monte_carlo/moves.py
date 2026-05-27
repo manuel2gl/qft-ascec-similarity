@@ -49,6 +49,30 @@ would amplify floating-point noise.
 # the initial QM call succeeds.
 INITIAL_QM_RETRIES = 100
 
+# --------------------------------------------------------------------------- #
+# Mixture-proposal band fractions (used only when MoveParams.flip_probability  #
+# > 0 — the default 0 path preserves the verbatim v04 uniform draw).           #
+# --------------------------------------------------------------------------- #
+
+FLIP_BAND_FRACTION = 0.85
+"""Lower edge of the mixture's flip band, as a fraction of ``max_dihedral``.
+
+When the mixture toggle picks the flip band the angle magnitude is drawn
+uniformly in ``[FLIP_BAND_FRACTION * max, max]``, with a random sign. At
+``max = 180°`` this is ``[153°, 180°]`` — exactly the "near full rotation"
+band a cis ↔ trans flip needs.
+"""
+
+SMALL_BAND_FRACTION = 1.0 / 3.0
+"""Half-width of the mixture's small band, as a fraction of ``max_dihedral``.
+
+When the mixture toggle picks the small band the angle is drawn uniformly
+in ``[-SMALL_BAND_FRACTION * max, +SMALL_BAND_FRACTION * max]``. Concentrates
+"refinement nudges" near zero while leaving the flip band to do barrier
+crossings. The mixture skips the energetically-expensive middle band
+(``max/3 < |angle| < 0.85 * max``).
+"""
+
 # A rotatable bond: (axis atom 1, axis atom 2, indices of the atoms that move).
 RotatableBond = Tuple[int, int, List[int]]
 
@@ -71,6 +95,17 @@ class MoveParams:
     * ``conformational_move_prob``— ``state.conformational_move_prob`` (line 8).
     * ``use_standard_metropolis`` — the ``--standard`` CLI flag (default
       ``False`` → v04's *modified* Metropolis criterion).
+    * ``flip_probability``        — opt-in mixture knob (default ``0.0`` →
+      verbatim v04 uniform draw). When ``> 0``, the dihedral angle is drawn
+      from a symmetric mixture: with probability ``flip_probability`` from
+      the *flip band* ``±[FLIP_BAND_FRACTION * max, max]``, otherwise from the
+      *small band* ``[-SMALL_BAND_FRACTION * max, +SMALL_BAND_FRACTION * max]``.
+      Both bands are symmetric in sign, so detailed balance still holds (no
+      Metropolis-Hastings correction). The mixture is the right answer when
+      the uniform ``[-max, +max]`` distribution wastes most draws on the
+      energetically-unfavorable middle band (e.g., cis-formic-acid OH at
+      ~90° is the worst place to be — small nudges or full flips help; 90°
+      itself does not).
     """
 
     max_displacement: float
@@ -78,6 +113,7 @@ class MoveParams:
     max_dihedral_angle_rad: float
     conformational_move_prob: float
     use_standard_metropolis: bool = False
+    flip_probability: float = 0.0
 
     @classmethod
     def from_config(cls, config, *, use_standard_metropolis: bool = False) -> "MoveParams":
@@ -90,6 +126,38 @@ class MoveParams:
             conformational_move_prob=moves.conformational_probability,
             use_standard_metropolis=use_standard_metropolis,
         )
+
+
+def _draw_dihedral_angle(
+    rng: np.random.RandomState,
+    max_rad: float,
+    flip_probability: float,
+) -> float:
+    """Pick one dihedral rotation angle.
+
+    ``flip_probability <= 0.0`` (the default for all .asc-driven callers) is
+    the verbatim v04 draw: uniform on ``[-max_rad, +max_rad]``. Exactly one
+    ``rng.rand()`` is consumed — the load-bearing RNG sequence for replay
+    is unchanged from v04 in that branch.
+
+    ``flip_probability > 0.0`` uses the symmetric two-band mixture described
+    on :class:`MoveParams`. The branch consumes additional ``rng.rand()``
+    draws (toggle, then sign+magnitude or just magnitude), so a run with a
+    non-zero flip probability follows a different RNG trajectory than the
+    same seed at zero — by design, since the proposal distribution itself
+    is what changed.
+    """
+    if flip_probability <= 0.0:
+        return (rng.rand() - 0.5) * 2.0 * max_rad
+
+    if rng.rand() < flip_probability:
+        # Flip band: ±[FLIP_BAND_FRACTION * max, max], sign drawn uniformly.
+        sign = 1.0 if rng.rand() < 0.5 else -1.0
+        u = rng.rand()
+        return sign * max_rad * (FLIP_BAND_FRACTION + u * (1.0 - FLIP_BAND_FRACTION))
+
+    # Small band: uniform on [-SMALL_BAND_FRACTION * max, +SMALL_BAND_FRACTION * max].
+    return (rng.rand() - 0.5) * 2.0 * SMALL_BAND_FRACTION * max_rad
 
 
 @dataclass
@@ -322,11 +390,16 @@ def propose_unified_move(
                 bond_atom1, bond_atom2, moving_atoms = rotatable_bonds[
                     rng.randint(len(rotatable_bonds))
                 ]
-                # v04 lines 3835-3836 — signed dihedral angle uniform on
-                # [-max, +max]. Symmetric proposal: required for detailed
-                # balance under plain Metropolis (no Hastings correction).
-                max_rotation = params.max_dihedral_angle_rad
-                rotation_angle = (rng.rand() - 0.5) * 2.0 * max_rotation
+                # Angle draw. When ``params.flip_probability == 0`` this is
+                # the verbatim v04 uniform draw on [-max, +max]; otherwise
+                # it's the symmetric two-band mixture (see :class:`MoveParams`
+                # and :func:`_draw_dihedral_angle`). Both are symmetric, so
+                # detailed balance holds without a Hastings correction.
+                rotation_angle = _draw_dihedral_angle(
+                    rng,
+                    params.max_dihedral_angle_rad,
+                    params.flip_probability,
+                )
 
                 new_mol_coords = rotate_around_bond(
                     mol_coords, bond_atom1, bond_atom2, moving_atoms, rotation_angle
@@ -417,10 +490,12 @@ def propose_unified_move(
 
 
 __all__ = [
+    "FLIP_BAND_FRACTION",
     "INITIAL_QM_RETRIES",
     "MoveParams",
     "RotatableBond",
     "RotatableBondCache",
+    "SMALL_BAND_FRACTION",
     "UnifiedMoveResult",
     "initialize_rotatable_bond_cache",
     "propose_unified_move",
