@@ -178,11 +178,15 @@ def plot_annotated_dendrogram(
     ax2.set_title("Threshold Diagnostic (Merge Height Distribution)", fontsize=16)
     ax2.tick_params(labelsize=13)
     ax2.yaxis.set_major_formatter(_mticker.FormatStrFormatter('%.1f'))
-    ax2.set_xlim(1, n_merges)
+    # Small margin on both ends so the first and last points are not clipped.
+    ax2.set_xlim(0, n_merges + 1)
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
-    leg_main = ax2.legend(loc='upper left', fontsize=12)
+    # Blank title gives the main legend the same title-row footprint as the
+    # similarity-floor legend, so identical padding -> identical box heights.
+    leg_main = ax2.legend(loc='upper left', fontsize=12, title=' ',
+                          title_fontsize=12, labelspacing=0.6, borderpad=0.6)
     fig2.tight_layout()
 
     # Similarity-floor legend anchored to the right of the main legend.
@@ -219,15 +223,18 @@ def plot_annotated_dendrogram(
             title_fontsize=12,
             handlelength=0, handletextpad=0,
             borderaxespad=0,
-            borderpad=0.4,
+            borderpad=0.6,
+            labelspacing=0.6,
         )
         _trust_handles = [Patch(visible=False) for _ in trust_segments]
         trust_leg = ax2.legend(handles=_trust_handles, labels=trust_segments,
                                **_trust_kwargs)
 
+        # Both legends now share the same structure (title row + 3 entries) and
+        # spacing; the loop only fine-tunes borderpad to pixel-match heights.
         fontsize_px = 12 * fig2.dpi / 72
         fig2.canvas.draw()
-        trust_bp = 0.4
+        trust_bp = 0.6
         for _ in range(12):
             h_main = leg_main.get_window_extent().height
             h_trust = trust_leg.get_window_extent().height
