@@ -66,64 +66,6 @@ def _build_cluster_colors(linkage_matrix: np.ndarray, cut_height: float):
     return _link_color_func, color_map, cluster_labels
 
 
-def _find_color(x_color: dict, x: float, eps: float = 0.5):
-    """Nearest-x lookup with tolerance."""
-    v = x_color.get(x)
-    if v is not None:
-        return v
-    if not x_color:
-        return None
-    best = min(x_color.keys(), key=lambda k: abs(k - x))
-    return x_color[best] if abs(best - x) < eps else None
-
-
-def _overlay_cluster_extensions(ax, dendro_data, cut_height: float,
-                                 color_map: dict, cluster_labels) -> None:
-    """Extend each cluster's color up the vertical leg to the first above-cut merge.
-
-    scipy draws the entire U-shape (both legs + horizontal) in one color from
-    link_color_func, so above-cut merges spanning multiple clusters come out gray.
-    This overlays a colored vertical on top: for every side of an above-cut merge
-    whose direct child is a below-cut cluster, re-draw only that vertical leg
-    (child-top → merge height) in the cluster's color.
-    """
-    icoord = dendro_data['icoord']   # [x0, x1, x2, x3]; x0==x1, x2==x3
-    dcoord = dendro_data['dcoord']   # [y0, y1, y2, y3]; y1==y2 = merge height
-    leaves = dendro_data['leaves']   # leaf indices in left→right display order
-
-    # x → color for every below-cut subtree top.
-    # Leaves sit at x = 5 + 10*order (scipy default spacing).
-    x_color: dict[float, str] = {}
-    for order, leaf_idx in enumerate(leaves):
-        x_color[5.0 + 10.0 * order] = color_map[int(cluster_labels[leaf_idx])]
-
-    # Propagate colors upward through below-cut merges (low→high so children first).
-    for xs, ys in sorted(zip(icoord, dcoord), key=lambda p: p[1][1]):
-        if ys[1] > cut_height:
-            continue
-        color = _find_color(x_color, xs[0]) or _find_color(x_color, xs[3])
-        if color:
-            x_color[(xs[1] + xs[2]) / 2.0] = color
-
-    lw = 2.0
-    y_max = max((ys[1] for ys in dcoord), default=1.0)
-    gap = y_max * 0.025   # small gap so the colored vertical doesn't touch the horizontal bar
-
-    for xs, ys in zip(icoord, dcoord):
-        merge_h = ys[1]
-        if merge_h <= cut_height:
-            continue
-        top = merge_h - gap
-
-        if ys[0] <= cut_height:
-            c = _find_color(x_color, xs[0])
-            if c and top > ys[0]:
-                ax.plot([xs[0], xs[0]], [ys[0], top], color=c, lw=lw, zorder=5)
-
-        if ys[3] <= cut_height:
-            c = _find_color(x_color, xs[3])
-            if c and top > ys[3]:
-                ax.plot([xs[3], xs[3]], [ys[3], top], color=c, lw=lw, zorder=5)
 
 
 def plot_annotated_dendrogram(
@@ -165,17 +107,12 @@ def plot_annotated_dendrogram(
 
     color_data = _build_cluster_colors(lm, cut_height)
     dendro_kw: dict = dict(labels=conf_labels, leaf_rotation=90,
-                           leaf_font_size=leaf_font, ax=ax1)
+                            leaf_font_size=leaf_font, ax=ax1)
     if color_data is not None:
         dendro_kw['link_color_func'] = color_data[0]
-    _lines_before = set(id(l) for l in ax1.get_lines())
-    dendro_data = dendrogram(lm, **dendro_kw)
-    for _l in ax1.get_lines():
-        if id(_l) not in _lines_before:
-            _l.set_linewidth(2.0)
-
-    if color_data is not None:
-        _overlay_cluster_extensions(ax1, dendro_data, cut_height, color_data[1], color_data[2])
+    dendrogram(lm, **dendro_kw)
+    for line in ax1.get_lines():
+        line.set_linewidth(2.5)
 
     ax1.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=1.5)
     ax1.set_title(f"Hierarchical Clustering Dendrogram ({title_suffix})", fontsize=16)
