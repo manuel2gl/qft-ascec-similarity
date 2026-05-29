@@ -641,39 +641,10 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     else:
         summary_file_content_lines.append(f"Clustering Results for: {os.path.basename(input_source)}")
 
-    # Conditional cosmic threshold display
-    if is_compare_mode:
-        summary_file_content_lines.append(f"COSMIC threshold (distance)   : N/A")
-    elif threshold == "auto":
-        summary_file_content_lines.append(f"COSMIC threshold (distance)   : auto (per-case knee detection)")
-    elif isinstance(threshold, tuple) and len(threshold) == 2:
-        _mode, _params = threshold
-        if _mode == "opt-pearson":
-            summary_file_content_lines.append(
-                f"COSMIC threshold (distance)   : {_mode} "
-                f"(τ rebuilt from r_opt={_params.get('r', float('nan')):.4f})")
-        elif _mode == "opt-spread":
-            summary_file_content_lines.append(
-                f"COSMIC threshold (distance)   : {_mode} "
-                f"(τ_opt={_params.get('tau', float('nan')):.4f} rescaled by d_med ratio)")
-        else:
-            summary_file_content_lines.append(f"COSMIC threshold (distance)   : {_mode}")
-    else:
-        summary_file_content_lines.append(f"COSMIC threshold (distance)   : {threshold}")
-    summary_file_content_lines.append("<THRESHOLD_PEARSON_PLACEHOLDER>")
+    summary_file_content_lines.append("<COSMIC_THRESHOLD_PLACEHOLDER>")
 
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"RMSD validation threshold: {rmsd_threshold:.3f} Å")
-    # Report the active weight profile and any non-default weights
-    if partialweights:
-        summary_file_content_lines.append("Weight profile: semiempirical (--partialweights)")
-    else:
-        summary_file_content_lines.append("Weight profile: uniform (1.0)")
-    if weights:
-        non_default = {k: v for k, v in weights.items() if v != 1.0}
-        if non_default:
-            summary_file_content_lines.append(f"Feature weights (non-default): {non_default}")
-
 
     total_files_attempted = len(clean_data_for_clustering) + len(skipped_files)
     if total_files_attempted > 0:
@@ -685,10 +656,19 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     summary_file_content_lines.append(f"Total configurations processed: {len(clean_data_for_clustering)}")
     summary_file_content_lines.append(f"Total files skipped: <TOTAL_SKIPPED_PLACEHOLDER>")
     summary_file_content_lines.append(f"Critical skipped files: <IMAG_NEED_RECALC_PLACEHOLDER>")
-    summary_file_content_lines.append(f"Critical reduced-vector unmatched: <REDUCED_UNMATCHED_PLACEHOLDER>")
     summary_file_content_lines.append(f"Total number of final clusters: <TOTAL_CLUSTERS_PLACEHOLDER>")
     if rmsd_threshold is not None:
         summary_file_content_lines.append(f"Total RMSD moved configurations: <TOTAL_RMSD_OUTLIERS_PLACEHOLDER>")
+    summary_file_content_lines.append("")
+    # Report the active weight profile and any non-default weights
+    if partialweights:
+        summary_file_content_lines.append("Weight profile: semiempirical (--partialweights)")
+    else:
+        summary_file_content_lines.append("Weight profile: uniform (1.0)")
+    if weights:
+        non_default = {k: v for k, v in weights.items() if v != 1.0}
+        if non_default:
+            summary_file_content_lines.append(f"Feature weights (non-default): {non_default}")
     summary_file_content_lines.append("\n" + "=" * 75 + "\n")
 
 
@@ -1340,44 +1320,38 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
     else:
         reduced_unmatched_str = str(len(reduced_unmatched_critical))
 
+    _method_label = {"knee": "knee detection"}
     if is_compare_mode or not resolved_threshold_entries:
-        _pearson_threshold_text = "COSMIC Trust Score (similarity floor): N/A"
+        _cosmic_threshold_text = "COSMIC threshold: N/A"
     elif len(resolved_threshold_entries) == 1:
         _e = resolved_threshold_entries[0]
-        if _e['r_thresh'] is not None and _e['pct_thresh'] is not None:
-            _pearson_threshold_text = (
-                f"COSMIC Trust Score (similarity floor): {_e['pct_thresh']:.1f} %\n"
-                f"  reading: every cluster member is expected to be at least "
-                f"{_e['pct_thresh']:.1f} % similar to its\n"
-                f"  representative -- the quantitative error margin of the clustering.\n"
-                f"  details: tau = {_e['tau']:.4f}, r >= {_e['r_thresh']:.3f}, "
-                f"N_f = {_e['n_eff']:.2f}, d_med = {_e['d_med']:.4f}, "
-                f"source = {_e['source']}"
-            )
+        _tau = _e['tau']
+        _src = _e.get('source', '')
+        _method = _method_label.get(_src, _src)
+        if _method:
+            _cosmic_threshold_text = f"COSMIC threshold: tau = {_tau:.4f} ({_method})"
         else:
-            _pearson_threshold_text = "COSMIC Trust Score (similarity floor): N/A"
+            _cosmic_threshold_text = f"COSMIC threshold: tau = {_tau:.4f}"
     else:
-        _lines = ["COSMIC Trust Score (similarity floor, per H-bond group):"]
-        _lines.append("  reading: within each group, every cluster member is expected to be at least")
-        _lines.append("  the listed % similar to its representative (quantitative error margin).")
+        _lines = ["COSMIC threshold (per H-bond group):"]
         for _e in resolved_threshold_entries:
-            _label = (f"H = {_e['group_label']}" if _e['group_label'] is not None
-                      else "all")
-            if _e['r_thresh'] is not None and _e['pct_thresh'] is not None:
-                _lines.append(
-                    f"  {_label:<6} : {_e['pct_thresh']:.1f} %   "
-                    f"(tau = {_e['tau']:.4f}, r >= {_e['r_thresh']:.3f}, "
-                    f"N_f = {_e['n_eff']:.2f}, d_med = {_e['d_med']:.4f}, "
-                    f"source = {_e['source']})"
-                )
+            _label = (f"H = {_e['group_label']}" if _e['group_label'] is not None else "all")
+            _tau = _e['tau']
+            _src = _e.get('source', '')
+            _method = _method_label.get(_src, _src)
+            if _method:
+                _lines.append(f"  {_label:<6} : tau = {_tau:.4f} ({_method})")
             else:
-                _lines.append(f"  {_label:<6} : N/A")
-        _pearson_threshold_text = "\n".join(_lines)
+                _lines.append(f"  {_label:<6} : tau = {_tau:.4f}")
+        _cosmic_threshold_text = "\n".join(_lines)
+
+    # For a manually specified numeric threshold there is no auto-detection method
+    if not is_compare_mode and not resolved_threshold_entries and isinstance(threshold, (int, float)):
+        _cosmic_threshold_text = f"COSMIC threshold: tau = {threshold}"
 
     for i, line in enumerate(summary_file_content_lines):
-        if "<THRESHOLD_PEARSON_PLACEHOLDER>" in line:
-            summary_file_content_lines[i] = line.replace(
-                "<THRESHOLD_PEARSON_PLACEHOLDER>", _pearson_threshold_text)
+        if "<COSMIC_THRESHOLD_PLACEHOLDER>" in line:
+            summary_file_content_lines[i] = line.replace("<COSMIC_THRESHOLD_PLACEHOLDER>", _cosmic_threshold_text)
         if "<TOTAL_CLUSTERS_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<TOTAL_CLUSTERS_PLACEHOLDER>", str(total_clusters_outputted))
         if "<TOTAL_RMSD_OUTLIERS_PLACEHOLDER>" in line:
@@ -1386,8 +1360,6 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             summary_file_content_lines[i] = line.replace("<TOTAL_SKIPPED_PLACEHOLDER>", total_skipped_str)
         if "<IMAG_NEED_RECALC_PLACEHOLDER>" in line:
             summary_file_content_lines[i] = line.replace("<IMAG_NEED_RECALC_PLACEHOLDER>", critical_skipped_str)
-        if "<REDUCED_UNMATCHED_PLACEHOLDER>" in line:
-            summary_file_content_lines[i] = line.replace("<REDUCED_UNMATCHED_PLACEHOLDER>", reduced_unmatched_str)
 
     # Add comparison-specific details at the very end if in comparison mode
     if is_compare_mode:

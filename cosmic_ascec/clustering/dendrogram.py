@@ -21,6 +21,43 @@ import numpy as np
 
 from cosmic_ascec.clustering.thresholds import pearson_similarity_pct
 
+_CLUSTER_PALETTE = [
+    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
+    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
+    '#dcbeff', '#9a6324', '#fffac8', '#800000', '#aaffc3',
+    '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#ffffff',
+]
+_ABOVE_CUT_COLOR = '#888888'
+
+
+def _build_cluster_color_func(linkage_matrix: np.ndarray, cut_height: float):
+    """Return a link_color_func that gives each below-cut cluster a distinct color."""
+    try:
+        from scipy.cluster.hierarchy import fcluster
+    except ImportError:
+        return None
+
+    n = linkage_matrix.shape[0] + 1
+    cluster_labels = fcluster(linkage_matrix, t=cut_height, criterion='distance')
+    uniq = sorted(set(int(c) for c in cluster_labels))
+    color_map = {cid: _CLUSTER_PALETTE[i % len(_CLUSTER_PALETTE)] for i, cid in enumerate(uniq)}
+
+    # Pre-compute descendant leaf sets for every node
+    descendants: dict[int, set[int]] = {i: {i} for i in range(n)}
+    for i in range(n, n + linkage_matrix.shape[0]):
+        a, b = int(linkage_matrix[i - n][0]), int(linkage_matrix[i - n][1])
+        descendants[i] = descendants[a] | descendants[b]
+
+    def _link_color_func(k: int) -> str:
+        k = int(k)
+        leaves = descendants.get(k, set())
+        cids = {int(cluster_labels[idx]) for idx in leaves}
+        if len(cids) == 1:
+            return color_map[next(iter(cids))]
+        return _ABOVE_CUT_COLOR
+
+    return _link_color_func
+
 
 def plot_annotated_dendrogram(
     linkage_matrix: np.ndarray,
@@ -53,13 +90,21 @@ def plot_annotated_dendrogram(
         lm[:, 2] += 1e-12
 
     # --- File 1: Dendrogram ---
-    fig1, ax1 = plt.subplots(1, 1, figsize=(12, 8))
-    dendrogram(lm, labels=conf_labels, leaf_rotation=90, leaf_font_size=11, ax=ax1)
+    n_conf = len(conf_labels) if conf_labels is not None else lm.shape[0] + 1
+    # Scale figure width so labels never crowd; each leaf gets ~0.18 in, cap at 200 configs worth.
+    fig_width = max(12.0, min(n_conf * 0.18, 200 * 0.18))
+    leaf_font = 11 if n_conf <= 50 else (9 if n_conf <= 120 else 8)
 
-    cut_label = rf'Threshold $\tau$={cut_height:.2f} ($n_c$={optimal_k})'
-    ax1.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=1.5,
-                label=cut_label)
-    ax1.legend(loc='upper right', fontsize=12)
+    fig1, ax1 = plt.subplots(1, 1, figsize=(fig_width, 8))
+
+    link_color_func = _build_cluster_color_func(lm, cut_height)
+    dendro_kw: dict = dict(labels=conf_labels, leaf_rotation=90,
+                           leaf_font_size=leaf_font, ax=ax1)
+    if link_color_func is not None:
+        dendro_kw['link_color_func'] = link_color_func
+    dendrogram(lm, **dendro_kw)
+
+    ax1.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=1.5)
     ax1.set_title(f"Hierarchical Clustering Dendrogram ({title_suffix})", fontsize=16)
     ax1.set_xlabel("Configuration", fontsize=18)
     ax1.set_ylabel("UPGMA linkage distance", fontsize=18)
@@ -82,26 +127,7 @@ def plot_annotated_dendrogram(
     # reflect the size of the rendered image.
     fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
 
-    merge_indices = np.arange(1, n_merges + 1)
-
-    # Insert the exact cut-crossing point so the below-cut (blue) and
-    # above-cut (red) fills pivot on the same vertex — no white notch.
-    xf = merge_indices.astype(float)
-    hf = heights_sorted.astype(float)
-    _cross = np.where((heights_sorted[:-1] <= cut_height)
-                      & (heights_sorted[1:] > cut_height))[0]
-    if len(_cross):
-        _i = int(_cross[0])
-        _frac = (cut_height - heights_sorted[_i]) / (heights_sorted[_i + 1] - heights_sorted[_i])
-        _xc = merge_indices[_i] + _frac * (merge_indices[_i + 1] - merge_indices[_i])
-        xf = np.insert(xf, _i + 1, _xc)
-        hf = np.insert(hf, _i + 1, cut_height)
-
-    # Below-cut fill (blue) — area under the curve, capped at the cut line.
-    ax2.fill_between(xf, 0, np.minimum(hf, cut_height), alpha=0.15,
-                     color='#3498db', linewidth=0, edgecolor='none')
-    ax2.plot(merge_indices, heights_sorted, 'o-', color='#3498db', linewidth=0.9,
-             markersize=3, label='Merge heights')
+    ax2.plot([], [], ' ', label=' ')
 
     # Applied cut (red dashed) — this is the threshold the run actually used.
     n_above_cut = int(np.sum(heights_sorted > cut_height))
@@ -121,11 +147,7 @@ def plot_annotated_dendrogram(
             mojena_label += rf' ($n_c$={mojena_k})'
         ax2.plot([], [], ' ', label=mojena_label)
 
-    # Shade between-cluster region (above applied cut), interpolated at the cross.
-    ax2.fill_between(xf, cut_height, hf,
-                     where=(hf >= cut_height), interpolate=True,
-                     alpha=0.2, color='#e74c3c', linewidth=0, edgecolor='none',
-                     label='Between-cluster merges')
+    ax2.plot([], [], ' ', label=' ')
 
     ax2.set_xlabel("Merge Step (sorted)", fontsize=15)
     ax2.set_ylabel("UPGMA linkage distance", fontsize=15)
@@ -144,8 +166,8 @@ def plot_annotated_dendrogram(
         def _fmt_trust_segment(label, t_val):
             pct = pearson_similarity_pct(t_val, n_eff)
             if pct is None:
-                return f"{label} τ={t_val:.2f} → N/A"
-            return f"{label} τ={t_val:.2f} → {pct:.1f}%"
+                return f"{label} → N/A"
+            return f"{label} → {pct:.1f}%"
 
         # Always show applied; show standard only when it differs; always show Mojena if available.
         trust_segments.append(_fmt_trust_segment("Applied", cut_height))
