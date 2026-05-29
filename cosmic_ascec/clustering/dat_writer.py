@@ -207,37 +207,43 @@ def write_cluster_dat_file(
             # Dynamically detect which features are NOT available in all cluster members
             _zero_weight = {k for k, v in (weights or {}).items() if v == 0.0}
 
-            # All deviation entries: (display_name, data_extractor, feature_key_for_filter)
+            # All deviation entries: (display_name, data_extractor, feature_key_for_filter).
+            # Order and membership track feature_spec.FEATURE_COLUMNS (the cosmic
+            # vector contract) — keep them in sync; do not reintroduce lumo_energy
+            # or radius_of_gyration, which were dropped from the v04 vector.
             _deviation_entries = [
                 ("Electronic Energy (Hartree)", lambda d: d.get('final_electronic_energy'), "electronic_energy"),
                 ("Gibbs Free Energy (Hartree)", lambda d: d.get('gibbs_free_energy'), "gibbs_free_energy"),
                 ("HOMO Energy (Hartree)", lambda d: d.get('homo_energy'), "homo_energy"),
-                ("LUMO Energy (Hartree)", lambda d: d.get('lumo_energy'), "lumo_energy"),
                 ("HOMO-LUMO Gap (Hartree)", lambda d: d.get('homo_lumo_gap'), "homo_lumo_gap"),
                 ("Dipole Moment (Debye)", lambda d: d.get('dipole_moment'), "dipole_moment"),
-                ("Radius of Gyration (Å)", lambda d: d.get('radius_of_gyration'), "radius_of_gyration"),
+                ("Nuclear Repulsion (Hartree)", lambda d: d.get('vnn_nuclear_repulsion'), "vnn_nuclear_repulsion"),
+                ("First Vibrational Frequency (cm^-1)", lambda d: d.get('first_vib_freq'), "first_vib_freq"),
+                ("Last Vibrational Frequency (cm^-1)", lambda d: d.get('last_vib_freq'), "last_vib_freq"),
+                ("Number of Hydrogen Bonds", lambda d: d.get('num_hydrogen_bonds'), "num_hydrogen_bonds"),
+                ("Average H-Bond Distance (Å)", lambda d: d.get('average_hbond_distance'), "average_hbond_distance"),
+                ("Std H-Bond Distance (Å)", lambda d: d.get('std_hbond_distance'), "std_hbond_distance"),
+                ("Average H-Bond Angle (°)", lambda d: d.get('average_hbond_angle'), "average_hbond_angle"),
                 ("Rotational Constant A (cm^-1)", lambda d: d['rotational_constants'][0] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None, "rotational_constants_A"),
                 ("Rotational Constant B (cm^-1)", lambda d: d['rotational_constants'][1] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None, "rotational_constants_B"),
                 ("Rotational Constant C (cm^-1)", lambda d: d['rotational_constants'][2] if d.get('rotational_constants') is not None and isinstance(d.get('rotational_constants'), np.ndarray) and len(d.get('rotational_constants')) == 3 else None, "rotational_constants_C"),
-                ("First Vibrational Frequency (cm^-1)", lambda d: d.get('first_vib_freq'), "first_vib_freq"),
-                ("Last Vibrational Frequency (cm^-1)", lambda d: d.get('last_vib_freq'), "last_vib_freq"),
-                ("Average H-Bond Distance (Å)", lambda d: d.get('average_hbond_distance'), "average_hbond_distance"),
-                ("Average H-Bond Angle (°)", lambda d: d.get('average_hbond_angle'), "average_hbond_angle"),
             ]
 
             # Dynamically detect features not available in all cluster members
             _feat_display_map = {
                 'electronic_energy': 'Electronic Energy', 'gibbs_free_energy': 'Gibbs Free Energy',
-                'homo_energy': 'HOMO Energy', 'lumo_energy': 'LUMO Energy',
-                'homo_lumo_gap': 'HOMO-LUMO Gap', 'dipole_moment': 'Dipole Moment',
-                'radius_of_gyration': 'Radius of Gyration',
+                'homo_energy': 'HOMO Energy', 'homo_lumo_gap': 'HOMO-LUMO Gap',
+                'dipole_moment': 'Dipole Moment',
+                'vnn_nuclear_repulsion': 'Nuclear Repulsion',
+                'first_vib_freq': 'First Vibrational Frequency',
+                'last_vib_freq': 'Last Vibrational Frequency',
+                'num_hydrogen_bonds': 'Number of Hydrogen Bonds',
+                'average_hbond_distance': 'Average H-Bond Distance',
+                'std_hbond_distance': 'Std H-Bond Distance',
+                'average_hbond_angle': 'Average H-Bond Angle',
                 'rotational_constants_A': 'Rotational Constant A',
                 'rotational_constants_B': 'Rotational Constant B',
                 'rotational_constants_C': 'Rotational Constant C',
-                'first_vib_freq': 'First Vibrational Frequency',
-                'last_vib_freq': 'Last Vibrational Frequency',
-                'average_hbond_distance': 'Average H-Bond Distance',
-                'average_hbond_angle': 'Average H-Bond Angle',
             }
             _missing_features = set()
             for _, extractor, feat_key in _deviation_entries:
@@ -265,17 +271,18 @@ def write_cluster_dat_file(
                 ("electronic_energy", "Electronic Energy", "final_electronic_energy"),
                 ("gibbs_free_energy", "Gibbs Free Energy", "gibbs_free_energy"),
                 ("homo_energy", "HOMO Energy", "homo_energy"),
-                ("lumo_energy", "LUMO Energy", "lumo_energy"),
                 ("homo_lumo_gap", "HOMO-LUMO Gap", "homo_lumo_gap"),
                 ("dipole_moment", "Dipole Moment", "dipole_moment"),
-                ("radius_of_gyration", "Radius of Gyration", "radius_of_gyration"),
+                ("vnn_nuclear_repulsion", "Nuclear Repulsion", "vnn_nuclear_repulsion"),
+                ("first_vib_freq", "First Vibrational Frequency", "first_vib_freq"),
+                ("last_vib_freq", "Last Vibrational Frequency", "last_vib_freq"),
+                ("num_hydrogen_bonds", "Number of Hydrogen Bonds", "num_hydrogen_bonds"),
+                ("average_hbond_distance", "Average H-Bond Distance", "average_hbond_distance"),
+                ("std_hbond_distance", "Std H-Bond Distance", "std_hbond_distance"),
+                ("average_hbond_angle", "Average H-Bond Angle", "average_hbond_angle"),
                 ("rotational_constants_A", "Rotational Constant A", "rotational_constants"),
                 ("rotational_constants_B", "Rotational Constant B", "rotational_constants"),
                 ("rotational_constants_C", "Rotational Constant C", "rotational_constants"),
-                ("first_vib_freq", "First Vibrational Frequency", "first_vib_freq"),
-                ("last_vib_freq", "Last Vibrational Frequency", "last_vib_freq"),
-                ("average_hbond_distance", "Average H-Bond Distance", "average_hbond_distance"),
-                ("average_hbond_angle", "Average H-Bond Angle", "average_hbond_angle")
             ]
             # Filter out all excluded features (freq-dependent + zero-weight)
             weight_display_order = [(k, dn, dk) for k, dn, dk in weight_display_order if k not in _all_excluded]
@@ -331,8 +338,8 @@ def write_cluster_dat_file(
                 lambda value: f"{value:.6f} Hartree ({hartree_to_kcal_mol(value):.2f} kcal/mol, {hartree_to_ev(value):.2f} eV)"
             )
             write_scalar_descriptor_line(f, "HOMO Energy (Hartree)", mol_data.get('homo_energy'), lambda value: f"{value:.6f}")
-            write_scalar_descriptor_line(f, "LUMO Energy (Hartree)", mol_data.get('lumo_energy'), lambda value: f"{value:.6f}")
             write_scalar_descriptor_line(f, "HOMO-LUMO Gap (Hartree)", mol_data.get('homo_lumo_gap'), lambda value: f"{value / HARTREE_TO_EV:.6f}")
+            write_scalar_descriptor_line(f, "Nuclear Repulsion (Hartree)", mol_data.get('vnn_nuclear_repulsion'), lambda value: f"{value:.6f}")
         f.write("\n")
 
         f.write("Molecular configuration descriptors:\n")
@@ -344,8 +351,8 @@ def write_cluster_dat_file(
                 f.write(f"        Rotational Constants (cm^-1): {rc[0]:.6f}, {rc[1]:.6f}, {rc[2]:.6f}\n")
             else:
                 f.write("        Rotational Constants (cm^-1): N/A\n")
-            write_scalar_descriptor_line(f, "Radius of Gyration (Å)", mol_data.get('radius_of_gyration'), lambda value: f"{value:.6f}")
             write_scalar_descriptor_line(f, "Average H-Bond Distance (Å)", mol_data.get('average_hbond_distance'), lambda value: f"{value:.6f}")
+            write_scalar_descriptor_line(f, "Std H-Bond Distance (Å)", mol_data.get('std_hbond_distance'), lambda value: f"{value:.6f}")
             write_scalar_descriptor_line(f, "Average H-Bond Angle (°)", mol_data.get('average_hbond_angle'), lambda value: f"{value:.6f}")
             write_scalar_descriptor_line(f, "Number of Hydrogen Bonds", mol_data.get('num_hydrogen_bonds'), lambda value: f"{int(value)}")
         f.write("\n")
