@@ -132,79 +132,87 @@ def plot_annotated_dendrogram(
         return
 
     diag_filename = os.path.join(os.path.dirname(filename), "threshold_diagnostic.png")
-
-    # Match dpi to savefig dpi so on-canvas window_extent measurements
-    # reflect the size of the rendered image.
     fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
 
-    ax2.plot([], [], ' ', label=' ')
+    merge_idx = np.arange(1, n_merges + 1)
 
-    # Sorted merge-height curve — anchors the x-axis.
-    x = np.arange(n_merges)
-    ax2.plot(x, heights_sorted, color='#4878a8', linewidth=1.5,
-             marker='o', markersize=3, label='Merge heights (sorted)')
-    ax2.set_xlim(0, n_merges - 1)
+    # Interpolate the exact cut-crossing point so both fills share a clean vertex.
+    xf = merge_idx.astype(float)
+    hf = heights_sorted.astype(float)
+    _cross = np.where(
+        (heights_sorted[:-1] <= cut_height) & (heights_sorted[1:] > cut_height)
+    )[0]
+    if len(_cross):
+        _i = int(_cross[0])
+        _frac = (cut_height - heights_sorted[_i]) / (heights_sorted[_i + 1] - heights_sorted[_i])
+        _xc = merge_idx[_i] + _frac * (merge_idx[_i + 1] - merge_idx[_i])
+        xf = np.insert(xf, _i + 1, _xc)
+        hf = np.insert(hf, _i + 1, cut_height)
 
-    # Applied cut (red dashed) — this is the threshold the run actually used.
+    # Shadow below the cut (blue) and above the cut (red).
+    ax2.fill_between(xf, 0, np.minimum(hf, cut_height),
+                     alpha=0.15, color='#3498db', linewidth=0, edgecolor='none')
+    ax2.fill_between(xf, cut_height, hf, where=(hf >= cut_height), interpolate=True,
+                     alpha=0.20, color='#e74c3c', linewidth=0, edgecolor='none',
+                     label='Between-cluster merges')
+
+    # Merge-height curve — not added to the legend.
+    ax2.plot(merge_idx, heights_sorted, 'o-', color='#3498db',
+             linewidth=0.9, markersize=3)
+
     n_above_cut = int(np.sum(heights_sorted > cut_height))
     ax2.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=2,
                 label=rf'Applied cut $\tau$={cut_height:.2f} ($n_c$={n_above_cut + 1})')
 
-    # Standard τ=2.0 reference — listed in the legend for comparison, not drawn.
     STANDARD_T = 2.0
     n_standard = int(np.sum(heights_sorted > STANDARD_T)) + 1
-    ax2.plot([], [], ' ',
-             label=rf'Standard $\tau$=2.00 ($n_c$={n_standard})')
+    ax2.axhline(y=STANDARD_T, color='#1e8449', linestyle=':', linewidth=1.6,
+                label=rf'Standard $\tau$=2.00 ($n_c$={n_standard})')
 
-    # Mojena reference — listed in the legend for comparison, not drawn on the axes.
     if mojena_threshold is not None:
-        mojena_label = rf'Mojena $\tau$={mojena_threshold:.2f}'
-        if mojena_k is not None:
-            mojena_label += rf' ($n_c$={mojena_k})'
-        ax2.plot([], [], ' ', label=mojena_label)
-
-    ax2.plot([], [], ' ', label=' ')
+        _moj_k = mojena_k if mojena_k is not None else int(np.sum(heights_sorted > mojena_threshold)) + 1
+        ax2.axhline(y=mojena_threshold, color='#1a5276', linestyle='-.', linewidth=1.6,
+                    label=rf'Mojena $\tau$={mojena_threshold:.2f} ($n_c$={_moj_k})')
 
     ax2.set_xlabel("Merge Step (sorted)", fontsize=15)
     ax2.set_ylabel("UPGMA linkage distance", fontsize=15)
     ax2.set_title("Threshold Diagnostic (Merge Height Distribution)", fontsize=16)
     ax2.tick_params(labelsize=13)
     ax2.yaxis.set_major_formatter(_mticker.FormatStrFormatter('%.1f'))
-    leg_main = ax2.legend(loc='upper left', fontsize=12)
+    ax2.set_xlim(1, n_merges)
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
-    # Pearson similarity (for the applied threshold and a reference threshold).
+    leg_main = ax2.legend(loc='upper left', fontsize=12,
+                          borderpad=0.45, labelspacing=0.45)
+    fig2.tight_layout()
+
+    # Similarity-floor legend, anchored to the right of the main legend.
     trust_segments = []
     if n_eff is not None and n_eff > 0:
-        applied_is_standard = abs(cut_height - STANDARD_T) <= 1e-6
-
         def _fmt_trust_segment(label, t_val):
             pct = pearson_similarity_pct(t_val, n_eff)
             if pct is None:
-                return f"{label} → N/A"
-            return f"{label} → {pct:.1f}%"
+                return f"{label} τ={t_val:.2f} → N/A"
+            return f"{label} τ={t_val:.2f} → {pct:.1f}%"
 
-        # Always show applied; show standard only when it differs; always show Mojena if available.
         trust_segments.append(_fmt_trust_segment("Applied", cut_height))
-        if not applied_is_standard:
-            trust_segments.append(_fmt_trust_segment("Standard", STANDARD_T))
+        trust_segments.append(_fmt_trust_segment("Standard", STANDARD_T))
         if mojena_threshold is not None:
             trust_segments.append(_fmt_trust_segment("Mojena", float(mojena_threshold)))
-
-    # Run tight_layout BEFORE measuring the main legend.
-    fig2.tight_layout()
+        trust_segments.append(" ")  # blank row to balance box height
 
     if trust_segments:
-        # Anchor the second legend just to the right of the main legend.
         fig2.canvas.draw()
         ax2.add_artist(leg_main)
         leg_bbox_axes = leg_main.get_window_extent().transformed(
             ax2.transAxes.inverted())
-        trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.55)
+        trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.60)
         trust_anchor_y = leg_bbox_axes.y1
 
-        _trust_kwargs = dict(
+        ax2.legend(
+            handles=[Patch(visible=False) for _ in trust_segments],
+            labels=trust_segments,
             loc='upper left',
             bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
             bbox_transform=ax2.transAxes,
@@ -213,33 +221,9 @@ def plot_annotated_dendrogram(
             title_fontsize=12,
             handlelength=0, handletextpad=0,
             borderaxespad=0,
-            borderpad=0.4,
+            borderpad=0.45,
+            labelspacing=0.58,
         )
-        _trust_handles = [Patch(visible=False) for _ in trust_segments]
-        trust_leg = ax2.legend(handles=_trust_handles, labels=trust_segments,
-                               **_trust_kwargs)
-
-        # Iterate the trust legend's borderpad until both boxes reach the
-        # same pixel height.
-        fontsize_px = 12 * fig2.dpi / 72
-        fig2.canvas.draw()
-        trust_bp = 0.4
-        for _ in range(12):
-            h_main = leg_main.get_window_extent().height
-            h_trust = trust_leg.get_window_extent().height
-            delta_px = h_main - h_trust
-            if abs(delta_px) <= 0.5:
-                break
-            new_bp = max(0.1, trust_bp + delta_px / (2 * fontsize_px))
-            if abs(new_bp - trust_bp) < 0.002:
-                break
-            trust_leg.remove()
-            _trust_kwargs['borderpad'] = new_bp
-            trust_leg = ax2.legend(
-                handles=[Patch(visible=False) for _ in trust_segments],
-                labels=trust_segments, **_trust_kwargs)
-            trust_bp = new_bp
-            fig2.canvas.draw()
 
     fig2.savefig(diag_filename, dpi=150)
     plt.close(fig2)
