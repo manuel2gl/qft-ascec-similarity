@@ -21,13 +21,20 @@ import numpy as np
 
 from cosmic_ascec.clustering.thresholds import pearson_similarity_pct
 
+# 8 professional muted-dark colors; repeated with stride 3 (coprime with 8)
+# so consecutive clusters never share adjacent palette entries.
 _CLUSTER_PALETTE = [
-    '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
-    '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
-    '#dcbeff', '#9a6324', '#fffac8', '#800000', '#aaffc3',
-    '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#ffffff',
+    '#4878a8',  # steel blue
+    '#b85450',  # brick red
+    '#5a9e72',  # sage green
+    '#8b6ab5',  # dusty violet
+    '#c47d3a',  # warm ochre
+    '#3a8f8f',  # dark teal
+    '#b5607a',  # mauve
+    '#7a8f3a',  # olive
 ]
-_ABOVE_CUT_COLOR = '#888888'
+_PALETTE_STRIDE = 3   # gcd(3, 8) == 1 → non-consecutive repetition
+_ABOVE_CUT_COLOR = '#aaaaaa'
 
 
 def _build_cluster_colors(linkage_matrix: np.ndarray, cut_height: float):
@@ -40,7 +47,8 @@ def _build_cluster_colors(linkage_matrix: np.ndarray, cut_height: float):
     n = linkage_matrix.shape[0] + 1
     cluster_labels = fcluster(linkage_matrix, t=cut_height, criterion='distance')
     uniq = sorted(set(int(c) for c in cluster_labels))
-    color_map = {cid: _CLUSTER_PALETTE[i % len(_CLUSTER_PALETTE)] for i, cid in enumerate(uniq)}
+    p = len(_CLUSTER_PALETTE)
+    color_map = {cid: _CLUSTER_PALETTE[(i * _PALETTE_STRIDE) % p] for i, cid in enumerate(uniq)}
 
     descendants: dict[int, set[int]] = {i: {i} for i in range(n)}
     for i in range(n, n + linkage_matrix.shape[0]):
@@ -71,26 +79,25 @@ def _find_color(x_color: dict, x: float, eps: float = 0.5):
 
 def _overlay_cluster_extensions(ax, dendro_data, cut_height: float,
                                  color_map: dict, cluster_labels) -> None:
-    """Draw each cluster's color up the vertical and halfway along the first above-cut horizontal.
+    """Extend each cluster's color up the vertical leg to the first above-cut merge.
 
-    scipy colors the entire U-shape (both legs + bar) with one color from link_color_func,
-    so above-cut merges that join different clusters are drawn gray.  This function
-    overlays colored segments on top: for every side of an above-cut merge whose direct
-    child is a below-cut cluster, it re-draws the vertical leg (from child-top to merge
-    height) and the half-horizontal (from that leg to the bar midpoint) in the cluster's
-    color.
+    scipy draws the entire U-shape (both legs + horizontal) in one color from
+    link_color_func, so above-cut merges spanning multiple clusters come out gray.
+    This overlays a colored vertical on top: for every side of an above-cut merge
+    whose direct child is a below-cut cluster, re-draw only that vertical leg
+    (child-top → merge height) in the cluster's color.
     """
-    icoord = dendro_data['icoord']   # list of [x0, x1, x2, x3]; x0==x1, x2==x3
-    dcoord = dendro_data['dcoord']   # list of [y0, y1, y2, y3]; y1==y2 = merge height
+    icoord = dendro_data['icoord']   # [x0, x1, x2, x3]; x0==x1, x2==x3
+    dcoord = dendro_data['dcoord']   # [y0, y1, y2, y3]; y1==y2 = merge height
     leaves = dendro_data['leaves']   # leaf indices in left→right display order
 
-    # Build x → cluster_color for all below-cut subtree "tops".
+    # x → color for every below-cut subtree top.
     # Leaves sit at x = 5 + 10*order (scipy default spacing).
     x_color: dict[float, str] = {}
     for order, leaf_idx in enumerate(leaves):
         x_color[5.0 + 10.0 * order] = color_map[int(cluster_labels[leaf_idx])]
 
-    # Propagate colors upward through below-cut merges (process low→high so children first).
+    # Propagate colors upward through below-cut merges (low→high so children first).
     for xs, ys in sorted(zip(icoord, dcoord), key=lambda p: p[1][1]):
         if ys[1] > cut_height:
             continue
@@ -99,24 +106,20 @@ def _overlay_cluster_extensions(ax, dendro_data, cut_height: float,
             x_color[(xs[1] + xs[2]) / 2.0] = color
 
     lw = 1.5
-    # Overlay colored segments for each below-cut child of an above-cut merge.
     for xs, ys in zip(icoord, dcoord):
         merge_h = ys[1]
         if merge_h <= cut_height:
             continue
-        x_mid = (xs[1] + xs[2]) / 2.0
 
         if ys[0] <= cut_height:
             c = _find_color(x_color, xs[0])
             if c:
                 ax.plot([xs[0], xs[0]], [ys[0], merge_h], color=c, lw=lw, zorder=5)
-                ax.plot([xs[1], x_mid],  [merge_h, merge_h], color=c, lw=lw, zorder=5)
 
         if ys[3] <= cut_height:
             c = _find_color(x_color, xs[3])
             if c:
                 ax.plot([xs[3], xs[3]], [ys[3], merge_h], color=c, lw=lw, zorder=5)
-                ax.plot([x_mid, xs[2]],  [merge_h, merge_h], color=c, lw=lw, zorder=5)
 
 
 def plot_annotated_dendrogram(
