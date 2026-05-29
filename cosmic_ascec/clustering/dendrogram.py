@@ -43,6 +43,7 @@ def plot_annotated_dendrogram(
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
+    import matplotlib.ticker as _mticker
     from matplotlib.patches import Patch
     from scipy.cluster.hierarchy import dendrogram
 
@@ -53,15 +54,17 @@ def plot_annotated_dendrogram(
 
     # --- File 1: Dendrogram ---
     fig1, ax1 = plt.subplots(1, 1, figsize=(12, 8))
-    dendrogram(lm, labels=conf_labels, leaf_rotation=90, leaf_font_size=8, ax=ax1)
+    dendrogram(lm, labels=conf_labels, leaf_rotation=90, leaf_font_size=11, ax=ax1)
 
     cut_label = rf'Threshold $\tau$={cut_height:.2f} ($n_c$={optimal_k})'
     ax1.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=1.5,
                 label=cut_label)
-    ax1.legend(loc='upper right', fontsize=9)
-    ax1.set_title(f"Hierarchical Clustering Dendrogram ({title_suffix})")
-    ax1.set_xlabel("Configuration")
-    ax1.set_ylabel("UPGMA Distance (Z-standardized)")
+    ax1.legend(loc='upper right', fontsize=12)
+    ax1.set_title(f"Hierarchical Clustering Dendrogram ({title_suffix})", fontsize=16)
+    ax1.set_xlabel("Configuration", fontsize=18)
+    ax1.set_ylabel("UPGMA linkage distance", fontsize=18)
+    ax1.tick_params(axis='y', labelsize=16)
+    ax1.yaxis.set_major_formatter(_mticker.FormatStrFormatter('%.1f'))
     ax1.set_ylim(bottom=0)
     fig1.tight_layout()
     fig1.savefig(filename, dpi=150)
@@ -80,7 +83,23 @@ def plot_annotated_dendrogram(
     fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
 
     merge_indices = np.arange(1, n_merges + 1)
-    ax2.fill_between(merge_indices, 0, heights_sorted, alpha=0.15, color='#3498db')
+
+    # Insert the exact cut-crossing point so the below-cut (blue) and
+    # above-cut (red) fills pivot on the same vertex — no white notch.
+    xf = merge_indices.astype(float)
+    hf = heights_sorted.astype(float)
+    _cross = np.where((heights_sorted[:-1] <= cut_height)
+                      & (heights_sorted[1:] > cut_height))[0]
+    if len(_cross):
+        _i = int(_cross[0])
+        _frac = (cut_height - heights_sorted[_i]) / (heights_sorted[_i + 1] - heights_sorted[_i])
+        _xc = merge_indices[_i] + _frac * (merge_indices[_i + 1] - merge_indices[_i])
+        xf = np.insert(xf, _i + 1, _xc)
+        hf = np.insert(hf, _i + 1, cut_height)
+
+    # Below-cut fill (blue) — area under the curve, capped at the cut line.
+    ax2.fill_between(xf, 0, np.minimum(hf, cut_height), alpha=0.15,
+                     color='#3498db', linewidth=0, edgecolor='none')
     ax2.plot(merge_indices, heights_sorted, 'o-', color='#3498db', linewidth=0.9,
              markersize=3, label='Merge heights')
 
@@ -102,15 +121,18 @@ def plot_annotated_dendrogram(
             mojena_label += rf' ($n_c$={mojena_k})'
         ax2.plot([], [], ' ', label=mojena_label)
 
-    # Shade between-cluster region (above applied cut)
-    ax2.fill_between(merge_indices, cut_height, heights_sorted,
-                     where=(heights_sorted > cut_height),
-                     alpha=0.2, color='#e74c3c', label='Between-cluster merges')
+    # Shade between-cluster region (above applied cut), interpolated at the cross.
+    ax2.fill_between(xf, cut_height, hf,
+                     where=(hf >= cut_height), interpolate=True,
+                     alpha=0.2, color='#e74c3c', linewidth=0, edgecolor='none',
+                     label='Between-cluster merges')
 
-    ax2.set_xlabel("Merge Step (sorted)")
-    ax2.set_ylabel("UPGMA Merge Height")
-    ax2.set_title("Threshold Diagnostic (Merge Height Distribution)")
-    leg_main = ax2.legend(loc='upper left', fontsize=9)
+    ax2.set_xlabel("Merge Step (sorted)", fontsize=15)
+    ax2.set_ylabel("UPGMA linkage distance", fontsize=15)
+    ax2.set_title("Threshold Diagnostic (Merge Height Distribution)", fontsize=16)
+    ax2.tick_params(labelsize=13)
+    ax2.yaxis.set_major_formatter(_mticker.FormatStrFormatter('%.1f'))
+    leg_main = ax2.legend(loc='upper left', fontsize=12)
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
@@ -148,9 +170,9 @@ def plot_annotated_dendrogram(
             loc='upper left',
             bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
             bbox_transform=ax2.transAxes,
-            fontsize=9,
+            fontsize=12,
             title='Similarity floor',
-            title_fontsize=9,
+            title_fontsize=12,
             handlelength=0, handletextpad=0,
             borderaxespad=0,
             borderpad=0.4,
@@ -161,7 +183,7 @@ def plot_annotated_dendrogram(
 
         # Iterate the trust legend's borderpad until both boxes reach the
         # same pixel height.
-        fontsize_px = 9 * fig2.dpi / 72
+        fontsize_px = 12 * fig2.dpi / 72
         fig2.canvas.draw()
         trust_bp = 0.4
         for _ in range(12):
