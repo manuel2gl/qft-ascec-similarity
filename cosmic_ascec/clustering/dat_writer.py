@@ -27,7 +27,6 @@ from cosmic_ascec.clustering.energies import (
 from cosmic_ascec.clustering.features.geometric import atomic_number_to_symbol
 from cosmic_ascec.clustering.rmsd import calculate_rmsd
 from cosmic_ascec.clustering.thresholds import (
-    pearson_r_from_distance as _pearson_r_from_distance,
     pearson_similarity_pct as _pearson_similarity_pct,
 )
 
@@ -47,7 +46,10 @@ def write_cluster_dat_file(
     Writes combined .dat file for cluster members, including comparison and
     RMSD context sections.
 
-    Verbatim port of cosmic-v01's ``write_cluster_dat_file`` (lines 2697-3155).
+    Ported from cosmic-v01's ``write_cluster_dat_file`` (lines 2697-3155), with
+    a condensed Pearson trust-score block (intro + similarity floor only) and a
+    deviation analysis restricted to the active reduced feature vector
+    (unused / N/A features are omitted rather than printed as ``N/A``).
     """
     if weights is None:
         weights = {}
@@ -165,41 +167,16 @@ def write_cluster_dat_file(
             f.write("  Each cluster has a representative (the lowest-energy member).\n")
             f.write("  For every member we measure how similar it is to that representative\n")
             f.write("  using the Pearson identity derived from the weighted, z-standardised\n")
-            f.write("  feature vectors (see cosmic_methodology.tex, sec. 'Relationship to\n")
-            f.write("  Pearson Correlation'):\n")
-            f.write("\n")
-            f.write("      r          = 1 - d^2 / (2 * N_f)     (Pearson correlation)\n")
-            f.write("      similarity = max(0, r) x 100%        (clamped to [0, 100] %)\n")
-            f.write("\n")
-            f.write("  d       : weighted Euclidean distance between member and representative\n")
-            f.write("  N_f     : effective number of features (sum of squared weights after\n")
-            f.write("            z-standardisation; equals the feature count when all w_k=1).\n")
-            f.write("            Symbol chosen to avoid clash with the cluster count.\n")
-            f.write("  r       : Pearson correlation coefficient in [-1, 1]\n")
-            f.write("  t       : clustering threshold (cut height on the dendrogram)\n")
+            f.write("  feature vectors.\n")
             f.write("\n")
 
             if tau_val is not None and n_eff_val:
-                r_th = _pearson_r_from_distance(tau_val, n_eff_val)
                 pct_th = _pearson_similarity_pct(tau_val, n_eff_val)
             else:
-                r_th = None
                 pct_th = None
 
-            if tau_val is not None and n_eff_val and r_th is not None and pct_th is not None:
-                f.write("  Threshold (same for every cluster in this run):\n")
-                f.write(f"      t              = {tau_val:.3f}\n")
-                f.write(f"      N_f            = {n_eff_val:.2f}\n")
-                f.write(f"      Pearson r >=   = {r_th:.3f}     (boundary value implied by t)\n")
-                f.write(f"      Similarity >=  = {pct_th:.1f} %    <-- COSMIC Trust Score\n")
-                f.write("\n")
-                f.write(f"  Reading: every member of this cluster is expected to be\n")
-                f.write(f"  at least {pct_th:.1f} % similar to the representative.\n")
-                f.write(f"  This is the quantitative error margin of the clustering.\n")
-                f.write("\n")
-
-            if rep_filename:
-                f.write(f"  Representative   : {rep_filename}\n")
+            if pct_th is not None:
+                f.write(f"      Similarity floor: {pct_th:.1f}%\n")
                 f.write("\n")
 
             f.write("  Per-member similarity to representative:\n")
@@ -276,13 +253,12 @@ def write_cluster_dat_file(
 
             f.write("\nDeviation Analysis (Max-Min / |Mean|):\n")
             for display_name, extractor, feat_key in _deviation_entries:
-                if feat_key in _zero_weight:
+                # Only report features that are actually part of the reduced
+                # vector: skip both zero-weight and missing (N/A) features.
+                if feat_key in _all_excluded:
                     continue
                 values = [extractor(d) for d in cluster_members_data]
-                if feat_key in _missing_features:
-                    f.write(f"  {display_name} %Dev: N/A\n")
-                else:
-                    write_deviation_line(f, display_name, values)
+                write_deviation_line(f, display_name, values)
 
             # --- Weights and tolerances display order ---
             weight_display_order = [
