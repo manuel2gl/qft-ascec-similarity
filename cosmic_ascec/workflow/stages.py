@@ -9896,7 +9896,8 @@ def generate_protocol_summary(cache_file: str = "protocol_cache.pkl",
         with open(output_file, 'w') as f:
             # Header
             f.write("=" * 75 + "\n")
-            f.write(center_text("A S C E C") + "\n")
+            f.write(center_text("C O S M I C  A S C E C") + "\n")
+            f.write(center_text("Configurational Similarity via Motif Identification Code") + "\n")
             f.write(center_text("Annealing Simulado Con Energía Cuántica") + "\n")
             f.write(center_text("Universidad de Antioquia - QFT") + "\n")
             f.write("=" * 75 + "\n\n")
