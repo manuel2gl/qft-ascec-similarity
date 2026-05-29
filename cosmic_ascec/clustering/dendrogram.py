@@ -105,21 +105,25 @@ def _overlay_cluster_extensions(ax, dendro_data, cut_height: float,
         if color:
             x_color[(xs[1] + xs[2]) / 2.0] = color
 
-    lw = 1.5
+    lw = 2.0
+    y_max = max((ys[1] for ys in dcoord), default=1.0)
+    gap = y_max * 0.025   # small gap so the colored vertical doesn't touch the horizontal bar
+
     for xs, ys in zip(icoord, dcoord):
         merge_h = ys[1]
         if merge_h <= cut_height:
             continue
+        top = merge_h - gap
 
         if ys[0] <= cut_height:
             c = _find_color(x_color, xs[0])
-            if c:
-                ax.plot([xs[0], xs[0]], [ys[0], merge_h], color=c, lw=lw, zorder=5)
+            if c and top > ys[0]:
+                ax.plot([xs[0], xs[0]], [ys[0], top], color=c, lw=lw, zorder=5)
 
         if ys[3] <= cut_height:
             c = _find_color(x_color, xs[3])
-            if c:
-                ax.plot([xs[3], xs[3]], [ys[3], merge_h], color=c, lw=lw, zorder=5)
+            if c and top > ys[3]:
+                ax.plot([xs[3], xs[3]], [ys[3], top], color=c, lw=lw, zorder=5)
 
 
 def plot_annotated_dendrogram(
@@ -164,7 +168,11 @@ def plot_annotated_dendrogram(
                            leaf_font_size=leaf_font, ax=ax1)
     if color_data is not None:
         dendro_kw['link_color_func'] = color_data[0]
+    _lines_before = set(id(l) for l in ax1.get_lines())
     dendro_data = dendrogram(lm, **dendro_kw)
+    for _l in ax1.get_lines():
+        if id(_l) not in _lines_before:
+            _l.set_linewidth(2.0)
 
     if color_data is not None:
         _overlay_cluster_extensions(ax1, dendro_data, cut_height, color_data[1], color_data[2])
