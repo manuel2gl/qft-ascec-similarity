@@ -139,6 +139,12 @@ def plot_annotated_dendrogram(
 
     ax2.plot([], [], ' ', label=' ')
 
+    # Sorted merge-height curve — anchors the x-axis.
+    x = np.arange(n_merges)
+    ax2.plot(x, heights_sorted, color='#4878a8', linewidth=1.5,
+             marker='o', markersize=3, label='Merge heights (sorted)')
+    ax2.set_xlim(0, n_merges - 1)
+
     # Applied cut (red dashed) — this is the threshold the run actually used.
     n_above_cut = int(np.sum(heights_sorted > cut_height))
     ax2.axhline(y=cut_height, color='#e74c3c', linestyle='--', linewidth=2,
