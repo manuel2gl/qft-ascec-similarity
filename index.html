@@ -3902,8 +3902,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <input type="number" id="adv-weight-homo-energy" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>LUMO Energy</label>
-                            <input type="number" id="adv-weight-lumo-energy" value="1.0" step="0.1" oninput="updateAllPreviews()">
+                            <label>V<sub>NN</sub> Nuclear Rep</label>
+                            <input type="number" id="adv-weight-vnn-nuclear-repulsion" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
                     </div>
                     <div class="form-row-4">
@@ -3916,8 +3916,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <input type="number" id="adv-weight-dipole-moment" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Radius of Gyration</label>
-                            <input type="number" id="adv-weight-radius-of-gyration" value="1.0" step="0.1" oninput="updateAllPreviews()">
+                            <label>Num H-Bonds</label>
+                            <input type="number" id="adv-weight-num-hydrogen-bonds" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
                             <label>Rot. Const A</label>
@@ -3948,6 +3948,10 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <input type="number" id="adv-weight-average-hbond-distance" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
+                            <label>Std H-Bond Dist</label>
+                            <input type="number" id="adv-weight-std-hbond-distance" value="1.0" step="0.1" oninput="updateAllPreviews()">
+                        </div>
+                        <div class="form-group">
                             <label>Avg H-Bond Angle</label>
                             <input type="number" id="adv-weight-average-hbond-angle" value="1.0" step="0.1" oninput="updateAllPreviews()">
                         </div>
@@ -3970,8 +3974,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <input type="number" id="adv-tol-homo-energy" value="3e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>LUMO E (eV)</label>
-                            <input type="number" id="adv-tol-lumo-energy" value="2e-4" step="any" oninput="updateAllPreviews()">
+                            <label>V<sub>NN</sub> (Eh)</label>
+                            <input type="number" id="adv-tol-vnn-nuclear-repulsion" value="1e-4" step="any" oninput="updateAllPreviews()">
                         </div>
                     </div>
                     <div class="form-row-4">
@@ -3984,8 +3988,8 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                             <input type="number" id="adv-tol-dipole-moment" value="1.5e-3" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
-                            <label>Radius Gyr. (Å)</label>
-                            <input type="number" id="adv-tol-radius-of-gyration" value="1.5e-4" step="any" oninput="updateAllPreviews()">
+                            <label>Num H-Bonds</label>
+                            <input type="number" id="adv-tol-num-hydrogen-bonds" value="0.5" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
                             <label>Rot. A (GHz)</label>
@@ -4014,6 +4018,10 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={3(e,t,i){v
                         <div class="form-group">
                             <label>Avg HB Dist (Å)</label>
                             <input type="number" id="adv-tol-average-hbond-distance" value="1e-3" step="any" oninput="updateAllPreviews()">
+                        </div>
+                        <div class="form-group">
+                            <label>Std HB Dist (Å)</label>
+                            <input type="number" id="adv-tol-std-hbond-distance" value="1e-3" step="any" oninput="updateAllPreviews()">
                         </div>
                         <div class="form-group">
                             <label>Avg HB Angle (deg)</label>
@@ -4377,68 +4385,72 @@ H  -0.757000  0.586000  0.000000"></textarea>
             electronic_energy: 1.0,
             gibbs_free_energy: 1.0,
             homo_energy: 1.0,
-            lumo_energy: 1.0,
             homo_lumo_gap: 1.0,
             dipole_moment: 1.0,
-            radius_of_gyration: 1.0,
-            rotational_constants_A: 1.0,
-            rotational_constants_B: 1.0,
-            rotational_constants_C: 1.0,
+            vnn_nuclear_repulsion: 1.0,
             first_vib_freq: 1.0,
             last_vib_freq: 1.0,
+            num_hydrogen_bonds: 1.0,
             average_hbond_distance: 1.0,
-            average_hbond_angle: 1.0
+            std_hbond_distance: 1.0,
+            average_hbond_angle: 1.0,
+            rotational_constants_A: 1.0,
+            rotational_constants_B: 1.0,
+            rotational_constants_C: 1.0
         };
 
         const COSMIC_DEFAULT_TOLERANCES = {
             electronic_energy: 5e-6,
             gibbs_free_energy: 5e-6,
             homo_energy: 3e-4,
-            lumo_energy: 2e-4,
             homo_lumo_gap: 3e-4,
             dipole_moment: 1.5e-3,
-            radius_of_gyration: 1.5e-4,
-            rotational_constants_A: 7e-5,
-            rotational_constants_B: 3.5e-4,
-            rotational_constants_C: 3e-4,
+            vnn_nuclear_repulsion: 1e-4,
             first_vib_freq: 1e-2,
             last_vib_freq: 0.3,
+            num_hydrogen_bonds: 0.5,
             average_hbond_distance: 1e-3,
-            average_hbond_angle: 0.1
+            std_hbond_distance: 1e-3,
+            average_hbond_angle: 0.1,
+            rotational_constants_A: 7e-5,
+            rotational_constants_B: 3.5e-4,
+            rotational_constants_C: 3e-4
         };
 
         const COSMIC_WEIGHT_INPUTS = [
             { key: 'electronic_energy', id: 'adv-weight-electronic-energy' },
             { key: 'gibbs_free_energy', id: 'adv-weight-gibbs-free-energy' },
             { key: 'homo_energy', id: 'adv-weight-homo-energy' },
-            { key: 'lumo_energy', id: 'adv-weight-lumo-energy' },
             { key: 'homo_lumo_gap', id: 'adv-weight-homo-lumo-gap' },
             { key: 'dipole_moment', id: 'adv-weight-dipole-moment' },
-            { key: 'radius_of_gyration', id: 'adv-weight-radius-of-gyration' },
-            { key: 'rotational_constants_A', id: 'adv-weight-rotational-constants-a' },
-            { key: 'rotational_constants_B', id: 'adv-weight-rotational-constants-b' },
-            { key: 'rotational_constants_C', id: 'adv-weight-rotational-constants-c' },
+            { key: 'vnn_nuclear_repulsion', id: 'adv-weight-vnn-nuclear-repulsion' },
             { key: 'first_vib_freq', id: 'adv-weight-first-vib-freq' },
             { key: 'last_vib_freq', id: 'adv-weight-last-vib-freq' },
+            { key: 'num_hydrogen_bonds', id: 'adv-weight-num-hydrogen-bonds' },
             { key: 'average_hbond_distance', id: 'adv-weight-average-hbond-distance' },
-            { key: 'average_hbond_angle', id: 'adv-weight-average-hbond-angle' }
+            { key: 'std_hbond_distance', id: 'adv-weight-std-hbond-distance' },
+            { key: 'average_hbond_angle', id: 'adv-weight-average-hbond-angle' },
+            { key: 'rotational_constants_A', id: 'adv-weight-rotational-constants-a' },
+            { key: 'rotational_constants_B', id: 'adv-weight-rotational-constants-b' },
+            { key: 'rotational_constants_C', id: 'adv-weight-rotational-constants-c' }
         ];
 
         const COSMIC_TOLERANCE_INPUTS = [
             { key: 'electronic_energy', id: 'adv-tol-electronic-energy' },
             { key: 'gibbs_free_energy', id: 'adv-tol-gibbs-free-energy' },
             { key: 'homo_energy', id: 'adv-tol-homo-energy' },
-            { key: 'lumo_energy', id: 'adv-tol-lumo-energy' },
             { key: 'homo_lumo_gap', id: 'adv-tol-homo-lumo-gap' },
             { key: 'dipole_moment', id: 'adv-tol-dipole-moment' },
-            { key: 'radius_of_gyration', id: 'adv-tol-radius-of-gyration' },
-            { key: 'rotational_constants_A', id: 'adv-tol-rotational-constants-a' },
-            { key: 'rotational_constants_B', id: 'adv-tol-rotational-constants-b' },
-            { key: 'rotational_constants_C', id: 'adv-tol-rotational-constants-c' },
+            { key: 'vnn_nuclear_repulsion', id: 'adv-tol-vnn-nuclear-repulsion' },
             { key: 'first_vib_freq', id: 'adv-tol-first-vib-freq' },
             { key: 'last_vib_freq', id: 'adv-tol-last-vib-freq' },
+            { key: 'num_hydrogen_bonds', id: 'adv-tol-num-hydrogen-bonds' },
             { key: 'average_hbond_distance', id: 'adv-tol-average-hbond-distance' },
-            { key: 'average_hbond_angle', id: 'adv-tol-average-hbond-angle' }
+            { key: 'std_hbond_distance', id: 'adv-tol-std-hbond-distance' },
+            { key: 'average_hbond_angle', id: 'adv-tol-average-hbond-angle' },
+            { key: 'rotational_constants_A', id: 'adv-tol-rotational-constants-a' },
+            { key: 'rotational_constants_B', id: 'adv-tol-rotational-constants-b' },
+            { key: 'rotational_constants_C', id: 'adv-tol-rotational-constants-c' }
         ];
 
         // Initialize
