@@ -254,7 +254,7 @@ def plot_annotated_dendrogram(
         ax2.add_artist(leg_main)
         leg_bbox_axes = leg_main.get_window_extent().transformed(
             ax2.transAxes.inverted())
-        trust_anchor_x = min(leg_bbox_axes.x1 + 0.02, 0.55)
+        trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.55)
         trust_anchor_y = leg_bbox_axes.y1
 
         ax2.legend(
