@@ -183,13 +183,20 @@ def plot_annotated_dendrogram(
     ax2.set_ylim(bottom=0)
     ax2.grid(True, alpha=0.3)
 
-    # Blank title gives the main legend the same title-row footprint as the
-    # similarity-floor legend, so identical padding -> identical box heights.
-    leg_main = ax2.legend(loc='upper left', fontsize=12, title=' ',
-                          title_fontsize=12, labelspacing=0.6, borderpad=0.6)
+    # The main legend has no title; the similarity-floor legend carries the
+    # "Similarity floor" title and is therefore one row taller. To make both
+    # boxes the same height with their content vertically centred (no empty
+    # title row), we grow the MAIN legend's borderpad to match the trust box.
+    _MAIN_BP = 0.6
+    _MAIN_LS = 0.6
+    _TRUST_BP = 0.6
+    _TRUST_LS = 0.6
+
+    leg_main = ax2.legend(loc='upper left', fontsize=12,
+                          labelspacing=_MAIN_LS, borderpad=_MAIN_BP)
     fig2.tight_layout()
 
-    # Similarity-floor legend anchored to the right of the main legend.
+    # Similarity-floor entries (Pearson floor for each threshold).
     trust_segments = []
     if n_eff is not None and n_eff > 0:
         applied_is_standard = abs(cut_height - STANDARD_T) <= 1e-6
@@ -207,50 +214,54 @@ def plot_annotated_dendrogram(
             trust_segments.append(_fmt_trust_segment("Mojena", float(mojena_threshold)))
 
     if trust_segments:
-        fig2.canvas.draw()
-        ax2.add_artist(leg_main)
-        leg_bbox_axes = leg_main.get_window_extent().transformed(
-            ax2.transAxes.inverted())
-        trust_anchor_x = min(leg_bbox_axes.x1 + 0.005, 0.55)
-        trust_anchor_y = leg_bbox_axes.y1
-
         _trust_kwargs = dict(
+            handles=[Patch(visible=False) for _ in trust_segments],
+            labels=trust_segments,
             loc='upper left',
-            bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
-            bbox_transform=ax2.transAxes,
             fontsize=12,
             title='Similarity floor',
             title_fontsize=12,
             handlelength=0, handletextpad=0,
             borderaxespad=0,
-            borderpad=0.6,
-            labelspacing=0.6,
+            borderpad=_TRUST_BP,
+            labelspacing=_TRUST_LS,
         )
-        _trust_handles = [Patch(visible=False) for _ in trust_segments]
-        trust_leg = ax2.legend(handles=_trust_handles, labels=trust_segments,
-                               **_trust_kwargs)
 
-        # Both legends now share the same structure (title row + 3 entries) and
-        # spacing; the loop only fine-tunes borderpad to pixel-match heights.
-        fontsize_px = 12 * fig2.dpi / 72
+        # 1. Probe the trust box height (fixed; independent of position).
         fig2.canvas.draw()
-        trust_bp = 0.6
+        probe = ax2.legend(**_trust_kwargs)
+        fig2.canvas.draw()
+        h_trust = probe.get_window_extent().height
+        probe.remove()
+
+        # 2. Grow the main legend's borderpad until it matches that height.
+        #    Symmetric padding keeps the main entries vertically centred.
+        fontsize_px = 12 * fig2.dpi / 72
+        main_bp = _MAIN_BP
         for _ in range(12):
-            h_main = leg_main.get_window_extent().height
-            h_trust = trust_leg.get_window_extent().height
-            delta_px = h_main - h_trust
+            leg_main = ax2.legend(loc='upper left', fontsize=12,
+                                  labelspacing=_MAIN_LS, borderpad=main_bp)
+            fig2.canvas.draw()
+            delta_px = h_trust - leg_main.get_window_extent().height
             if abs(delta_px) <= 0.5:
                 break
-            new_bp = max(0.1, trust_bp + delta_px / (2 * fontsize_px))
-            if abs(new_bp - trust_bp) < 0.002:
+            new_bp = max(0.1, main_bp + delta_px / (2 * fontsize_px))
+            if abs(new_bp - main_bp) < 0.002:
                 break
-            trust_leg.remove()
-            _trust_kwargs['borderpad'] = new_bp
-            trust_leg = ax2.legend(
-                handles=[Patch(visible=False) for _ in trust_segments],
-                labels=trust_segments, **_trust_kwargs)
-            trust_bp = new_bp
-            fig2.canvas.draw()
+            main_bp = new_bp
+
+        # 3. Main box is final; anchor the trust box just past its right edge.
+        ax2.add_artist(leg_main)
+        leg_bbox_axes = leg_main.get_window_extent().transformed(
+            ax2.transAxes.inverted())
+        trust_anchor_x = min(leg_bbox_axes.x1 + 0.02, 0.55)
+        trust_anchor_y = leg_bbox_axes.y1
+
+        ax2.legend(
+            bbox_to_anchor=(trust_anchor_x, trust_anchor_y),
+            bbox_transform=ax2.transAxes,
+            **_trust_kwargs,
+        )
 
     fig2.savefig(diag_filename, dpi=150)
     plt.close(fig2)
