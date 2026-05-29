@@ -307,6 +307,16 @@ def calculate_rotational_constants(atomnos, atomcoords):
         return None
 
 
+# Hydrogen-bond detection criteria. These are the single source of truth: the
+# detector below and the per-cluster .dat report (dat_writer) both read them, so
+# the printed "Criterion:" line can never drift from the values actually used.
+HB_MIN_DISTANCE = 1.4   # Minimum H...A distance (Å)
+HB_MAX_DISTANCE = 3.2   # Maximum H...A distance (Å)
+HB_MIN_ANGLE = 30.0     # Minimum D-H...A angle (degrees) for a bond to be counted
+HB_MAX_ANGLE = 180.0    # Maximum D-H...A angle (degrees)
+HB_COVALENT_DH_SEARCH_DISTANCE = 1.4  # D-H covalent bond search limit (Å)
+
+
 def detect_hydrogen_bonds(atomnos, atomcoords):
     """
     Detect hydrogen bonds based on distance and angle criteria.
@@ -330,11 +340,11 @@ def detect_hydrogen_bonds(atomnos, atomcoords):
         # Hydrogen bond criteria
         potential_donor_acceptor_z = {7, 8, 9}  # N, O, F
         hydrogen_atom_num = 1
-        HB_min_dist_actual = 1.4  # Minimum H...A distance (Å)
-        HB_max_dist_actual = 3.2  # Maximum H...A distance (Å)
-        COVALENT_DH_SEARCH_DIST = 1.4  # D-H covalent bond search limit (Å)
-        HB_min_angle_actual = 30.0  # Minimum D-H...A angle (degrees)
-        HB_max_angle_actual = 180.0  # Maximum D-H...A angle (degrees)
+        HB_min_dist_actual = HB_MIN_DISTANCE  # Minimum H...A distance (Å)
+        HB_max_dist_actual = HB_MAX_DISTANCE  # Maximum H...A distance (Å)
+        COVALENT_DH_SEARCH_DIST = HB_COVALENT_DH_SEARCH_DISTANCE  # D-H covalent bond search limit (Å)
+        HB_min_angle_actual = HB_MIN_ANGLE  # Minimum D-H...A angle (degrees)
+        HB_max_angle_actual = HB_MAX_ANGLE  # Maximum D-H...A angle (degrees)
 
         symbols = [atomic_number_to_symbol(n) for n in atomnos]
         atom_labels = [f"{sym}{i+1}" for i, sym in enumerate(symbols)]

@@ -24,7 +24,12 @@ from cosmic_ascec.clustering.energies import (
     hartree_to_ev,
     hartree_to_kcal_mol,
 )
-from cosmic_ascec.clustering.features.geometric import atomic_number_to_symbol
+from cosmic_ascec.clustering.features.geometric import (
+    HB_MAX_DISTANCE,
+    HB_MIN_ANGLE,
+    HB_MIN_DISTANCE,
+    atomic_number_to_symbol,
+)
 from cosmic_ascec.clustering.rmsd import calculate_rmsd
 from cosmic_ascec.clustering.thresholds import (
     pearson_similarity_pct as _pearson_similarity_pct,
@@ -371,14 +376,14 @@ def write_cluster_dat_file(
         f.write("\n")
 
         f.write("Hydrogen bond analysis:\n")
-        HB_min_angle_actual_for_display = 30.0  # Define explicitly for display
-        f.write(f"Criterion: H...A distance between 1.2 Å and 3.2 Å, with H covalently bonded to a donor (O, N, F).\n")
+        HB_min_angle_actual_for_display = HB_MIN_ANGLE  # source of truth: geometric.py
+        f.write(f"Criterion: H...A distance between {HB_MIN_DISTANCE:.1f} Å and {HB_MAX_DISTANCE:.1f} Å, with H covalently bonded to a donor (O, N, F).\n")
         f.write(f"  (For counting, D-H...A angle must be >= {HB_min_angle_actual_for_display:.1f}°)\n")
         for mol_data in cluster_members_data:
             f.write(f"    {mol_data['filename']}:\n")
             num_counted_hb = mol_data.get('num_hydrogen_bonds', 0)
             total_potential_hb = len(mol_data.get('hbond_details', []))
-            f.write(f"        Number of hydrogen bonds counted (angle >= 30.0°): {num_counted_hb} out of {total_potential_hb} potential bonds.\n")
+            f.write(f"        Number of hydrogen bonds counted (angle >= {HB_min_angle_actual_for_display:.1f}°): {num_counted_hb} out of {total_potential_hb} potential bonds.\n")
 
             if mol_data.get('hbond_details'):
                 for hbond in mol_data['hbond_details']:
