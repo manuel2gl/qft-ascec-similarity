@@ -192,8 +192,16 @@ conda config --set solver libmamba 2>/dev/null || true
 # Single combined solve (one solver pass instead of two) with conda-forge
 # as the primary channel. cclib parses ORCA<=5 / Gaussian output; openbabel
 # writes .mol files; xtb is the default annealing backend.
+#
+# xtb is pinned to >=6.7: left unpinned, the combined solve can backtrack to
+# the ancient conda-forge build 6.5.0 (2022), which crashes mid-optimization
+# with a libgfortran I/O error and never writes a "final structure:" block.
+# That makes cosmic extract zero geometries -> zero motifs -> "No motifs_/
+# umotifs_ folder found" at the end of an otherwise green run. Pinning the
+# floor forces a working build (or a loud solver error instead of silent
+# breakage). 6.7.x is statically linked and runs cleanly.
 conda install -c conda-forge --solver=libmamba -y \
-    numpy scipy matplotlib scikit-learn cclib openbabel xtb
+    numpy scipy matplotlib scikit-learn cclib openbabel "xtb>=6.7"
 # orca-pi parses ORCA 6.1+ structured property output. Optional: only used
 # when ORCA 6.1+ is the QM backend; safe to skip on a pure-xtb workflow.
 pip install orca-pi || echo "  (orca-pi install failed; ORCA 6.1+ parsing will fall back to text scrape)"
@@ -201,10 +209,20 @@ pip install orca-pi || echo "  (orca-pi install failed; ORCA 6.1+ parsing will f
 # Sanity-check that xtb is actually callable — the default annealing backend
 # must be on PATH or annealing runs will fail with no useful error.
 if command -v xtb &> /dev/null; then
-    echo "> xtb available: $(xtb --version 2>&1 | head -1 | tr -d '\n')"
+    XTB_VER=$(xtb --version 2>&1 | grep -oP 'version \K[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+    echo "> xtb available: ${XTB_VER:-unknown}"
+    # Guard against a too-old build slipping through (e.g. if the pin above was
+    # relaxed). 6.5.0 and older conda-forge builds crash with a libgfortran I/O
+    # error and produce no usable geometry, which silently breaks cosmic.
+    XTB_MAJOR=$(echo "$XTB_VER" | cut -d. -f1)
+    XTB_MINOR=$(echo "$XTB_VER" | cut -d. -f2)
+    if [ -n "$XTB_MAJOR" ] && { [ "$XTB_MAJOR" -lt 6 ] || { [ "$XTB_MAJOR" -eq 6 ] && [ "$XTB_MINOR" -lt 6 ]; }; }; then
+        echo "  WARNING: xtb $XTB_VER is too old and is known to crash mid-optimization."
+        echo "  Reinstall a working build: conda install -c conda-forge 'xtb>=6.7'"
+    fi
 else
     echo "  WARNING: xtb not found on PATH after conda install."
-    echo "  Try: conda install -c conda-forge xtb"
+    echo "  Try: conda install -c conda-forge 'xtb>=6.7'"
 fi
 
 
