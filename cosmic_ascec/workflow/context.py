@@ -73,6 +73,7 @@ class WorkflowContext:
     last_cosmic_umotif_count: Optional[int] = None
     cosmic_stage_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> representative count
     cosmic_stage_input_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> input structure count
+    cosmic_locked_input_counts: Dict[int, int] = dataclasses.field(default_factory=dict)  # stage index -> redo-locked max input count (first full run wins; redo cannot inflate it)
     refinement_motifs_source: Optional[str] = None
     refinement_completed: Optional[int] = None
     refinement_total: Optional[int] = None

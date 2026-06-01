@@ -8067,6 +8067,27 @@ def execute_replication_stage(context: WorkflowContext, stage: Dict[str, Any]) -
     
     return 0
 
+def _cached_cosmic_input_count(context: "WorkflowContext", stage_num: int) -> Optional[int]:
+    """Return the cosmic input-structure count persisted in the protocol cache.
+
+    Used to re-seed the redo lock on a resumed session so a redo-only resume
+    cannot re-establish (and inflate) the input maximum recorded by the original
+    full run. Returns None when no cache or no stored value is available.
+    """
+    cache_file = getattr(context, 'cache_file', '')
+    if not cache_file:
+        return None
+    try:
+        cache = load_protocol_cache(cache_file) or {}
+    except Exception:
+        return None
+    stages = cache.get('stages', {}) if isinstance(cache, dict) else {}
+    stage_data = stages.get(f"cosmic_{stage_num}", {}) if isinstance(stages, dict) else {}
+    result = stage_data.get('result', {}) if isinstance(stage_data, dict) else {}
+    value = result.get('input_count') if isinstance(result, dict) else None
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
 def find_out_file_in_subdirs(base_dir: str, basename: str):
     """Find .out file in subdirectories, checking shortened basename variants."""
     # Check root first
@@ -12297,21 +12318,45 @@ def execute_cosmic_stage(context: WorkflowContext, stage: Dict[str, Any]) -> int
         if stage_total > 0:
             # Keep summary count stage-local to avoid carrying over previous cosmic values.
             context.cosmic_motifs_created = stage_total
+        def _record_cosmic_input_count(stage_num: int, raw_count: int) -> None:
+            """Persist the cosmic input-structure count under a redo-locked ceiling.
+
+            The first (full) cosmic run for a stage establishes the maximum input
+            population. Redo attempts re-cluster a reduced subset and re-count the
+            output folder, which can momentarily report fewer OR (when stray/duplicate
+            outputs linger) inflate the total above the genuine population. We lock the
+            first value as a hard maximum so redo can never inflate it and the display
+            always returns to that max once the redo subset is merged back in.
+            """
+            if raw_count <= 0:
+                return
+            locked = context.cosmic_locked_input_counts.get(stage_num)
+            if locked is None:
+                # On a resumed session the in-memory lock is empty even though a
+                # genuine full-run count was already persisted to the cache. Seed
+                # the lock from the cached value so a redo-only resume cannot
+                # re-establish (and inflate) the maximum.
+                cached_max = _cached_cosmic_input_count(context, stage_num)
+                locked = cached_max if cached_max and cached_max > 0 else raw_count
+                context.cosmic_locked_input_counts[stage_num] = locked
+                context.cosmic_stage_input_counts[stage_num] = locked
+            else:
+                # Redo run: keep the established maximum (ignore inflated/reduced recount).
+                context.cosmic_stage_input_counts[stage_num] = locked
+
         stage_key = getattr(context, 'current_stage_key', '')
         match = re.search(r'^cosmic_(\d+)$', stage_key)
         if match:
             stage_num = int(match.group(1))
             context.cosmic_stage_counts[stage_num] = stage_total
-            if cosmic_input_count > 0:
-                context.cosmic_stage_input_counts[stage_num] = cosmic_input_count
+            _record_cosmic_input_count(stage_num, cosmic_input_count)
         else:
             # Combined mode runs cosmic while current_stage_key is still optimization/refinement.
             prev_match = re.search(r'^(optimization|refinement)_(\d+)$', stage_key)
             if prev_match:
                 stage_num = int(prev_match.group(2)) + 1
                 context.cosmic_stage_counts[stage_num] = stage_total
-                if cosmic_input_count > 0:
-                    context.cosmic_stage_input_counts[stage_num] = cosmic_input_count
+                _record_cosmic_input_count(stage_num, cosmic_input_count)
         
         if verbose:
             print("\n✓ cosmic analysis completed")
