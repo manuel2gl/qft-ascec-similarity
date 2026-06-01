@@ -1332,6 +1332,14 @@ def perform_clustering_and_analysis(input_source, threshold="auto", file_extensi
             _cosmic_threshold_text = f"COSMIC threshold: tau = {_tau:.4f} ({_method})"
         else:
             _cosmic_threshold_text = f"COSMIC threshold: tau = {_tau:.4f}"
+        # Machine-readable detail line consumed by --th=opt on later refinement
+        # stages (parse_opt_params_from_summary / _OPT_DETAIL_RE). Emitting it
+        # lets a post-refinement cosmic reuse this stage's exact tau.
+        _r = _e.get('r_thresh'); _neff = _e.get('n_eff'); _dmed = _e.get('d_med')
+        if _r is not None and _neff is not None and _dmed is not None and _src:
+            _cosmic_threshold_text += (
+                f"\n  details: tau = {_tau:.4f}, r >= {_r:.4f}, "
+                f"N_f = {_neff:.2f}, d_med = {_dmed:.4f}, source = {_src}")
     else:
         _lines = ["COSMIC threshold (per H-bond group):"]
         for _e in resolved_threshold_entries:

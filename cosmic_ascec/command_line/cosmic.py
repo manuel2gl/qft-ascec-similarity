@@ -211,18 +211,19 @@ MORE INFORMATION:
     # Clustering threshold: default 'auto' detects the elbow of the merge-height
     # curve per case; pass a float to override (e.g. 2.0 for legacy 2-sigma rule).
     parser.add_argument("--threshold", "--th", type=str, default="auto",
-                        metavar="FLOAT|auto|opt|opt-pearson|opt-spread",
+                        metavar="FLOAT|auto|opt",
                         help="UPGMA distance threshold for dendrogram cut. Default 'auto' "
                              "detects the elbow of the merge-height curve per case "
                              "(recommended for atomic clusters and van der Waals systems). "
                              "Pass a float to override: 2.0 for the legacy 2-sigma rule, "
                              "0.5 for tight, 3.0-4.0 for loose clustering. "
                              "'opt' reuses the raw τ resolved by the sibling post-opt cosmic "
-                             "(read from its clustering_summary.txt). "
-                             "'opt-pearson' rebuilds τ from the post-opt Pearson similarity "
-                             "floor using this run's N_f (recommended for post-refinement). "
-                             "'opt-spread' rescales τ by the ratio of median pairwise "
-                             "distances between the post-opt and current scaled matrices.")
+                             "(read from its clustering_summary.txt) — the recommended mode "
+                             "for post-refinement cosmic stages so the partition stays "
+                             "consistent with the preliminary one. "
+                             "('opt-pearson'/'opt-spread' are deprecated: they rebuilt τ from "
+                             "the current run's N_f / median spread, which is unstable on the "
+                             "small refined set; both now behave as 'opt'.)")
 
     # Geometric validation
     parser.add_argument("--rmsd", type=float, nargs='?', const=1.0, default=None, metavar="FLOAT",
@@ -292,43 +293,46 @@ MORE INFORMATION:
     if args.data:
         return run_data_extraction(args.data, out_dir=args.output_dir)
 
-    # Validate --threshold: accept "auto", "opt", "opt-pearson", "opt-spread",
-    # or a float string.
-    _OPT_MODES = {"opt", "opt-pearson", "opt-spread"}
+    # Validate --threshold: accept "auto", "opt", or a float string.
+    # "opt-pearson"/"opt-spread" are deprecated (they rebuilt τ from the current
+    # run's N_f / median spread, which is unstable on the small refined set);
+    # they are still accepted but transparently aliased to "opt" (raw τ reuse).
+    _DEPRECATED_OPT_MODES = {"opt-pearson", "opt-spread"}
     if isinstance(args.threshold, str) and args.threshold.lower() == "auto":
         args.threshold = "auto"
-    elif isinstance(args.threshold, str) and args.threshold.lower() in _OPT_MODES:
-        args.threshold = args.threshold.lower()
+    elif isinstance(args.threshold, str) and args.threshold.lower() == "opt":
+        args.threshold = "opt"
+    elif isinstance(args.threshold, str) and args.threshold.lower() in _DEPRECATED_OPT_MODES:
+        print(f"WARNING: --th={args.threshold.lower()} is deprecated and unstable on "
+              f"refined sets; using --th=opt (raw τ reuse) instead.")
+        args.threshold = "opt"
     else:
         try:
             args.threshold = float(args.threshold)
         except (TypeError, ValueError):
-            parser.error("--threshold must be 'auto', 'opt', 'opt-pearson', "
-                         "'opt-spread', or a number")
+            parser.error("--threshold must be 'auto', 'opt', or a number")
 
     clustering_threshold = args.threshold
 
-    # Resolve any opt-* mode by parsing the sibling post-opt cosmic's
-    # clustering_summary.txt for (τ_opt, r_opt, N_f_opt, d_med_opt). The
-    # transform itself happens later in resolve_clustering_threshold once
-    # the new scaled matrix is available.
-    if isinstance(clustering_threshold, str) and clustering_threshold in _OPT_MODES:
+    # Resolve --th=opt by parsing the sibling post-opt cosmic's
+    # clustering_summary.txt for the raw resolved τ_opt and reusing it directly,
+    # so a post-refinement cosmic keeps the same partition the preliminary found.
+    if isinstance(clustering_threshold, str) and clustering_threshold == "opt":
         _opt_params = resolve_opt_params_from_sibling_cosmic(os.getcwd())
         if _opt_params is None:
-            print(f"WARNING: --th={clustering_threshold} requested but no sibling "
+            print(f"WARNING: --th=opt requested but no sibling "
                   f"cosmic*/clustering_summary.txt with parseable trust-score details "
                   f"was found; falling back to --th=auto.")
             clustering_threshold = "auto"
         else:
             _src_dir = os.path.basename(_opt_params.get("source_dir", "?"))
-            print(f"--th={clustering_threshold} reading from sibling '{_src_dir}': "
-                  f"τ_opt={_opt_params['tau']:.4f}, r_opt={_opt_params['r']:.4f}, "
-                  f"N_f_opt={_opt_params['n_eff']:.2f}, "
-                  f"d_med_opt={_opt_params['d_med']:.4f}, source={_opt_params['source']}")
-            if clustering_threshold == "opt":
-                clustering_threshold = float(_opt_params["tau"])
-            else:
-                clustering_threshold = (clustering_threshold, _opt_params)
+            def _fmt(v, nd=4):
+                return f"{v:.{nd}f}" if isinstance(v, (int, float)) else "n/a"
+            print(f"--th=opt reading from sibling '{_src_dir}': "
+                  f"τ_opt={_fmt(_opt_params['tau'])}, r_opt={_fmt(_opt_params['r'])}, "
+                  f"N_f_opt={_fmt(_opt_params['n_eff'], 2)}, "
+                  f"d_med_opt={_fmt(_opt_params['d_med'])}, source={_opt_params['source']}")
+            clustering_threshold = float(_opt_params["tau"])
     rmsd_validation_threshold = args.rmsd
     output_directory = args.output_dir
     force_reprocess_cache = args.reprocess_files
